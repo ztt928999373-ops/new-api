@@ -5,11 +5,16 @@ $failed = $false
 Write-Host 'Read-only Windows/Docker preflight. No cleanup, deletion, pull or start operations.'
 Write-Host "Project directory: $PSScriptRoot"
 if ($env:OS -ne 'Windows_NT') { throw 'Run this preflight on Windows 11, not in the Codex Linux environment.' }
+$system=Get-CimInstance Win32_OperatingSystem
+Write-Host "Windows: $($system.Caption) version $($system.Version) build $($system.BuildNumber)"
+if ([int]$system.BuildNumber -lt 22000) { Write-Warning 'Windows 11 required'; $failed=$true }
 $drive = Get-PSDrive -Name C
 Write-Host ('C: free {0:N2} GB / used {1:N2} GB' -f ($drive.Free/1GB),($drive.Used/1GB))
 if ($drive.Free -lt $MinimumFreeGB*1GB) { Write-Warning 'Insufficient C: free space; review Docker Desktop disk allocation manually.'; $failed=$true }
 $desktop = Join-Path $env:ProgramFiles 'Docker\Docker\Docker Desktop.exe'
-Write-Host "Docker Desktop executable installed: $(Test-Path $desktop)"
+$installed=Test-Path $desktop
+Write-Host "Docker Desktop executable installed: $installed"
+if (-not $installed) { Write-Warning 'Docker Desktop installation not found in standard location; verify installation manually'; $failed=$true }
 Write-Host "Docker Desktop process running: $([bool](Get-Process -Name 'Docker Desktop' -ErrorAction SilentlyContinue))"
 Get-ChildItem $PSScriptRoot -Force | Select-Object Mode,Name
 foreach ($port in $Ports) {
