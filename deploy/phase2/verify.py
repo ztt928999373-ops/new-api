@@ -13,6 +13,7 @@ OPENER = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.coo
 AUTH = None
 KEY = None
 ROWS = []
+CASES = set()
 
 
 def request(path, data=None, method=None, headers=None, management=False):
@@ -38,7 +39,7 @@ def items(data):
     return data if isinstance(data, list) else data['items']
 
 
-def snapshot():
+def snapshot_once():
     user = api('/api/user/self')
     tokens = items(api('/api/token/?p=1&page_size=100'))
     token = next(row for row in tokens if row['name'] == 'phase2-fixture')
@@ -46,15 +47,30 @@ def snapshot():
     consume = [row for row in logs if row['type'] == 2]
     channels = items(api('/api/channel/?p=1&page_size=100'))
     total = sum(row['quota'] for row in consume)
-    assert user['quota'] == 100000000 - total
-    assert token['remain_quota'] == 1000000 - total and token['used_quota'] == total
+    assert user['quota'] == 100000000 - total, f'user quota {user["quota"]} != ledger {100000000-total}'
+    assert token['remain_quota'] == 1000000 - total and token['used_quota'] == total, f'token remaining {token["remain_quota"]}, used {token["used_quota"]}, ledger {total}'
     assert len(channels) == 7 and len(tokens) == 1
     summary = {'quota': user['quota'], 'token_remaining': token['remain_quota'],
                'used_quota': total, 'consume_logs': len(consume), 'channels': len(channels)}
     return summary
 
 
+def snapshot():
+    # HTTP completion can precede asynchronous settlement/log visibility.
+    # Require the same invariant; bound the wait rather than weakening it.
+    deadline = time.monotonic() + 5
+    while True:
+        try:
+            return snapshot_once()
+        except AssertionError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(.05)
+
+
 def check(name, fn):
+    if CASES and name not in CASES:
+        return
     try:
         detail = fn()
         row = {'case': name, 'status': 'PASS', **(detail or {})}
@@ -141,19 +157,29 @@ def protocol_case(protocol, stream=False, tool=False, model=None, status_expecte
 
 if __name__ == '__main__':
     p = argparse.ArgumentParser()
+    p.add_argument('--resume', action='store_true', help='reuse only the dedicated synthetic fixture, never reinitialize')
+    p.add_argument('--case', action='append', default=[], help='run only named cases when resuming')
     p.add_argument('--inspect', action='store_true')
     p.add_argument('--restore-probe', action='store_true')
     args = p.parse_args()
+    CASES = set(args.case)
+    known = {f'{protocol}-stream={stream}-tool={tool}' for protocol in ['chat', 'responses', 'messages', 'gemini']
+             for stream, tool in [(False, False), (True, False), (False, True), (True, True)]}
+    known.update(['mock-rate', 'mock-error', 'mock-timeout', 'chat-failover'])
+    if CASES and not args.resume:
+        p.error('--case requires --resume')
+    if CASES - known:
+        p.error('unknown case name; refusing an empty or partial false-success run')
     password = os.environ['TEST_ADMIN_PASSWORD']
     setup = api('/api/setup')
-    if not args.inspect and not args.restore_probe:
+    if not args.inspect and not args.restore_probe and not args.resume:
         assert not setup['status'], 'fresh test volume required; existing data is never overwritten'
         api('/api/setup', {'username': 'phase2root', 'password': password, 'confirmPassword': password,
                           'SelfUseModeEnabled': True, 'DemoSiteEnabled': False})
     login = api('/api/user/login', {'username': 'phase2root', 'password': password})
     AUTH = login['access_token']
     models = ['mock-text', 'mock-tool', 'mock-rate', 'mock-error', 'mock-timeout', 'mock-fallback']
-    if not args.inspect and not args.restore_probe:
+    if not args.inspect and not args.restore_probe and not args.resume:
         for k, v in {'RegisterEnabled': 'false', 'PasswordResetEnabled': 'false', 'RetryTimes': '0',
                      'ModelRatio': json.dumps(dict.fromkeys(models, 1)),
                      'CompletionRatio': json.dumps(dict.fromkeys(models, 2)), 'GroupRatio': '{"default":1}'}.items():

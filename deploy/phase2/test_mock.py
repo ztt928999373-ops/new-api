@@ -58,5 +58,53 @@ class FixtureTests(unittest.TestCase):
         self.assertEqual(self.post('/ok/v1/chat/completions', input='x'*65537)[0], 413)
 
 
+class DatabaseFingerprintTests(unittest.TestCase):
+    def test_case_filter_rejects_unknown_name(self):
+        import pathlib
+        import subprocess
+        import sys
+        script = str(pathlib.Path(__file__).with_name('verify.py'))
+        for flags in [('--resume', '--case', 'unknown'), ('--case', 'chat-failover')]:
+            result = subprocess.run([sys.executable, script, *flags], capture_output=True)
+            self.assertEqual(result.returncode, 2)
+
+    def test_integrity_fingerprints_and_redaction(self):
+        import pathlib
+        import sqlite3
+        import subprocess
+        import sys
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory, 'backup.db')
+            connection = sqlite3.connect(path)
+            for table in ['users', 'tokens', 'channels', 'logs']:
+                connection.execute(f'CREATE TABLE {table} (id INTEGER, value TEXT)')
+                connection.execute(f'INSERT INTO {table} VALUES (1, ?)', ('synthetic-secret-never-emit',))
+            connection.commit()
+            cmd = [sys.executable, str(pathlib.Path(__file__).with_name('db_check.py')), str(path)]
+            first = subprocess.check_output(cmd, text=True)
+            self.assertNotIn('synthetic-secret-never-emit', first)
+            data = json.loads(first)
+            self.assertEqual(data['integrity'], 'ok')
+            self.assertEqual(data['tables']['tokens']['rows'], 1)
+            connection.execute("UPDATE tokens SET value='changed'")
+            connection.commit()
+            second = json.loads(subprocess.check_output(cmd, text=True))
+            self.assertNotEqual(data['tables']['tokens']['sha256'], second['tables']['tokens']['sha256'])
+            self.assertEqual(data['tables']['users']['sha256'], second['tables']['users']['sha256'])
+            connection.close()
+
+    def test_corrupt_database_is_rejected(self):
+        import pathlib
+        import subprocess
+        import sys
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory, 'bad.db')
+            path.write_bytes(b'not a database')
+            result = subprocess.run([sys.executable, str(pathlib.Path(__file__).with_name('db_check.py')), str(path)], capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+
+
 if __name__ == '__main__':
     unittest.main()
