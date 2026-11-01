@@ -286,7 +286,7 @@ func validateModalities(input, output []string) error {
 }
 
 func validateReferencePrices(p catalog.ReferencePricing, sources map[string]bool, asOf time.Time) error {
-	if p.Currency != "USD" || p.Unit != "per_1m_tokens" || len(p.Quotes) == 0 {
+	if p.PriceType != "official_reference" || p.Currency != "USD" || p.Unit != "per_1m_tokens" || len(p.Quotes) == 0 {
 		return errors.New("official price currency/unit/quotes missing")
 	}
 	if err := checkedDate(p.CheckedOn, asOf); err != nil {
@@ -342,8 +342,15 @@ func validateReferencePrices(p catalog.ReferencePricing, sources map[string]bool
 		if charge.EffectiveFrom != nil && charge.EffectiveUntil != nil && *charge.EffectiveFrom >= *charge.EffectiveUntil {
 			return errors.New("empty additional charge interval")
 		}
-		if charge.Kind == "" || !decimal.MatchString(charge.Amount) || charge.Unit == "" || charge.Notes == "" {
+		if charge.Kind != "cache_storage" || len(charge.Amount) > 32 || !decimal.MatchString(charge.Amount) || charge.Unit != "per_1m_token_hours" || charge.Notes == "" {
 			return errors.New("invalid additional reference charge")
+		}
+	}
+	for i, charge := range p.AdditionalCharges {
+		for _, other := range p.AdditionalCharges[i+1:] {
+			if charge.Kind == other.Kind && intervalsOverlap(charge.EffectiveFrom, charge.EffectiveUntil, other.EffectiveFrom, other.EffectiveUntil) {
+				return errors.New("overlapping additional reference charge intervals")
+			}
 		}
 	}
 	return nil
@@ -382,17 +389,30 @@ func validateTokenPrices(prices catalog.TokenPrices) error {
 }
 
 func validateSellingPrices(p catalog.SellingPricing, asOf time.Time) error {
+	if p.PriceType != "platform_selling" {
+		return errors.New("platform selling price type is required")
+	}
 	if err := validateTokenPrices(p.Prices); err != nil {
 		return err
 	}
 	if p.State == "unconfigured" {
-		if p.Currency != nil || p.Unit != nil || p.Source != nil || p.PricingVersion != nil || p.UpdatedOn != nil || p.Prices.Input != nil || p.Prices.Output != nil || p.Prices.CacheRead != nil || p.Prices.CacheWrite != nil {
+		if p.Currency != nil || p.Unit != nil || p.Source != nil || p.PricingVersion != nil || p.UpdatedOn != nil || p.EffectiveFrom != nil || p.EffectiveUntil != nil || p.Prices.Input != nil || p.Prices.Output != nil || p.Prices.CacheRead != nil || p.Prices.CacheWrite != nil {
 			return errors.New("unconfigured selling prices must stay null")
 		}
 		return nil
 	}
 	if p.State != "configured" || p.Currency == nil || !currency.MatchString(*p.Currency) || p.Unit == nil || *p.Unit != "per_1m_tokens" || p.Source == nil || *p.Source != "new_api_effective_pricing" || p.PricingVersion == nil || *p.PricingVersion == "" || p.UpdatedOn == nil {
 		return errors.New("platform prices require separate effective-pricing provenance")
+	}
+	for _, date := range []*string{p.EffectiveFrom, p.EffectiveUntil} {
+		if date != nil {
+			if _, err := time.Parse(time.DateOnly, *date); err != nil {
+				return errors.New("invalid selling price effective date")
+			}
+		}
+	}
+	if p.EffectiveFrom != nil && p.EffectiveUntil != nil && *p.EffectiveFrom >= *p.EffectiveUntil {
+		return errors.New("empty/inverted selling price interval")
 	}
 	return checkedDate(*p.UpdatedOn, asOf)
 }

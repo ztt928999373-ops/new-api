@@ -80,6 +80,7 @@ type AdditionalCharge struct {
 }
 
 type ReferencePricing struct {
+	PriceType         string             `json:"price_type"` // official_reference
 	Currency          string             `json:"currency"`
 	Unit              string             `json:"unit"`
 	CheckedOn         string             `json:"checked_on"`
@@ -92,6 +93,7 @@ type ReferencePricing struct {
 // SellingPricing is intentionally not initialized from ReferencePricing.
 // A future integration must supply effective New API prices and their version.
 type SellingPricing struct {
+	PriceType      string      `json:"price_type"` // platform_selling
 	State          string      `json:"state"`
 	Currency       *string     `json:"currency"`
 	Unit           *string     `json:"unit"`
@@ -99,6 +101,8 @@ type SellingPricing struct {
 	Source         *string     `json:"source"`
 	PricingVersion *string     `json:"pricing_version"`
 	UpdatedOn      *string     `json:"updated_on"`
+	EffectiveFrom  *string     `json:"effective_from"`
+	EffectiveUntil *string     `json:"effective_until"` // exclusive
 }
 
 type Verification struct {

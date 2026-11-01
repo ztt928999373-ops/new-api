@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "version": "2026-11-01.1",
+  "version": "2026-11-01.2",
   "verified_on": "2026-11-01",
   "models": [
     {
@@ -84,7 +84,8 @@
             "conditions": "Standard non-regional paid text-token rates. Cache population has no additional cache-write charge; ordinary input remains billable. No separate token cache-write rate is assigned, so cache_write is null."
           }
         ],
-        "additional_charges": []
+        "additional_charges": [],
+        "price_type": "official_reference"
       },
       "platform_selling_prices": {
         "state": "unconfigured",
@@ -98,7 +99,10 @@
         },
         "source": null,
         "pricing_version": null,
-        "updated_on": null
+        "updated_on": null,
+        "price_type": "platform_selling",
+        "effective_from": null,
+        "effective_until": null
       },
       "platform_support": {
         "overall": {
@@ -278,7 +282,8 @@
             "conditions": "Same standard rates; cache write selects 1-hour TTL. These are alternative TTL quotes, not additive charges."
           }
         ],
-        "additional_charges": []
+        "additional_charges": [],
+        "price_type": "official_reference"
       },
       "platform_selling_prices": {
         "state": "unconfigured",
@@ -292,7 +297,10 @@
         },
         "source": null,
         "pricing_version": null,
-        "updated_on": null
+        "updated_on": null,
+        "price_type": "platform_selling",
+        "effective_from": null,
+        "effective_until": null
       },
       "platform_support": {
         "overall": {
@@ -469,7 +477,8 @@
             "effective_from": null,
             "effective_until": null
           }
-        ]
+        ],
+        "price_type": "official_reference"
       },
       "platform_selling_prices": {
         "state": "unconfigured",
@@ -483,7 +492,10 @@
         },
         "source": null,
         "pricing_version": null,
-        "updated_on": null
+        "updated_on": null,
+        "price_type": "platform_selling",
+        "effective_from": null,
+        "effective_until": null
       },
       "platform_support": {
         "overall": {
@@ -683,7 +695,8 @@
             "unit": "per_1m_token_hours",
             "notes": "Announced USD per million cached tokens per hour from 2027-01-01; separate storage charge."
           }
-        ]
+        ],
+        "price_type": "official_reference"
       },
       "platform_selling_prices": {
         "state": "unconfigured",
@@ -697,7 +710,10 @@
         },
         "source": null,
         "pricing_version": null,
-        "updated_on": null
+        "updated_on": null,
+        "price_type": "platform_selling",
+        "effective_from": null,
+        "effective_until": null
       },
       "platform_support": {
         "overall": {

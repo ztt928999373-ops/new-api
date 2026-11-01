@@ -84,6 +84,7 @@ func TestPrivateAssignmentsNeverEnterPublicJSON(t *testing.T) {
 
 func TestReferencePriceDatesAndAlternativeCacheTTLs(t *testing.T) {
 	c := fixture(t)
+	assert.Nil(t, c.Models[0].OfficialReferencePrices.Quotes[0].Prices.CacheWrite)
 	google := c.Models[3].OfficialReferencePrices
 	for _, test := range []struct{ date, input string }{{"2026-12-31", "0.75"}, {"2027-01-01", "1.50"}} {
 		t.Run(test.date, func(t *testing.T) {
@@ -108,6 +109,58 @@ func TestReferencePriceDatesAndAlternativeCacheTTLs(t *testing.T) {
 	assert.Equal(t, "4.00", *quotes[1].Prices.CacheWrite)
 	assert.Nil(t, c.Models[2].OfficialReferencePrices.Quotes[0].Prices.CacheWrite)
 	assert.Equal(t, "per_1m_token_hours", c.Models[2].OfficialReferencePrices.AdditionalCharges[0].Unit)
+	assert.Equal(t, "0.03", *c.Models[2].OfficialReferencePrices.Quotes[0].Prices.CacheRead)
+	assert.Equal(t, "1.00", c.Models[2].OfficialReferencePrices.AdditionalCharges[0].Amount)
+	require.Len(t, google.AdditionalCharges, 2)
+	assert.Equal(t, "0.50", google.AdditionalCharges[0].Amount)
+	assert.Equal(t, "2027-01-01", *google.AdditionalCharges[0].EffectiveUntil)
+	assert.Equal(t, "1.00", google.AdditionalCharges[1].Amount)
+	assert.Equal(t, "2027-01-01", *google.AdditionalCharges[1].EffectiveFrom)
+	for _, charge := range google.AdditionalCharges {
+		assert.Equal(t, "cache_storage", charge.Kind)
+		assert.Equal(t, "per_1m_token_hours", charge.Unit)
+	}
+}
+
+func TestPriceMetadataIsExplicitOnPublicWire(t *testing.T) {
+	raw, err := json.Marshal(PublicView(fixture(t)))
+	require.NoError(t, err)
+	var wire map[string]any
+	require.NoError(t, json.Unmarshal(raw, &wire))
+	for _, item := range wire["models"].([]any) {
+		m := item.(map[string]any)
+		p := m["official_reference_prices"].(map[string]any)
+		assert.Equal(t, "official_reference", p["price_type"])
+		assert.Equal(t, "USD", p["currency"])
+		assert.Equal(t, "per_1m_tokens", p["unit"])
+		assert.Equal(t, "2026-11-01", p["checked_on"])
+		assert.NotEmpty(t, p["source_ids"])
+		for _, list := range []string{"quotes", "additional_charges"} {
+			for _, entry := range p[list].([]any) {
+				q := entry.(map[string]any)
+				assert.Contains(t, q, "effective_from")
+				assert.Contains(t, q, "effective_until")
+			}
+		}
+		s := m["platform_selling_prices"].(map[string]any)
+		assert.Equal(t, "platform_selling", s["price_type"])
+		for _, key := range []string{"currency", "unit", "source", "updated_on", "effective_from", "effective_until"} {
+			assert.Contains(t, s, key)
+			assert.Nil(t, s[key])
+		}
+	}
+}
+
+func TestConfiguredSellingPriceMetadataDoesNotUseReferencePrices(t *testing.T) {
+	typeName, currency, unit, source, version, day := "platform_selling", "CNY", "per_1m_tokens", "new_api_effective_pricing", "fixture-only", "2026-11-01"
+	p := catalog.SellingPricing{PriceType: typeName, State: "configured", Currency: &currency, Unit: &unit, Source: &source, PricingVersion: &version, UpdatedOn: &day, EffectiveFrom: &day}
+	require.NoError(t, validateSellingPrices(p, reviewDay))
+	assert.Equal(t, catalog.TokenPrices{}, p.Prices, "unknown amounts must stay null even with known metadata")
+	bad := "not-a-date"
+	p.EffectiveUntil = &bad
+	assert.Error(t, validateSellingPrices(p, reviewDay))
+	p.EffectiveUntil = &day
+	assert.Error(t, validateSellingPrices(p, reviewDay), "empty intervals must be rejected")
 }
 
 func TestValidationRejectsMisleadingCatalogs(t *testing.T) {
@@ -117,6 +170,25 @@ func TestValidationRejectsMisleadingCatalogs(t *testing.T) {
 	}{
 		{"duplicate model", func(c *catalog.Catalog) { c.Models[1].PublicModelID = c.Models[0].PublicModelID }},
 		{"unknown schema", func(c *catalog.Catalog) { c.SchemaVersion = 2 }},
+		{"missing reference type", func(c *catalog.Catalog) { c.Models[0].OfficialReferencePrices.PriceType = "" }},
+		{"mixed selling type", func(c *catalog.Catalog) { c.Models[0].PlatformSellingPrices.PriceType = "official_reference" }},
+		{"missing currency", func(c *catalog.Catalog) { c.Models[0].OfficialReferencePrices.Currency = "" }},
+		{"wrong token unit", func(c *catalog.Catalog) { c.Models[0].OfficialReferencePrices.Unit = "per_token" }},
+		{"missing price check date", func(c *catalog.Catalog) { c.Models[0].OfficialReferencePrices.CheckedOn = "" }},
+		{"storage in token units", func(c *catalog.Catalog) {
+			c.Models[2].OfficialReferencePrices.AdditionalCharges[0].Unit = "per_1m_tokens"
+		}},
+		{"unknown storage kind", func(c *catalog.Catalog) {
+			c.Models[2].OfficialReferencePrices.AdditionalCharges[0].Kind = "cache_write"
+		}},
+		{"overlapping storage dates", func(c *catalog.Catalog) {
+			s := "2026-12-31"
+			c.Models[3].OfficialReferencePrices.AdditionalCharges[1].EffectiveFrom = &s
+		}},
+		{"unconfigured effective date", func(c *catalog.Catalog) {
+			s := "2026-11-01"
+			c.Models[0].PlatformSellingPrices.EffectiveFrom = &s
+		}},
 		{"missing sources", func(c *catalog.Catalog) { c.Models[0].Sources = nil }},
 		{"unofficial source", func(c *catalog.Catalog) { c.Models[0].Sources[0].URL = "https://third-party.invalid/spec" }},
 		{"source credential", func(c *catalog.Catalog) {

@@ -55,13 +55,24 @@ its actual route configuration changes; no such routing integration is added her
 
 - `official_reference_prices`: documented standard paid reference rates, in USD
   per 1,000,000 tokens. Separate input, output, cache-read and cache-write fields.
+- `price_type` is explicitly `official_reference` or `platform_selling`, never
+  inferred from an amount. All reference quotes and additional charges inherit
+  currency, official `source_ids`, `checked_on` and `official_updated_on` from
+  their enclosing reference-price object. Each additional charge overrides the
+  token unit with its own unit; `cache_storage` must use `per_1m_token_hours`.
 - `platform_selling_prices`: separate effective New API sale-price provenance;
   currently `unconfigured`, with all four amounts, currency/unit/source/version
-  and update date null. It must not be filled by copying official reference rates.
+  and update/effective dates null. It must not be filled by copying official
+  reference rates. A configured price uses New API provenance, not an official
+  manufacturer URL as a substitute for the actual platform price source.
 - Amounts are nullable decimal strings. `null` means unknown/not separately
   quoted, not zero or free. An explicit `"0"` remains distinct.
 - `checked_on` is the documentation verification date, not a claimed official
   price-change date. `official_updated_on` stays null when not stated.
+- `effective_from` and `effective_until` are explicit nullable fields on every
+  quote, storage charge and platform sale-price object. An unknown official
+  effective date remains null; it must not be replaced with the verification
+  date. No price value was changed during the final metadata review.
 - Quote end dates are exclusive. `ReferenceQuotesOn` selects dated documentation
   only; it performs no charge calculation. An unspecified start does not support
   historical-price claims before `checked_on`.
@@ -141,3 +152,34 @@ projection, dated rate transitions, cache TTL alternatives, invalid sources and
 prices, all five verification states, evidence mismatch, and independent loads.
 They use no provider API, database, Docker container or real credential. Unit
 tests are not model-specific Mock calls or actual supplier verification.
+
+## Pre-merge review (2026-11-01)
+
+The PR still contains only the five catalog files. The metadata correction adds
+explicit price types and nullable sale-price effective dates, rejects storage
+fees in token units or overlapping storage periods, and changes no reviewed
+price amount, source or official effective interval.
+
+- Go 1.26.10: the focused unit run passed 10 top-level tests, 54 checks including
+  subtests. The race/coverage run passed (validator statement coverage 87.1%);
+  `go vet` and `git diff --check` passed.
+- Bun 1.4.4, frozen lockfile, no package/lockfile changes: `bun run typecheck`
+  passed for 1,405 files across two projects.
+- `bun run lint` failed with 155 errors and 66 warnings. Running the same command
+  on an extracted `product/v1` frontend with the same installed dependencies
+  produced identical diagnostic sets.
+- `node scripts/add-copyright.mjs --check` failed for 24 unchanged frontend
+  files. The baseline produced byte-identical output. Check mode changed no file.
+- `bun run test` was started but interrupted before a completed-suite result;
+  it is not recorded as passing.
+- The focused frontend command `bun run test --
+  src/features/pricing/__tests__/dynamic-price.test.ts
+  src/features/pricing/__tests__/sorting.test.ts` passed both files and all
+  37 tests. No frontend source or existing pricing implementation was changed.
+- A separate Node consumer check passed JSON round-tripping, explicit nulls,
+  price provenance, private-field exclusion, the two Claude cache TTL prices,
+  Google storage units, and the 2027 Google price/storage transition. This is
+  a wire-contract check, not a React UI integration test.
+
+The existing frontend failures are not repaired by this catalog-only change.
+The PR must remain Draft under the requested all-checks-pass readiness gate.
