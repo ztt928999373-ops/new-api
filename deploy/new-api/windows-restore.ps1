@@ -32,4 +32,11 @@ try {
     if ($before.fingerprint -ne $after.fingerprint) { throw 'Restored API ledger fingerprint differs' }
     Invoke-Phase2Compose -Project $project -EnvFile $envFile -Arguments @('exec','-T','mock','python','/phase2/verify.py','--restore-probe')
     Write-Host "Independent restored project $project preserved at http://127.0.0.1:$Port. Source project and volume were not overwritten."
+} catch {
+    $restoreError=$_
+    # Roll back availability of the NEW restore project only. Keep all evidence/data.
+    try { Invoke-Phase2Compose -Project $project -EnvFile $envFile -Arguments @('stop') }
+    catch { Write-Warning "Could not stop failed restore project $project; inspect this project manually." }
+    Write-Warning "Restore failed. Project $project and its independent volume are preserved for inspection. Source project/database were never overwritten."
+    throw $restoreError
 } finally { $env:NEW_API_PORT=$previous }

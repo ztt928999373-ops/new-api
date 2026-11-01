@@ -18,6 +18,12 @@ switch ($Action) {
     }
     Start {
         if (-not (Test-Path $script:Phase2Env)) { throw 'Run Init first' }
+        # First start must never adopt an existing project or data volume.
+        $existing=@(Invoke-Phase2Compose -Arguments @('ps','--all','--quiet'))
+        $volumes=@(& docker volume ls --format '{{.Name}}')
+        if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect existing Docker volumes' }
+        if ($existing.Count -or $volumes -contains ($script:Phase2Project+'_new-api-phase2-data')) { throw 'Existing phase2 containers or database volume found. Preserved without startup/recreation; use Inspect/Restart only for your already initialized environment.' }
+        if ($env:NEW_API_PORT -and $env:NEW_API_PORT -ne '3077') { throw 'Ambient NEW_API_PORT must not override the main test port 3077' }
         Invoke-Phase2Compose -Arguments @('config','--quiet')
         Invoke-Phase2Compose -Arguments @('pull')
         Invoke-Phase2Compose -Arguments @('up','-d','--wait')

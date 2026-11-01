@@ -5,8 +5,8 @@ $dir=Join-Path $script:Phase2Local ('backups/'+(Get-Date -Format 'yyyyMMdd-HHmms
 New-Item -ItemType Directory $dir | Out-Null
 # Stop all writers/viewers; never copy a live SQLite DB. Source volume remains intact.
 $fingerprint=Get-Phase2Fingerprint
-Invoke-Phase2Compose -Arguments @('stop')
 try {
+    Invoke-Phase2Compose -Arguments @('stop')
     Invoke-Phase2Compose -Arguments @('cp','new-api:/data',(Join-Path $dir 'data'))
     $summary=Invoke-Phase2DbCheck -DataDirectory (Join-Path $dir 'data')
     [IO.File]::WriteAllText((Join-Path $dir 'database-summary.json'),($summary -join "`n"),(New-Object Text.UTF8Encoding($false)))

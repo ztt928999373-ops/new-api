@@ -11,11 +11,19 @@ if ([int]$system.BuildNumber -lt 22000) { Write-Warning 'Windows 11 required'; $
 $drive = Get-PSDrive -Name C
 Write-Host ('C: free {0:N2} GB / used {1:N2} GB' -f ($drive.Free/1GB),($drive.Used/1GB))
 if ($drive.Free -lt $MinimumFreeGB*1GB) { Write-Warning 'Insufficient C: free space; review Docker Desktop disk allocation manually.'; $failed=$true }
-$desktop = Join-Path $env:ProgramFiles 'Docker\Docker\Docker Desktop.exe'
-$installed=Test-Path $desktop
-Write-Host "Docker Desktop executable installed: $installed"
-if (-not $installed) { Write-Warning 'Docker Desktop installation not found in standard location; verify installation manually'; $failed=$true }
-Write-Host "Docker Desktop process running: $([bool](Get-Process -Name 'Docker Desktop' -ErrorAction SilentlyContinue))"
+# Executable location is evidence, not the engine-readiness gate.
+$desktopPaths=@()
+if ($env:ProgramFiles) { $desktopPaths += Join-Path $env:ProgramFiles 'Docker/Docker/Docker Desktop.exe' }
+if ($env:LOCALAPPDATA) {
+    $desktopPaths += Join-Path $env:LOCALAPPDATA 'Programs/DockerDesktop/Docker Desktop.exe'
+    $desktopPaths += Join-Path $env:LOCALAPPDATA 'Programs/Docker/Docker/Docker Desktop.exe'
+    $desktopPaths += Join-Path $env:LOCALAPPDATA 'Docker/Docker Desktop.exe'
+}
+$desktopProcesses=@(Get-Process -Name 'Docker Desktop','com.docker.backend' -ErrorAction SilentlyContinue)
+$installedPaths=@($desktopPaths | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
+Write-Host "Docker Desktop executable located: $([bool]$installedPaths.Count) (Per-user / All-users)"
+Write-Host "Docker Desktop/backend process running: $([bool]$desktopProcesses.Count)"
+if (-not $installedPaths.Count) { Write-Warning 'Executable path not located; use Docker Server and Desktop process evidence below. This alone does not fail preflight.' }
 Get-ChildItem $PSScriptRoot -Force | Select-Object Mode,Name
 foreach ($port in $Ports) {
     $listeners = @(Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue)
@@ -24,7 +32,9 @@ foreach ($port in $Ports) {
 }
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { Write-Warning 'Docker CLI missing; install Docker Desktop/WSL2 and reopen PowerShell.'; exit 1 }
 docker version
-if ($LASTEXITCODE -ne 0) { Write-Warning 'Docker daemon unavailable; start Docker Desktop and wait for Linux engine.'; exit 1 }
+if ($LASTEXITCODE -ne 0) { Write-Warning 'Docker Server unavailable, regardless of executable/process detection; start Docker Desktop and wait for Linux engine.'; exit 1 }
+Write-Host 'Docker Server reachable: True'
+if (-not $desktopProcesses.Count) { Write-Warning 'Desktop process not observed, but Server is reachable; verify the active Docker context targets your local Desktop.' }
 docker compose version
 if ($LASTEXITCODE -ne 0) { $failed=$true }
 $kind = docker info --format '{{.OSType}}'
