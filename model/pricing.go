@@ -25,6 +25,10 @@ type PricingPluginVariant struct {
 }
 
 type Pricing struct {
+	// PriceConfigured reports at least one available static or dynamic price configuration.
+	// It does not validate the expression, guarantee every provider price, or change billing.
+	PriceConfigured        bool                                 `json:"price_configured"`
+	PriceConfiguration     string                               `json:"price_configuration"` // static, dynamic, mixed, unconfigured
 	BillingPluginVariants  []PricingPluginVariant               `json:"billing_plugin_variants,omitempty"`
 	ModelName              string                               `json:"model_name"`
 	Description            string                               `json:"description,omitempty"`
@@ -324,6 +328,7 @@ func updatePricing() {
 	}
 
 	pricingMap = make([]Pricing, 0)
+	configuredRatios := ratio_setting.GetModelRatioCopy()
 	pluginGeneration := jsplugin.DefaultRegistry.Generation()
 	for model, groups := range modelGroupsMap {
 		pricing := Pricing{
@@ -345,9 +350,11 @@ func updatePricing() {
 		}
 		modelPrice, findPrice := ratio_setting.GetModelPrice(model, false)
 		if findPrice {
+			pricing.PriceConfigured = true
 			pricing.ModelPrice = modelPrice
 			pricing.QuotaType = 1
 		} else {
+			_, pricing.PriceConfigured = configuredRatios[ratio_setting.FormatMatchingModelName(model)]
 			modelRatio, _, _ := ratio_setting.GetModelRatio(model)
 			pricing.ModelRatio = modelRatio
 			pricing.CompletionRatio = ratio_setting.GetCompletionRatio(model)
@@ -425,6 +432,24 @@ func updatePricing() {
 				})
 			}
 		}
+		staticConfigured := pricing.PriceConfigured
+		dynamicConfigured := pricing.BillingMode == billing_setting.BillingModeTieredExpr && strings.TrimSpace(pricing.BillingExpr) != ""
+		for _, variant := range pricing.BillingPluginVariants {
+			if variant.BillingMode == billing_setting.BillingModeTieredExpr && strings.TrimSpace(variant.BillingExpr) != "" {
+				dynamicConfigured = true
+			}
+		}
+		switch {
+		case staticConfigured && dynamicConfigured:
+			pricing.PriceConfiguration = "mixed"
+		case dynamicConfigured:
+			pricing.PriceConfiguration = "dynamic"
+		case staticConfigured:
+			pricing.PriceConfiguration = "static"
+		default:
+			pricing.PriceConfiguration = "unconfigured"
+		}
+		pricing.PriceConfigured = staticConfigured || dynamicConfigured
 		pricingMap = append(pricingMap, pricing)
 	}
 

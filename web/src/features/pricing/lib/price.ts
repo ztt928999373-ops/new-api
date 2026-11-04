@@ -16,6 +16,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { t } from 'i18next'
+
 import { formatBillingCurrencyFromUSD } from '@/lib/currency'
 
 import { QUOTA_TYPE_VALUES, TOKEN_UNIT_DIVISORS } from '../constants'
@@ -65,13 +67,22 @@ export function calculateTokenPrice(
   type: PriceType,
   ratio: number
 ): number {
+  if (
+    model.price_configured === false ||
+    model.price_configuration === 'dynamic' ||
+    !hasRatio(model.model_ratio)
+  ) {
+    return Number.NaN
+  }
   const base = model.model_ratio * 2 * ratio
 
   switch (type) {
     case 'input':
       return base
     case 'output':
-      return base * model.completion_ratio
+      return hasRatio(model.completion_ratio)
+        ? base * Number(model.completion_ratio)
+        : Number.NaN
     case 'cache':
       return hasRatio(model.cache_ratio)
         ? base * Number(model.cache_ratio)
@@ -98,8 +109,13 @@ export function calculateTokenPrice(
   }
 }
 
-function hasRatio(value: number | null | undefined): boolean {
-  return value !== undefined && value !== null && Number.isFinite(Number(value))
+function hasRatio(value: unknown): boolean {
+  if (typeof value === 'number') return Number.isFinite(value)
+  return (
+    typeof value === 'string' &&
+    value.trim() !== '' &&
+    Number.isFinite(Number(value))
+  )
 }
 
 /**
@@ -154,6 +170,7 @@ export function formatPrice(
   if (model.quota_type === QUOTA_TYPE_VALUES.REQUEST) {
     return '-'
   }
+  if (model.price_configured === false) return t('Price not configured')
 
   const displayGroupRatio = getDisplayGroupRatio(model, selectedGroup)
 
@@ -165,6 +182,7 @@ export function formatPrice(
     usdExchangeRate
   )
 
+  if (!Number.isFinite(priceInUSD)) return t('Pending verification')
   const price = priceInUSD / TOKEN_UNIT_DIVISORS[tokenUnit]
   return formatBillingCurrencyFromUSD(price, {
     showSymbol: showCurrencySymbol,
@@ -190,6 +208,7 @@ export function formatGroupPrice(
   if (model.quota_type === QUOTA_TYPE_VALUES.REQUEST) {
     return '-'
   }
+  if (model.price_configured === false) return t('Price not configured')
 
   const ratio = getConfiguredGroupRatio(groupRatio, group)
   let priceInUSD = calculateTokenPrice(model, type, ratio)
@@ -201,6 +220,7 @@ export function formatGroupPrice(
     usdExchangeRate
   )
 
+  if (!Number.isFinite(priceInUSD)) return t('Pending verification')
   const price = priceInUSD / TOKEN_UNIT_DIVISORS[tokenUnit]
   return formatBillingCurrencyFromUSD(price, {
     digitsLarge: 4,
@@ -223,9 +243,13 @@ export function formatFixedPrice(
   if (model.quota_type !== QUOTA_TYPE_VALUES.REQUEST) {
     return '-'
   }
+  if (model.price_configured === false) return t('Price not configured')
+  if (model.price_configuration === 'dynamic' || !hasRatio(model.model_price)) {
+    return t('Pending verification')
+  }
 
   const ratio = getConfiguredGroupRatio(groupRatio, group)
-  let priceInUSD = (model.model_price || 0) * ratio
+  let priceInUSD = Number(model.model_price) * ratio
 
   priceInUSD = applyRechargeRate(
     priceInUSD,
@@ -255,10 +279,14 @@ export function formatRequestPrice(
   if (model.quota_type !== QUOTA_TYPE_VALUES.REQUEST) {
     return '-'
   }
+  if (model.price_configured === false) return t('Price not configured')
+  if (model.price_configuration === 'dynamic' || !hasRatio(model.model_price)) {
+    return t('Pending verification')
+  }
 
   const displayGroupRatio = getDisplayGroupRatio(model, selectedGroup)
 
-  let priceInUSD = (model.model_price || 0) * displayGroupRatio
+  let priceInUSD = Number(model.model_price) * displayGroupRatio
 
   priceInUSD = applyRechargeRate(
     priceInUSD,

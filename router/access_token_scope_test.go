@@ -4,6 +4,8 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -198,5 +200,43 @@ func TestAccessTokenVerificationScopesAreAllListed(t *testing.T) {
 	for _, scope := range scopes {
 		_, listed := service.AccessTokenVerificationScope(scope)
 		assert.True(t, listed, "verification scope %s has no access token rule", scope)
+	}
+}
+
+func TestProductCatalogRespectsPricingAccess(t *testing.T) {
+	for _, tc := range []struct {
+		name, config string
+		status       int
+	}{
+		{"public", `{"pricing":{"enabled":true,"requireAuth":false}}`, http.StatusOK},
+		{"login required", `{"pricing":{"enabled":true,"requireAuth":true}}`, http.StatusUnauthorized},
+		{"disabled", `{"pricing":{"enabled":false,"requireAuth":false}}`, http.StatusForbidden},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			engine := newAccessTokenScopeTestEngine(t)
+			common.OptionMapRWMutex.Lock()
+			if common.OptionMap == nil {
+				common.OptionMap = map[string]string{}
+			}
+			previous, exists := common.OptionMap["HeaderNavModules"]
+			common.OptionMap["HeaderNavModules"] = tc.config
+			common.OptionMapRWMutex.Unlock()
+			t.Cleanup(func() {
+				common.OptionMapRWMutex.Lock()
+				defer common.OptionMapRWMutex.Unlock()
+				if exists {
+					common.OptionMap["HeaderNavModules"] = previous
+				} else {
+					delete(common.OptionMap, "HeaderNavModules")
+				}
+			})
+			response := httptest.NewRecorder()
+			engine.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/product-catalog", nil))
+			require.Equal(t, tc.status, response.Code)
+			if tc.status == http.StatusOK {
+				assert.Contains(t, response.Body.String(), "public_model_id")
+				assert.NotContains(t, response.Body.String(), "internal_routes")
+			}
+		})
 	}
 }

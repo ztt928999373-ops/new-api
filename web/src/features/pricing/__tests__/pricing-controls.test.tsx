@@ -21,6 +21,7 @@ import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 
 import { PricingSidebar } from '../components/pricing-sidebar'
+import { PricingTable } from '../components/pricing-table'
 import {
   PricingToolbar,
   type PricingToolbarProps,
@@ -61,6 +62,30 @@ function toolbarProps(): PricingToolbarProps {
 }
 
 describe('pricing controls', () => {
+  it('updates table prices and units in both directions without remounting', () => {
+    const models: PricingModel[] = [
+      {
+        id: 1,
+        model_name: 'unit-regression',
+        quota_type: 0,
+        model_ratio: 1,
+        completion_ratio: 2,
+        enable_groups: [],
+      },
+    ]
+    const { rerender } = render(<PricingTable models={models} tokenUnit='M' />)
+    const row = screen.getByRole('row', { name: /unit-regression/ })
+    expect(row).toHaveTextContent('1M')
+    rerender(<PricingTable models={models} tokenUnit='K' />)
+    expect(row).toHaveTextContent('0.002')
+    expect(row).toHaveTextContent('0.004')
+    expect(row).toHaveTextContent('1K')
+    rerender(<PricingTable models={models} tokenUnit='M' />)
+    expect(row).toHaveTextContent('1M')
+    expect(row).not.toHaveTextContent('0.002')
+    expect(row).not.toHaveTextContent('0.004')
+  })
+
   it('counts each model once per filter and updates counts when the catalog changes', () => {
     const props = toolbarProps()
     const base: PricingModel = {
@@ -204,6 +229,9 @@ describe('pricing controls', () => {
     await user.click(screen.getByRole('button', { name: 'Filter' }))
     const dialog = await screen.findByRole('dialog', { name: 'Filter' })
     expect(dialog).toHaveAttribute('data-side', 'left')
+    expect(
+      within(dialog).getAllByRole('heading', { name: 'Filter' })
+    ).toHaveLength(1)
     expect(within(dialog).getByRole('button', { name: 'Reset' })).toBeDisabled()
     await user.click(within(dialog).getByRole('button', { name: /premium/ }))
     expect(props.onGroupChange).toHaveBeenCalledWith('premium')

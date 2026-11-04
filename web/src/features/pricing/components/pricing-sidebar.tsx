@@ -75,6 +75,7 @@ export interface PricingSidebarProps {
   hasActiveFilters: boolean
   onClearFilters: () => void
   className?: string
+  hideHeader?: boolean
 }
 
 function formatGroupRatio(ratio: number | undefined): string | undefined {
@@ -267,12 +268,14 @@ export const PricingSidebar = memo(function PricingSidebar(
   return (
     <aside className={cn('bg-card rounded-xl border p-3', props.className)}>
       <div className='mb-2.5 flex items-center justify-between gap-2'>
-        <div>
-          <h2 className='text-foreground text-sm font-bold'>{t('Filter')}</h2>
-          <p className='text-muted-foreground mt-1 text-xs'>
-            {t('Refine models by provider, group, type, and tags.')}
-          </p>
-        </div>
+        {!props.hideHeader && (
+          <div>
+            <h2 className='text-foreground text-sm font-bold'>{t('Filter')}</h2>
+            <p className='text-muted-foreground mt-1 text-xs'>
+              {t('Refine models by provider, group, type, and tags.')}
+            </p>
+          </div>
+        )}
         <Button
           type='button'
           variant='ghost'

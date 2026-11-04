@@ -19,8 +19,10 @@ For commercial licensing, please contact support@quantumnous.com
 import { createFileRoute, redirect } from '@tanstack/react-router'
 import z from 'zod'
 
-import { ModelDetails } from '@/features/pricing/components/model-details'
+import { CatalogModelDetails } from '@/features/product-catalog'
+import { PricingServiceError } from '@/features/product-catalog/service-error'
 import { getModuleAccessForGuard } from '@/lib/nav-modules'
+import { statusQueryOptions } from '@/lib/status-query'
 import { useAuthStore } from '@/stores/auth-store'
 
 const modelDetailsSearchSchema = z.object({
@@ -38,7 +40,9 @@ const modelDetailsSearchSchema = z.object({
 
 export const Route = createFileRoute('/pricing/$modelId/')({
   validateSearch: modelDetailsSearchSchema,
+  errorComponent: PricingServiceError,
   beforeLoad: async ({ context, location }) => {
+    await context.queryClient.fetchQuery(statusQueryOptions)
     const access = await getModuleAccessForGuard(context.queryClient, 'pricing')
     if (!access.enabled) {
       throw redirect({ to: '/' })
@@ -53,5 +57,5 @@ export const Route = createFileRoute('/pricing/$modelId/')({
       }
     }
   },
-  component: ModelDetails,
+  component: CatalogModelDetails,
 })

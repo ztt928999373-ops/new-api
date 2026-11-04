@@ -21,6 +21,8 @@ import { useTranslation } from 'react-i18next'
 
 import { PublicLayout } from '@/components/layout'
 import { PageTransition } from '@/components/page-transition'
+import { CatalogMarketplace } from '@/features/product-catalog'
+import { CatalogRequestError } from '@/features/product-catalog/request-error'
 
 import {
   LoadingSkeleton,
@@ -50,9 +52,11 @@ export function Pricing() {
     endpointMap,
     autoGroups,
     isLoading,
+    error,
+    refetch,
     priceRate,
     usdExchangeRate,
-  } = usePricingData()
+  } = usePricingData(true, { errorHandledLocally: true })
 
   const {
     searchInput,
@@ -111,6 +115,16 @@ export function Pricing() {
   }, [clearFilters, clearSearch])
 
   const renderPricingContent = () => {
+    if (error) {
+      return (
+        <CatalogRequestError
+          error={error}
+          onRetry={() => {
+            void refetch()
+          }}
+        />
+      )
+    }
     if (filteredModels.length === 0) {
       return (
         <EmptyState
@@ -182,7 +196,7 @@ export function Pricing() {
               {t('Model Square')}
             </h1>
             <p className='text-muted-foreground/80 mt-3 text-sm sm:mt-4 sm:text-base'>
-              {t('This site currently has {{count}} models enabled', {
+              {t('Configured pricing entries: {{count}}', {
                 count: models?.length || 0,
               })}
             </p>
@@ -202,6 +216,7 @@ export function Pricing() {
             />
           </header>
 
+          <CatalogMarketplace />
           <div className='grid gap-4 xl:grid-cols-[280px_minmax(0,1fr)]'>
             <PricingSidebar
               quotaTypeFilter={quotaTypeFilter}

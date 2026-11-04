@@ -56,6 +56,9 @@ export type BillingPluginVariant = {
 }
 
 export type PricingModel = {
+  /** At least one available static/dynamic configuration; not a validation or availability claim. */
+  price_configured?: boolean
+  price_configuration?: 'static' | 'dynamic' | 'mixed' | 'unconfigured'
   billing_plugin_variants?: BillingPluginVariant[]
   id: number
   model_name: string
