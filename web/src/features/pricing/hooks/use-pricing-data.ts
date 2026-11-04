@@ -24,11 +24,16 @@ import { requireServerSuccess } from '@/lib/server-error-message'
 
 import { getPricing } from '../api'
 
-export function usePricingData(enabled = true) {
+export function usePricingData(
+  enabled = true,
+  options: { errorHandledLocally?: boolean } = {}
+) {
   const { status } = useStatus()
 
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['pricing'],
+    // Both the marketplace and its detail routes own error feedback and retry.
+    meta: { errorHandledLocally: options.errorHandledLocally ?? true },
     queryFn: async () => requireServerSuccess(await getPricing()),
     staleTime: 5 * 60 * 1000,
     enabled,

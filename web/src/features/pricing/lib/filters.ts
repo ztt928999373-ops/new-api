@@ -140,6 +140,13 @@ function getSortPrice(
     if (example) return example.total
   }
   const summary = getDynamicPricingSummary(model, { tokenUnit: 'M' })
+  if (
+    !summary &&
+    (model.price_configured === false ||
+      model.price_configuration === 'dynamic')
+  ) {
+    return undefined
+  }
   if (kind === 'request') {
     if (summary) {
       return summary.entries.find(
@@ -173,7 +180,15 @@ export function sortModels(
   if (priceSort) {
     // Extracting the price parses the billing expression, so compute once
     const price = new Map(
-      sorted.map((m) => [m, getSortPrice(m, priceSort.kind)])
+      sorted.map((m) => {
+        const value = getSortPrice(m, priceSort.kind)
+        return [
+          m,
+          typeof value === 'number' && Number.isFinite(value)
+            ? value
+            : undefined,
+        ] as const
+      })
     )
     // Models without this kind of price stay last in both directions
     sorted.sort((a, b) => {
@@ -250,7 +265,7 @@ export function extractAllTags(models: PricingModel[]): string[] {
     }
   })
 
-  return Array.from(tagSet).sort((a, b) => a.localeCompare(b))
+  return [...tagSet].sort((a, b) => a.localeCompare(b))
 }
 
 /**

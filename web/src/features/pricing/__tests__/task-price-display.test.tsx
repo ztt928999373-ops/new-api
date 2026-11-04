@@ -517,6 +517,8 @@ it('switches provider group prices, localized conditions and examples, and shows
     ...model,
     quota_type: 1,
     model_price: 0.25,
+    price_configured: true,
+    price_configuration: 'mixed',
     billing_plugin_variants: [
       {
         plugin_key: 'alpha',
@@ -619,6 +621,10 @@ it('switches provider group prices, localized conditions and examples, and shows
   await user.click(screen.getByRole('tab', { name: 'Delta' }))
   panel = screen.getByRole('tabpanel', { name: 'Delta' })
   expect(within(panel).getByText('$0.5')).toBeVisible()
+  await user.click(screen.getByRole('tab', { name: 'Alpha' }))
+  panel = screen.getByRole('tabpanel', { name: 'Alpha' })
+  expect(within(panel).getByText('$0.8')).toBeVisible()
+  expect(within(panel).queryByText('$0.5')).not.toBeInTheDocument()
 })
 
 it('shows provider count, price range and missing-price status in both list and card views', () => {
@@ -664,3 +670,48 @@ it('shows provider count, price range and missing-price status in both list and 
   expect(screen.getByText('0.4 – 0.8/s')).toBeVisible()
   expect(screen.getByText('$0.4 – $0.8')).toBeVisible()
 })
+
+it.each([0, 0.25])(
+  'shows configured static request price %s alongside a dynamic supplier in cards and lists',
+  (staticPrice) => {
+    const shared: PricingModel = {
+      ...model,
+      quota_type: 1,
+      model_price: staticPrice,
+      price_configured: true,
+      price_configuration: 'mixed',
+      billing_plugin_variants: [
+        {
+          plugin_key: 'static',
+          plugin_name: 'Static',
+          billing_mode: 'ratio',
+          billing_expr: '',
+          billing_usage_schema: { images: { type: 'number', unit: 'count' } },
+        },
+        {
+          plugin_key: 'dynamic',
+          plugin_name: 'Dynamic',
+          billing_mode: 'tiered_expr',
+          billing_expr: 'tier("provider", u("images") * 0.8)',
+          billing_usage_schema: { images: { type: 'number', unit: 'count' } },
+        },
+      ],
+    }
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    })
+    clients.push(client)
+    render(
+      <QueryClientProvider client={client}>
+        <ModelPriceCell model={shared} />
+        <ModelCard model={shared} onClick={vi.fn()} />
+      </QueryClientProvider>
+    )
+    expect(screen.getByText(`$${staticPrice}`)).toBeVisible()
+    expect(screen.getByText(`${staticPrice}/request`)).toBeVisible()
+    expect(screen.getByText('$0.8')).toBeVisible()
+    expect(screen.getByText('0.8/unit')).toBeVisible()
+    expect(screen.queryByText('Price not configured')).not.toBeInTheDocument()
+    expect(screen.queryByText('Pending verification')).not.toBeInTheDocument()
+  }
+)

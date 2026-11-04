@@ -22,6 +22,8 @@ import { handleServerError } from './handle-server-error'
 import { getServerErrorStatus } from './server-error-message'
 
 interface ErrorNotificationMeta extends Record<string, unknown> {
+  /** The query's view owns both error feedback and recovery. */
+  errorHandledLocally?: boolean
   /** Disable automatic notifications when a caller presents the failure itself. */
   errorToast?: boolean
 }
@@ -57,6 +59,7 @@ export function createAppQueryClient(
     }),
     queryCache: new QueryCache({
       onError: (error, query) => {
+        if (query.meta?.errorHandledLocally) return
         if (query.meta?.errorToast !== false) handleServerError(error)
         if (getServerErrorStatus(error) === 500) onInternalServerError?.()
       },
