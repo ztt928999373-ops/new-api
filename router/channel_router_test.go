@@ -35,12 +35,21 @@ func TestChannelStatusRoutesUseExpectedPermissions(t *testing.T) {
 }
 
 func TestChannelDeleteRoutesUseSensitiveWritePermission(t *testing.T) {
+	assertChannelRoutePermission(t, http.MethodPost, "/openai-integration", authz.ChannelSensitiveWrite, controller.PrepareOpenAIIntegration)
 	assertChannelRoutePermission(t, http.MethodDelete, "/:id", authz.ChannelSensitiveWrite, controller.DeleteChannel)
 	assertChannelRoutePermission(t, http.MethodPost, "/batch", authz.ChannelSensitiveWrite, controller.DeleteChannelBatch)
 	assertChannelRoutePermission(t, http.MethodDelete, "/disabled", authz.ChannelSensitiveWrite, controller.DeleteDisabledChannel)
 	assertChannelRoutePermission(t, http.MethodPut, "/", authz.ChannelWrite, controller.UpdateChannel)
 	assertChannelRoutePermission(t, http.MethodPut, "/tag", authz.ChannelWrite, controller.EditTagChannels)
 	assertChannelRoutePermission(t, http.MethodPost, "/batch/tag", authz.ChannelWrite, controller.BatchSetChannelTag)
+}
+
+func TestOpenAIPreparationRequiresAuthentication(t *testing.T) {
+	engine := gin.New()
+	registerChannelRoutes(engine.Group("/api"))
+	w := httptest.NewRecorder()
+	engine.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/channel/openai-integration", nil))
+	require.Equal(t, http.StatusUnauthorized, w.Code)
 }
 
 func TestChannelStatusRoutesRegisterWithoutConflict(t *testing.T) {
