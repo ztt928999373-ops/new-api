@@ -326,6 +326,9 @@ func InitResources() error {
 	}
 
 	model.CheckSetup()
+	if err := service.InitSupplierCredentialStorage(model.DB); err != nil {
+		return errors.New("supplier credential configuration unavailable")
+	}
 
 	// Initialize options, should after model.InitDB()
 	if common.IsMasterNode {

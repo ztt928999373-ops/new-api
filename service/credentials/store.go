@@ -50,8 +50,46 @@ func (s *Store) CurrentVersion(ctx context.Context, id string) (uint64, error) {
 	return uint64(h.CurrentVersion), nil
 }
 
-// MigrateSchema is explicit. Application startup does not automatically invoke it.
-func (s *Store) MigrateSchema() error { return s.DB.AutoMigrate(&Head{}, &StoredVersion{}) }
+func (s *Store) Metadata(ctx context.Context, actor Principal, id string) (Head, error) {
+	var h Head
+	if s.DB.WithContext(ctx).First(&h, "id = ?", id).Error != nil || !owns(actor, h) || h.Environment != s.Environment {
+		return Head{}, credentialcrypto.ErrUnavailable
+	}
+	return h, nil
+}
+
+func (s *Store) Versions(ctx context.Context, actor Principal, id string) ([]int64, error) {
+	if _, err := s.Metadata(ctx, actor, id); err != nil {
+		return nil, err
+	}
+	var versions []int64
+	if s.DB.WithContext(ctx).Model(&StoredVersion{}).Where("credential_id = ?", id).Order("version").Pluck("version", &versions).Error != nil {
+		return nil, credentialcrypto.ErrUnavailable
+	}
+	return versions, nil
+}
+
+// MigrateSchema creates only metadata tables; it never migrates legacy secrets.
+func (s *Store) MigrateSchema() error {
+	return s.DB.AutoMigrate(&Head{}, &StoredVersion{}, &AccessEvent{})
+}
+
+type AccessEvent struct {
+	ID           uint64 `gorm:"primaryKey"`
+	CredentialID string `gorm:"size:64;index"`
+	Version      uint64
+	ActorID      string `gorm:"size:64"`
+	Outcome      string `gorm:"size:32"`
+	CreatedAt    int64  `gorm:"autoCreateTime"`
+}
+
+func (AccessEvent) TableName() string { return "supplier_credential_access_events" }
+func (s *Store) Record(ctx context.Context, event Event) error {
+	if s.DB.WithContext(ctx).Create(&AccessEvent{CredentialID: event.CredentialID, Version: event.Version, ActorID: event.ActorID, Outcome: event.Outcome}).Error != nil {
+		return credentialcrypto.ErrUnavailable
+	}
+	return nil
+}
 
 func identity(h Head, version int64) credentialcrypto.Identity {
 	return credentialcrypto.Identity{Environment: h.Environment, TenantID: h.TenantID, OwnerType: h.OwnerType, OwnerID: h.OwnerID, CredentialID: h.ID, Provider: h.Provider, CredentialType: h.CredentialType, Purpose: h.Purpose, Version: uint64(version)}

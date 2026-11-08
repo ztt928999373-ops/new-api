@@ -55,6 +55,11 @@ func registerChannelRoutes(apiRouter *gin.RouterGroup) {
 }
 
 var channelPermissionRoutes = []permissionRoute{
+	{method: http.MethodPost, path: "/credentials", permission: authz.ChannelSensitiveWrite, handler: controller.CreateSupplierCredential},
+	{method: http.MethodGet, path: "/credentials/:id", permission: authz.ChannelRead, handler: controller.GetSupplierCredential},
+	{method: http.MethodPut, path: "/credentials/:id", permission: authz.ChannelSensitiveWrite, handler: controller.ReplaceSupplierCredential},
+	{method: http.MethodPost, path: "/credentials/:id/status", permission: authz.ChannelSensitiveWrite, handler: controller.SetSupplierCredentialStatus},
+	{method: http.MethodPost, path: "/credentials/:id/test", permission: authz.ChannelOperate, handler: controller.TestSupplierCredential},
 	{method: http.MethodGet, path: "/priority/order", permission: authz.ChannelRead, handler: controller.GetChannelPriorityOrder},
 	{method: http.MethodPost, path: "/priority/reorder", permission: authz.ChannelWrite, handler: controller.ReorderChannelPriority},
 	{method: http.MethodGet, path: "/", permission: authz.ChannelRead, handler: controller.GetAllChannels},
