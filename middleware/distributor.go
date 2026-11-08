@@ -558,6 +558,11 @@ func getTaskOriginModelName(c *gin.Context) string {
 }
 
 func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, modelName string) *types.NewAPIError {
+	resolved, credentialErr := service.ResolveChannelForRequest(c.Request.Context(), channel, c.GetInt("id"))
+	if credentialErr != nil {
+		return types.NewErrorWithStatusCode(errors.New("credential unavailable"), types.ErrorCodeInvalidRequest, http.StatusServiceUnavailable, types.ErrOptionWithSkipRetry())
+	}
+	channel = resolved
 	c.Set("original_model", modelName) // for retry
 	expectedPlugin := c.GetString("expected_task_plugin_key")
 	if channel == nil {

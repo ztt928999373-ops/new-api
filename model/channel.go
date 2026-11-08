@@ -21,6 +21,7 @@ import (
 )
 
 type Channel struct {
+	CredentialRef      string  `json:"-" gorm:"size:64;index"`
 	Id                 int     `json:"id"`
 	Type               int     `json:"type" gorm:"default:0"`
 	Key                string  `json:"key" gorm:"not null"`
@@ -561,6 +562,15 @@ func (channel *Channel) Insert() error {
 }
 
 func (channel *Channel) Update() error {
+	if channel.Key != "" {
+		var persisted Channel
+		if err := DB.Select("id", "credential_ref").First(&persisted, channel.Id).Error; err != nil {
+			return err
+		}
+		if persisted.CredentialRef != "" {
+			return errors.New("encrypted credentials require managed replacement")
+		}
+	}
 	// If this is a multi-key channel, recalculate MultiKeySize based on the current key list to avoid inconsistency after editing keys
 	if channel.ChannelInfo.IsMultiKey {
 		var keyStr string
