@@ -19,10 +19,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type credentialAPITestAudit struct{}
-
-func (credentialAPITestAudit) Record(context.Context, credentials.Event) error { return nil }
-
 type credentialAPITestTransport func(*http.Request) (*http.Response, error)
 
 func (f credentialAPITestTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
@@ -35,7 +31,7 @@ func TestSupplierCredentialManagementNeverReturnsPlaintext(t *testing.T) {
 	require.NoError(t, err)
 	s := &credentials.Store{DB: model.DB, Environment: "test", ProviderID: "local-test", Provider: p}
 	require.NoError(t, s.MigrateSchema())
-	old := service.SetChannelCredentialResolver(&credentials.Resolver{Environment: "test", Repository: s, Providers: map[string]credentialcrypto.KeyProvider{"local-test": p}, Audit: credentialAPITestAudit{}})
+	old := service.SetChannelCredentialResolver(&credentials.Resolver{Environment: "test", Repository: s, Providers: map[string]credentialcrypto.KeyProvider{"local-test": p}, Audit: s})
 	defer service.SetChannelCredentialResolver(old)
 	call := func(handler gin.HandlerFunc, id, body string) *httptest.ResponseRecorder {
 		w := httptest.NewRecorder()
@@ -83,4 +79,8 @@ func TestSupplierCredentialManagementNeverReturnsPlaintext(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, w.Code)
 	w = call(SetSupplierCredentialStatus, id, `{"status":"active","revision":3}`)
 	require.Equal(t, http.StatusOK, w.Code)
+	victim, err := s.Create(context.Background(), credentials.Principal{TenantID: "default", UserID: "other-user"}, false, "openai", "api_key", "relay", []byte("synthetic-secret-victim"))
+	require.NoError(t, err)
+	w = call(GetSupplierCredential, victim.ID, "")
+	require.Equal(t, http.StatusServiceUnavailable, w.Code)
 }

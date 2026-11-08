@@ -562,17 +562,22 @@ func (channel *Channel) Insert() error {
 }
 
 func (channel *Channel) Update() error {
-	if channel.Key != "" {
-		var persisted Channel
-		if err := DB.Select("id", "credential_ref").First(&persisted, channel.Id).Error; err != nil {
-			return err
-		}
-		if persisted.CredentialRef != "" {
+	var persisted Channel
+	if err := DB.Select("id", "credential_ref", "channel_info").First(&persisted, channel.Id).Error; err != nil {
+		return err
+	}
+	managed := persisted.CredentialRef != ""
+	if managed {
+		if channel.Key != "" {
 			return errors.New("encrypted credentials require managed replacement")
 		}
+		channel.CredentialRef = persisted.CredentialRef
+		channel.ChannelInfo = persisted.ChannelInfo
+	} else if channel.CredentialRef != "" {
+		return errors.New("credential binding requires managed migration")
 	}
 	// If this is a multi-key channel, recalculate MultiKeySize based on the current key list to avoid inconsistency after editing keys
-	if channel.ChannelInfo.IsMultiKey {
+	if channel.ChannelInfo.IsMultiKey && !managed {
 		var keyStr string
 		if channel.Key != "" {
 			keyStr = channel.Key

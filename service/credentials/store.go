@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/credentialcrypto"
 	"gorm.io/gorm"
 )
@@ -123,7 +124,10 @@ func (s *Store) Create(ctx context.Context, actor Principal, platform bool, prov
 		if err := tx.Create(&h).Error; err != nil {
 			return err
 		}
-		return tx.Create(&StoredVersion{CredentialID: h.ID, Version: 1, Envelope: string(data)}).Error
+		if err := tx.Create(&StoredVersion{CredentialID: h.ID, Version: 1, Envelope: string(data)}).Error; err != nil {
+			return err
+		}
+		return tx.Create(&AccessEvent{CredentialID: h.ID, Version: 1, ActorID: actor.UserID, Outcome: "created"}).Error
 	})
 	if err != nil {
 		return Head{}, credentialcrypto.ErrUnavailable
@@ -162,6 +166,20 @@ func (s *Store) Replace(ctx context.Context, actor Principal, id string, revisio
 	if s.DB.WithContext(ctx).First(&h, "id = ?", id).Error != nil || !owns(actor, h) || h.Environment != s.Environment || h.Status == "revoked" || h.CurrentVersion >= 1<<63-1 {
 		return Head{}, credentialcrypto.ErrUnavailable
 	}
+	if h.CredentialType == "channel_key_bundle" {
+		var channels []model.Channel
+		if s.DB.WithContext(ctx).Where("credential_ref = ?", id).Find(&channels).Error != nil {
+			return Head{}, credentialcrypto.ErrUnavailable
+		}
+		for _, channel := range channels {
+			if channel.ChannelInfo.IsMultiKey {
+				candidate := model.Channel{Key: string(secret)}
+				if len(candidate.GetKeys()) != channel.ChannelInfo.MultiKeySize {
+					return Head{}, credentialcrypto.ErrUnavailable
+				}
+			}
+		}
+	}
 	next := h.CurrentVersion + 1
 	e, err := credentialcrypto.Seal(ctx, s.Provider, s.ProviderID, identity(h, next), secret)
 	if err != nil {
@@ -179,7 +197,10 @@ func (s *Store) Replace(ctx context.Context, actor Principal, id string, revisio
 		if result.RowsAffected != 1 {
 			return credentialcrypto.ErrUnavailable
 		}
-		return tx.Create(&StoredVersion{CredentialID: id, Version: next, Envelope: string(data)}).Error
+		if err := tx.Create(&StoredVersion{CredentialID: id, Version: next, Envelope: string(data)}).Error; err != nil {
+			return err
+		}
+		return tx.Create(&AccessEvent{CredentialID: id, Version: uint64(next), ActorID: actor.UserID, Outcome: "replaced"}).Error
 	})
 	if err != nil {
 		return Head{}, credentialcrypto.ErrUnavailable
@@ -196,8 +217,53 @@ func (s *Store) SetStatus(ctx context.Context, actor Principal, id string, revis
 	if s.DB.WithContext(ctx).First(&h, "id = ?", id).Error != nil || !owns(actor, h) || h.Environment != s.Environment || h.Status == "revoked" {
 		return credentialcrypto.ErrUnavailable
 	}
-	result := s.DB.WithContext(ctx).Model(&Head{}).Where("id = ? AND revision = ? AND status <> ?", id, revision, "revoked").Updates(map[string]any{"status": status, "revision": revision + 1})
-	if result.Error != nil || result.RowsAffected != 1 {
+	err := s.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		result := tx.Model(&Head{}).Where("id = ? AND revision = ? AND status <> ?", id, revision, "revoked").Updates(map[string]any{"status": status, "revision": revision + 1})
+		if result.Error != nil || result.RowsAffected != 1 {
+			return credentialcrypto.ErrUnavailable
+		}
+		return tx.Create(&AccessEvent{CredentialID: id, Version: uint64(h.CurrentVersion), ActorID: actor.UserID, Outcome: status}).Error
+	})
+	if err != nil {
+		return credentialcrypto.ErrUnavailable
+	}
+	return nil
+}
+
+// RewrapVersion changes only DEK protection. It never replaces supplier secrets.
+func (s *Store) RewrapVersion(ctx context.Context, actor Principal, id string, version, revision int64) error {
+	h, err := s.Metadata(ctx, actor, id)
+	if err != nil || h.Status == "revoked" || version <= 0 {
+		return credentialcrypto.ErrUnavailable
+	}
+	var row StoredVersion
+	if s.DB.WithContext(ctx).First(&row, "credential_id = ? AND version = ?", id, version).Error != nil {
+		return credentialcrypto.ErrUnavailable
+	}
+	var envelope credentialcrypto.Envelope
+	if common.UnmarshalJsonStr(row.Envelope, &envelope) != nil || envelope.ProviderID != s.ProviderID {
+		return credentialcrypto.ErrUnavailable
+	}
+	updated, err := credentialcrypto.Rewrap(ctx, s.Provider, identity(h, version), envelope)
+	if err != nil {
+		return credentialcrypto.ErrUnavailable
+	}
+	data, err := common.Marshal(updated)
+	if err != nil {
+		return credentialcrypto.ErrUnavailable
+	}
+	err = s.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		fence := tx.Model(&Head{}).Where("id = ? AND revision = ? AND status <> ?", id, revision, "revoked").Update("revision", revision+1)
+		if fence.Error != nil || fence.RowsAffected != 1 {
+			return credentialcrypto.ErrUnavailable
+		}
+		result := tx.Model(&StoredVersion{}).Where("credential_id = ? AND version = ?", id, version).Update("envelope", string(data))
+		if result.Error != nil || result.RowsAffected != 1 {
+			return credentialcrypto.ErrUnavailable
+		}
+		return tx.Create(&AccessEvent{CredentialID: id, Version: uint64(version), ActorID: actor.UserID, Outcome: "rewrapped"}).Error
+	})
+	if err != nil {
 		return credentialcrypto.ErrUnavailable
 	}
 	return nil

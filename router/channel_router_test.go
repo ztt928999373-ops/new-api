@@ -35,6 +35,7 @@ func TestChannelStatusRoutesUseExpectedPermissions(t *testing.T) {
 }
 
 func TestChannelDeleteRoutesUseSensitiveWritePermission(t *testing.T) {
+	assertChannelRoutePermission(t, http.MethodPost, "/credentials/:id/rewrap", authz.ChannelSensitiveWrite, controller.RewrapSupplierCredential)
 	assertChannelRoutePermission(t, http.MethodPost, "/credentials", authz.ChannelSensitiveWrite, controller.CreateSupplierCredential)
 	assertChannelRoutePermission(t, http.MethodPut, "/credentials/:id", authz.ChannelSensitiveWrite, controller.ReplaceSupplierCredential)
 	assertChannelRoutePermission(t, http.MethodPost, "/credentials/:id/status", authz.ChannelSensitiveWrite, controller.SetSupplierCredentialStatus)

@@ -117,7 +117,7 @@ func TestSupplierCredential(c *gin.Context) {
 	}
 	actor := platformCredentialActor(c)
 	h, err := s.Metadata(c.Request.Context(), actor, c.Param("id"))
-	if err != nil || h.Provider != "openai" {
+	if err != nil || h.Provider != "openai" || h.CredentialType != "api_key" {
 		credentialFailure(c)
 		return
 	}
@@ -151,4 +151,25 @@ func TestSupplierCredential(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"success": true, "connected": true, "model_verified": false})
+}
+
+func RewrapSupplierCredential(c *gin.Context) {
+	s := service.ConfiguredCredentialStore()
+	if s == nil {
+		credentialFailure(c)
+		return
+	}
+	var input struct {
+		Version  int64 `json:"version"`
+		Revision int64 `json:"revision"`
+	}
+	if c.ShouldBindJSON(&input) != nil || input.Version <= 0 || input.Revision <= 0 {
+		credentialFailure(c)
+		return
+	}
+	if s.RewrapVersion(c.Request.Context(), platformCredentialActor(c), c.Param("id"), input.Version, input.Revision) != nil {
+		credentialFailure(c)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true})
 }

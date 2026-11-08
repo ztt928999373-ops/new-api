@@ -32,7 +32,7 @@ func InitSupplierCredentialStorage(db *gorm.DB) error {
 	}
 	id := "local-" + environment
 	s := &credentials.Store{DB: db, Environment: environment, ProviderID: id, Provider: p}
-	if s.MigrateSchema() != nil {
+	if !db.Migrator().HasTable(&credentials.Head{}) || !db.Migrator().HasTable(&credentials.StoredVersion{}) || !db.Migrator().HasTable(&credentials.AccessEvent{}) {
 		return credentialcrypto.ErrUnavailable
 	}
 	SetChannelCredentialResolver(&credentials.Resolver{Environment: environment, Repository: s, Providers: map[string]credentialcrypto.KeyProvider{id: p}, Audit: s})

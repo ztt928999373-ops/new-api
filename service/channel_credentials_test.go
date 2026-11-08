@@ -19,10 +19,6 @@ import (
 	"gorm.io/gorm"
 )
 
-type channelCredentialTestAudit struct{}
-
-func (channelCredentialTestAudit) Record(context.Context, credentials.Event) error { return nil }
-
 func TestEncryptedChannelMigrationBackupMultiKeyAndRevocation(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -32,7 +28,7 @@ func TestEncryptedChannelMigrationBackupMultiKeyAndRevocation(t *testing.T) {
 	require.NoError(t, err)
 	sqlDB.SetMaxOpenConns(1)
 	t.Cleanup(func() { require.NoError(t, sqlDB.Close()) })
-	require.NoError(t, db.AutoMigrate(&model.Channel{}))
+	require.NoError(t, db.AutoMigrate(&model.Channel{}, &model.Ability{}))
 	path := filepath.Join(dir, "synthetic-ring")
 	require.NoError(t, credentialcrypto.InitializeLocalFile(path))
 	p, err := credentialcrypto.NewLocalFileKeyProvider(path)
@@ -50,6 +46,25 @@ func TestEncryptedChannelMigrationBackupMultiKeyAndRevocation(t *testing.T) {
 	digest := sha256.Sum256(bytes)
 	clear(bytes)
 	receipt := credentials.BackupReceipt{Path: backup, SHA256: hex.EncodeToString(digest[:])}
+	require.NoError(t, db.Model(&model.Channel{}).Where("id = ?", ch.Id).Update("other", "synthetic-unknown-config").Error)
+	_, err = s.MigrateDisabledOpenAI(ctx, ch.Id, receipt)
+	require.Error(t, err)
+	require.NoError(t, db.Model(&model.Channel{}).Where("id = ?", ch.Id).Update("other", "").Error)
+	require.NoError(t, db.Callback().Create().Before("gorm:create").Register("synthetic-migration-failure", func(tx *gorm.DB) {
+		if tx.Statement.Table == "supplier_credential_access_events" {
+			tx.AddError(credentialcrypto.ErrUnavailable)
+		}
+	}))
+	_, err = s.MigrateDisabledOpenAI(ctx, ch.Id, receipt)
+	require.Error(t, err)
+	require.NoError(t, db.Callback().Create().Remove("synthetic-migration-failure"))
+	var unchanged model.Channel
+	require.NoError(t, db.First(&unchanged, ch.Id).Error)
+	require.Equal(t, ch.Key, unchanged.Key)
+	require.Empty(t, unchanged.CredentialRef)
+	var orphanCount int64
+	require.NoError(t, db.Model(&credentials.Head{}).Count(&orphanCount).Error)
+	require.Zero(t, orphanCount)
 	ref, err := s.MigrateDisabledOpenAI(ctx, ch.Id, receipt)
 	require.NoError(t, err)
 	refAgain, err := s.MigrateDisabledOpenAI(ctx, ch.Id, receipt)
@@ -59,7 +74,17 @@ func TestEncryptedChannelMigrationBackupMultiKeyAndRevocation(t *testing.T) {
 	require.NoError(t, db.First(&cached, ch.Id).Error)
 	require.Empty(t, cached.Key)
 	require.Equal(t, ref, cached.CredentialRef)
-	r := &credentials.Resolver{Environment: "test", Repository: s, Providers: map[string]credentialcrypto.KeyProvider{"local-test": p}, Audit: channelCredentialTestAudit{}}
+	previousDB := model.DB
+	model.DB = db
+	defer func() { model.DB = previousDB }()
+	editable := cached
+	editable.Name = "renamed"
+	require.NoError(t, editable.Update())
+	require.Equal(t, 2, editable.ChannelInfo.MultiKeySize)
+	require.Empty(t, editable.Key)
+	editable.Key = "must-not-write-plaintext"
+	require.Error(t, editable.Update())
+	r := &credentials.Resolver{Environment: "test", Repository: s, Providers: map[string]credentialcrypto.KeyProvider{"local-test": p}, Audit: s}
 	old := SetChannelCredentialResolver(r)
 	defer SetChannelCredentialResolver(old)
 	resolved, err := ResolveChannelForRequest(ctx, &cached, 123)
@@ -68,6 +93,8 @@ func TestEncryptedChannelMigrationBackupMultiKeyAndRevocation(t *testing.T) {
 	require.Empty(t, cached.Key)
 	require.Empty(t, cached.Keys)
 	h := credentials.Principal{TenantID: "default", UserID: "admin", PlatformOperator: true}
+	_, err = s.Replace(ctx, h, ref, 1, []byte("wrong-slot-count"))
+	require.Error(t, err)
 	require.NoError(t, s.SetStatus(ctx, h, ref, 1, "revoked"))
 	_, err = ResolveChannelForRequest(ctx, &cached, 123)
 	require.Error(t, err)
