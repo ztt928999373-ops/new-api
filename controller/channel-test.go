@@ -71,6 +71,9 @@ func resolveChannelTestUserID(c *gin.Context) (int, error) {
 }
 
 func testChannel(ctx context.Context, channel *model.Channel, testUserID int, testModel string, endpointType string, isStream bool) testResult {
+	if channel != nil && channel.CredentialRef != "" {
+		return testResult{localErr: fmt.Errorf("managed channels require the supported credential connection test")}
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}

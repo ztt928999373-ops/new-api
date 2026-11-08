@@ -12,7 +12,9 @@ import (
 
 func TestEnvelopeIsolationRotationAndRestore(t *testing.T) {
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "synthetic-ring")
+	keyDir := filepath.Join(t.TempDir(), "keys")
+	require.NoError(t, InitializeLocalDirectory(keyDir))
+	path := filepath.Join(keyDir, "synthetic-ring")
 	require.NoError(t, InitializeLocalFile(path))
 	require.ErrorIs(t, InitializeLocalFile(path), ErrUnavailable)
 	p, err := NewLocalFileKeyProvider(path)
@@ -56,7 +58,10 @@ func TestEnvelopeIsolationRotationAndRestore(t *testing.T) {
 	// must rotate before any new wrapping to prevent counter rollback reuse.
 	backup, err := os.ReadFile(path)
 	require.NoError(t, err)
-	restoredPath := filepath.Join(t.TempDir(), "restored-ring")
+	restoreDir := filepath.Join(t.TempDir(), "keys")
+	require.NoError(t, InitializeLocalDirectory(restoreDir))
+	restoredPath := filepath.Join(restoreDir, "restored-ring")
+	require.NoError(t, InitializeLocalFile(restoredPath))
 	require.NoError(t, os.WriteFile(restoredPath, backup, 0600))
 	clear(backup)
 	restored, err := NewLocalFileKeyProvider(restoredPath)
@@ -72,7 +77,9 @@ func TestEnvelopeIsolationRotationAndRestore(t *testing.T) {
 }
 
 func TestLocalNonceReservationPersistsAndFailsClosed(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "ring")
+	keyDir := filepath.Join(t.TempDir(), "keys")
+	require.NoError(t, InitializeLocalDirectory(keyDir))
+	path := filepath.Join(keyDir, "ring")
 	require.NoError(t, InitializeLocalFile(path))
 	p, err := NewLocalFileKeyProvider(path)
 	require.NoError(t, err)

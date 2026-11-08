@@ -33,6 +33,7 @@ type ModelRequest struct {
 
 func Distribute() func(c *gin.Context) {
 	return func(c *gin.Context) {
+		defer service.ReleaseChannelCredentialRequest(c)
 		var channel *model.Channel
 		defer func() {
 			if c.Writer.Status() >= 400 {
@@ -131,7 +132,10 @@ func Distribute() func(c *gin.Context) {
 			}
 		}
 		common.SetContextKey(c, constant.ContextKeyRequestStartTime, time.Now())
-		SetupContextForSelectedChannel(c, channel, modelRequest.Model)
+		if setupErr := SetupContextForSelectedChannel(c, channel, modelRequest.Model); setupErr != nil && channel != nil && channel.CredentialRef != "" {
+			abortWithOpenAiMessage(c, setupErr.StatusCode, "credential unavailable", "credential_unavailable")
+			return
+		}
 		c.Next()
 		if channel != nil && c.Writer != nil && c.Writer.Status() < http.StatusBadRequest {
 			service.RecordChannelAffinity(c, channel.Id)
@@ -558,11 +562,14 @@ func getTaskOriginModelName(c *gin.Context) string {
 }
 
 func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, modelName string) *types.NewAPIError {
+	// A retry may switch from a managed channel to a legacy channel. Release
+	// the previous lease even when the next channel has no credential binding.
+	service.ReleaseChannelCredentialRequest(c)
 	if channel != nil && channel.CredentialRef != "" {
 		if c.Request == nil {
 			return types.NewErrorWithStatusCode(errors.New("credential unavailable"), types.ErrorCodeInvalidRequest, http.StatusServiceUnavailable, types.ErrOptionWithSkipRetry())
 		}
-		resolved, credentialErr := service.ResolveChannelForRequest(c.Request.Context(), channel, c.GetInt("id"))
+		resolved, credentialErr := service.BindChannelCredentialRequest(c, channel, c.GetInt("id"))
 		if credentialErr != nil {
 			return types.NewErrorWithStatusCode(errors.New("credential unavailable"), types.ErrorCodeInvalidRequest, http.StatusServiceUnavailable, types.ErrOptionWithSkipRetry())
 		}

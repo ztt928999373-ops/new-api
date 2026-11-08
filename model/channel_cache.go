@@ -35,6 +35,9 @@ func InitChannelCache() {
 	var channels []*Channel
 	DB.Find(&channels)
 	for _, channel := range channels {
+		if channel.CredentialRef != "" {
+			channel.Key, channel.Keys = "", nil
+		}
 		newChannelId2channel[channel.Id] = channel
 		if channel.Type == constant.ChannelTypeAdvancedCustom {
 			if config := channel.GetOtherSettings().AdvancedCustom; config != nil {
@@ -104,6 +107,32 @@ func InitChannelCache() {
 	InvalidatePricingCache()
 	rebuildTaskAliasView()
 	common.SysLog(common.LogText("channels synced from database"))
+}
+
+// nextManagedPollingIndex shares only slot metadata. Request-local decrypted
+// keys must never be written into channelsIDM, including during cache refresh.
+// Caller holds the existing per-channel polling lock; cache refresh uses this
+// same channelSyncLock for the metadata handoff.
+func nextManagedPollingIndex(id int, reference string, size int) (int, error) {
+	channelSyncLock.Lock()
+	defer channelSyncLock.Unlock()
+	ch := channelsIDM[id]
+	if ch == nil || ch.CredentialRef != reference || ch.Key != "" || len(ch.Keys) != 0 || size <= 0 || ch.ChannelInfo.MultiKeySize != size {
+		return 0, errors.New("managed credential unavailable")
+	}
+	start := ch.ChannelInfo.MultiKeyPollingIndex
+	if start < 0 || start >= size {
+		start = 0
+	}
+	for i := range size {
+		idx := (start + i) % size
+		status, found := ch.ChannelInfo.MultiKeyStatusList[idx]
+		if !found || status == common.ChannelStatusEnabled {
+			ch.ChannelInfo.MultiKeyPollingIndex = (idx + 1) % size
+			return idx, nil
+		}
+	}
+	return 0, errors.New("no enabled credential slots")
 }
 
 func SyncChannelCache(frequency int) {

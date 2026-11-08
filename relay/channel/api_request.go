@@ -486,6 +486,7 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 	}
 
 	common2.SetContextKey(c, appconstant.ContextKeyUpstreamRequestOrigin, req.URL.Scheme+"://"+req.URL.Host)
+	req = req.WithContext(c.Request.Context())
 	resp, err := relayClient.Do(req)
 	if err != nil {
 		safeErr := common2.SafeOutboundError(err)

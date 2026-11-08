@@ -258,6 +258,14 @@ func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
 		selectedIdx := enabledIdx[rand.Intn(len(enabledIdx))]
 		return keys[selectedIdx], selectedIdx, nil
 	case constant.MultiKeyModePolling:
+		if channel.CredentialRef != "" && common.MemoryCacheEnabled {
+			idx, err := nextManagedPollingIndex(channel.Id, channel.CredentialRef, len(keys))
+			if err != nil {
+				return "", 0, types.NewError(err, types.ErrorCodeChannelNoAvailableKey)
+			}
+			channel.ChannelInfo.MultiKeyPollingIndex = (idx + 1) % len(keys)
+			return keys[idx], idx, nil
+		}
 		// Use channel-specific lock to ensure thread-safe polling
 
 		channelInfo, err := CacheGetChannelInfo(channel.Id)
@@ -456,6 +464,11 @@ func GetChannelById(id int, selectAll bool) (*Channel, error) {
 }
 
 func BatchInsertChannels(channels []Channel) error {
+	for _, channel := range channels {
+		if channel.CredentialRef != "" {
+			return errors.New("managed channel creation requires a supported credential binding operation")
+		}
+	}
 	if len(channels) == 0 {
 		return nil
 	}
@@ -552,6 +565,9 @@ func (channel *Channel) GetStatusCodeMapping() string {
 }
 
 func (channel *Channel) Insert() error {
+	if channel.CredentialRef != "" {
+		return errors.New("managed channel creation requires a supported credential binding operation")
+	}
 	var err error
 	err = DB.Create(channel).Error
 	if err != nil {
@@ -770,7 +786,7 @@ func UpdateChannelStatus(channelId int, usingKey string, status int, reason stri
 
 	if common.MemoryCacheEnabled {
 		channelCache, _ := CacheGetChannel(channelId)
-		if channelCache == nil {
+		if channelCache == nil || channelCache.CredentialRef != "" {
 			return false
 		}
 		if channelCache.ChannelInfo.IsMultiKey {
@@ -801,7 +817,7 @@ func UpdateChannelStatus(channelId int, usingKey string, status int, reason stri
 		}
 	}()
 	channel, err := GetChannelById(channelId, true)
-	if err != nil {
+	if err != nil || channel.CredentialRef != "" {
 		return false
 	} else {
 		// A manual channel operation must replace the exhaustion reason even

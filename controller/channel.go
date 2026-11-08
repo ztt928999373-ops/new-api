@@ -509,6 +509,11 @@ func GetChannelKey(c *gin.Context) {
 		return
 	}
 
+	if channel.CredentialRef != "" {
+		credentialFailure(c)
+		return
+	}
+
 	// 记录操作审计日志（高危：查看渠道密钥）
 	recordManageAudit(c, "channel.key_view", map[string]any{
 		"id":   channelId,

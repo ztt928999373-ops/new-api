@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
-	"runtime"
 
 	"github.com/QuantumNous/new-api/common"
 )
@@ -28,6 +27,12 @@ type localRing struct {
 // Never clone a writable ring or restore counters and resume the old active KEK.
 type LocalFileKeyProvider struct{ path string }
 
+// InitializeLocalDirectory explicitly creates a NEW private key directory.
+// Startup never repairs an existing directory or broadens/changes its ACL.
+func InitializeLocalDirectory(path string) error {
+	return createPrivateDirectory(path)
+}
+
 func newLocalKey() (string, localKey, error) {
 	k := make([]byte, 32)
 	id := make([]byte, 16)
@@ -43,6 +48,9 @@ func newLocalKey() (string, localKey, error) {
 
 // InitializeLocalFile is an explicit operator operation. It never overwrites.
 func InitializeLocalFile(path string) error {
+	if validatePrivatePath(filepath.Dir(path), true) != nil {
+		return ErrUnavailable
+	}
 	id, key, err := newLocalKey()
 	if err != nil {
 		return err
@@ -53,11 +61,14 @@ func InitializeLocalFile(path string) error {
 		return ErrUnavailable
 	}
 	defer clear(b)
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	f, err := createPrivateFile(path)
 	if err != nil {
 		return ErrUnavailable
 	}
 	defer f.Close()
+	if validatePrivatePath(path, false) != nil {
+		return ErrUnavailable
+	}
 	if _, err = f.Write(b); err != nil {
 		return ErrUnavailable
 	}
@@ -88,11 +99,11 @@ func clearRing(r localRing) {
 }
 
 func (p *LocalFileKeyProvider) load() (localRing, error) {
-	info, err := os.Lstat(p.path)
-	if err != nil || !info.Mode().IsRegular() || info.Size() > 1<<20 {
+	if validatePrivatePath(filepath.Dir(p.path), true) != nil || validatePrivatePath(p.path, false) != nil {
 		return localRing{}, ErrUnavailable
 	}
-	if runtime.GOOS != "windows" && info.Mode().Perm()&0077 != 0 {
+	info, err := os.Lstat(p.path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > 1<<20 {
 		return localRing{}, ErrUnavailable
 	}
 	b, err := os.ReadFile(p.path)
@@ -119,6 +130,9 @@ func (p *LocalFileKeyProvider) load() (localRing, error) {
 }
 
 func (p *LocalFileKeyProvider) save(r localRing) error {
+	if validatePrivatePath(filepath.Dir(p.path), true) != nil || validatePrivatePath(p.path, false) != nil {
+		return ErrUnavailable
+	}
 	b, err := common.Marshal(r)
 	if err != nil {
 		return ErrUnavailable
@@ -130,6 +144,10 @@ func (p *LocalFileKeyProvider) save(r localRing) error {
 	}
 	name := f.Name()
 	defer os.Remove(name)
+	if preservePrivatePermissions(name, p.path) != nil || validatePrivatePath(name, false) != nil {
+		_ = f.Close()
+		return ErrUnavailable
+	}
 	if _, err = f.Write(b); err == nil {
 		err = f.Sync()
 	}
@@ -141,7 +159,10 @@ func (p *LocalFileKeyProvider) save(r localRing) error {
 }
 
 func (p *LocalFileKeyProvider) lock() (func(), error) {
-	f, err := os.OpenFile(p.path+".lock", os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if validatePrivatePath(filepath.Dir(p.path), true) != nil {
+		return nil, ErrUnavailable
+	}
+	f, err := createPrivateFile(p.path + ".lock")
 	if err != nil {
 		return nil, ErrUnavailable
 	}

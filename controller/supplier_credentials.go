@@ -123,8 +123,8 @@ func TestSupplierCredential(c *gin.Context) {
 	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
-	err = service.WithConfiguredCredential(ctx, actor, h.ID, uint64(h.CurrentVersion), func(secret []byte) error {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.openai.com/v1/models", nil)
+	err = service.WithConfiguredCredentialContext(ctx, actor, h.ID, uint64(h.CurrentVersion), func(useCtx context.Context, secret []byte) error {
+		req, err := http.NewRequestWithContext(useCtx, http.MethodGet, "https://api.openai.com/v1/models", nil)
 		if err != nil {
 			return credentialcrypto.ErrUnavailable
 		}

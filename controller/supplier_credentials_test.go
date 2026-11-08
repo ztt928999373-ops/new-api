@@ -25,7 +25,9 @@ func (f credentialAPITestTransport) RoundTrip(r *http.Request) (*http.Response, 
 
 func TestSupplierCredentialManagementNeverReturnsPlaintext(t *testing.T) {
 	setupTaskPluginBindChannelTest(t)
-	path := filepath.Join(t.TempDir(), "synthetic-ring")
+	keyDir := filepath.Join(t.TempDir(), "keys")
+	require.NoError(t, credentialcrypto.InitializeLocalDirectory(keyDir))
+	path := filepath.Join(keyDir, "synthetic-ring")
 	require.NoError(t, credentialcrypto.InitializeLocalFile(path))
 	p, err := credentialcrypto.NewLocalFileKeyProvider(path)
 	require.NoError(t, err)

@@ -57,14 +57,16 @@ func (a *syntheticAudit) Record(_ context.Context, e Event) error {
 
 func TestResolverOwnerPlatformRevocationAndAuditFailure(t *testing.T) {
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "test-ring")
+	keyDir := filepath.Join(t.TempDir(), "keys")
+	require.NoError(t, credentialcrypto.InitializeLocalDirectory(keyDir))
+	path := filepath.Join(keyDir, "test-ring")
 	require.NoError(t, credentialcrypto.InitializeLocalFile(path))
 	p, err := credentialcrypto.NewLocalFileKeyProvider(path)
 	require.NoError(t, err)
 	i := credentialcrypto.Identity{Environment: "test", TenantID: "default", OwnerType: "byok", OwnerID: "u1", CredentialID: "c1", Provider: "openai", CredentialType: "api_key", Purpose: "relay", Version: 1}
 	e, err := credentialcrypto.Seal(ctx, p, "local-test", i, []byte("synthetic-secret"))
 	require.NoError(t, err)
-	store := &syntheticStore{Record{Identity: i, Envelope: e, Status: "active"}}
+	store := &syntheticStore{Record{Identity: i, Envelope: e, Status: "active", CurrentVersion: 1}}
 	audit := &syntheticAudit{}
 	r := Resolver{Environment: "test", Repository: store, Providers: map[string]credentialcrypto.KeyProvider{"local-test": p}, Audit: audit}
 	used := 0
@@ -83,7 +85,7 @@ func TestResolverOwnerPlatformRevocationAndAuditFailure(t *testing.T) {
 	i.OwnerType, i.OwnerID = "platform", "platform"
 	e, err = credentialcrypto.Seal(ctx, p, "local-test", i, []byte("synthetic-secret"))
 	require.NoError(t, err)
-	store.record = Record{Identity: i, Envelope: e, Status: "active"}
+	store.record = Record{Identity: i, Envelope: e, Status: "active", CurrentVersion: 1}
 	require.ErrorIs(t, r.WithCredential(ctx, owner, "c1", 1, "relay", use), credentialcrypto.ErrUnavailable)
 	require.NoError(t, r.WithCredential(ctx, Principal{TenantID: "default", UserID: "admin", PlatformOperator: true}, "c1", 1, "relay", use))
 	require.Equal(t, 2, used)

@@ -157,7 +157,7 @@ func (s *Store) GetForUse(ctx context.Context, id string, version uint64) (Recor
 	if common.UnmarshalJsonStr(v.Envelope, &e) != nil {
 		return Record{}, credentialcrypto.ErrUnavailable
 	}
-	return Record{Identity: identity(h, int64(version)), Envelope: e, Status: h.Status}, nil
+	return Record{Identity: identity(h, int64(version)), Envelope: e, Status: h.Status, CurrentVersion: uint64(h.CurrentVersion)}, nil
 }
 
 // Replace uses an optimistic revision fence; competing writes cannot silently win.
@@ -189,6 +189,9 @@ func (s *Store) Replace(ctx context.Context, actor Principal, id string, revisio
 	if err != nil {
 		return Head{}, credentialcrypto.ErrUnavailable
 	}
+	g := credentialAdmission(s.Environment, id)
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	err = s.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		result := tx.Model(&Head{}).Where("id = ? AND revision = ? AND status <> ?", id, revision, "revoked").Updates(map[string]any{"current_version": next, "revision": revision + 1})
 		if result.Error != nil {
@@ -205,6 +208,7 @@ func (s *Store) Replace(ctx context.Context, actor Principal, id string, revisio
 	if err != nil {
 		return Head{}, credentialcrypto.ErrUnavailable
 	}
+	g.invalidate(uint64(next), false)
 	h.CurrentVersion, h.Revision = next, revision+1
 	return h, nil
 }
@@ -213,6 +217,9 @@ func (s *Store) SetStatus(ctx context.Context, actor Principal, id string, revis
 	if status != "active" && status != "disabled" && status != "revoked" {
 		return credentialcrypto.ErrUnavailable
 	}
+	g := credentialAdmission(s.Environment, id)
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	var h Head
 	if s.DB.WithContext(ctx).First(&h, "id = ?", id).Error != nil || !owns(actor, h) || h.Environment != s.Environment || h.Status == "revoked" {
 		return credentialcrypto.ErrUnavailable
@@ -227,6 +234,7 @@ func (s *Store) SetStatus(ctx context.Context, actor Principal, id string, revis
 	if err != nil {
 		return credentialcrypto.ErrUnavailable
 	}
+	g.invalidate(uint64(h.CurrentVersion), status != "active")
 	return nil
 }
 

@@ -5,6 +5,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -14,10 +16,89 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/credentialcrypto"
 	"github.com/QuantumNous/new-api/service/credentials"
+	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 )
+
+func TestManagedRequestPollingCacheAndRevocation(t *testing.T) {
+	ctx := context.Background()
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "managed.db")), &gorm.Config{})
+	require.NoError(t, err)
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, sqlDB.Close()) })
+	require.NoError(t, db.AutoMigrate(&model.Channel{}, &model.Ability{}))
+	dir := filepath.Join(t.TempDir(), "keys")
+	require.NoError(t, credentialcrypto.InitializeLocalDirectory(dir))
+	path := filepath.Join(dir, "ring")
+	require.NoError(t, credentialcrypto.InitializeLocalFile(path))
+	p, err := credentialcrypto.NewLocalFileKeyProvider(path)
+	require.NoError(t, err)
+	s := &credentials.Store{DB: db, Environment: "test", ProviderID: "local-test", Provider: p}
+	require.NoError(t, s.MigrateSchema())
+	actor := credentials.Principal{TenantID: "default", UserID: "synthetic-admin", PlatformOperator: true}
+	h, err := s.Create(ctx, actor, true, "openai", "channel_key_bundle", "relay", []byte("synthetic-zero\nsynthetic-disabled\nsynthetic-two"))
+	require.NoError(t, err)
+	ch := model.Channel{Name: "synthetic-managed", Type: constant.ChannelTypeOpenAI, CredentialRef: h.ID, Status: common.ChannelStatusEnabled, Group: "default", Models: "synthetic-model", ChannelInfo: model.ChannelInfo{IsMultiKey: true, MultiKeySize: 3, MultiKeyMode: constant.MultiKeyModePolling, MultiKeyStatusList: map[int]int{1: common.ChannelStatusManuallyDisabled}}}
+	require.NoError(t, db.Create(&ch).Error)
+	require.NoError(t, db.Create(&model.Ability{Group: "default", Model: "synthetic-model", ChannelId: ch.Id, Enabled: true}).Error)
+	oldDB, oldMemory := model.DB, common.MemoryCacheEnabled
+	model.DB, common.MemoryCacheEnabled = db, true
+	t.Cleanup(func() {
+		require.NoError(t, db.Delete(&model.Channel{}, ch.Id).Error)
+		model.InitChannelCache()
+		model.DB, common.MemoryCacheEnabled = oldDB, oldMemory
+	})
+	old := SetChannelCredentialResolver(&credentials.Resolver{Environment: "test", Repository: s, Providers: map[string]credentialcrypto.KeyProvider{"local-test": p}, Audit: s})
+	t.Cleanup(func() { SetChannelCredentialResolver(old) })
+	model.InitChannelCache()
+	var live *gin.Context
+	for i, want := range []int{0, 2, 0, 2, 0, 2} {
+		cached, err := model.CacheGetChannel(ch.Id)
+		require.NoError(t, err)
+		require.Empty(t, cached.Key)
+		require.Empty(t, cached.Keys)
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+		request, err := BindChannelCredentialRequest(c, cached, 123)
+		require.NoError(t, err)
+		key, index, keyErr := request.GetNextEnabledKey()
+		require.Nil(t, keyErr)
+		require.Equal(t, want, index)
+		if want == 0 {
+			require.Equal(t, "synthetic-zero", key)
+		} else {
+			require.Equal(t, "synthetic-two", key)
+		}
+		require.Empty(t, cached.Key)
+		require.Empty(t, cached.Keys)
+		if i == 0 {
+			model.InitChannelCache()
+		} // state survives refresh without caching plaintext
+		if i == 5 {
+			live = c
+		} else {
+			ReleaseChannelCredentialRequest(c)
+		}
+	}
+	defer ReleaseChannelCredentialRequest(live)
+	liveContext := live.Request.Context()
+	second := &credentials.Store{DB: db, Environment: s.Environment, ProviderID: s.ProviderID, Provider: p}
+	require.NoError(t, second.SetStatus(ctx, actor, h.ID, 1, "revoked"))
+	require.Error(t, liveContext.Err())
+	cached, err := model.CacheGetChannel(ch.Id)
+	require.NoError(t, err)
+	next, _ := gin.CreateTestContext(httptest.NewRecorder())
+	next.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	_, err = BindChannelCredentialRequest(next, cached, 123)
+	require.Error(t, err)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/tasks/synthetic", nil)
+	_, err = BindChannelCredentialRequest(c, cached, 123)
+	require.Error(t, err, "unsupported task entry never acquires a credential")
+}
 
 func TestEncryptedChannelMigrationBackupMultiKeyAndRevocation(t *testing.T) {
 	ctx := context.Background()
@@ -29,7 +110,9 @@ func TestEncryptedChannelMigrationBackupMultiKeyAndRevocation(t *testing.T) {
 	sqlDB.SetMaxOpenConns(1)
 	t.Cleanup(func() { require.NoError(t, sqlDB.Close()) })
 	require.NoError(t, db.AutoMigrate(&model.Channel{}, &model.Ability{}))
-	path := filepath.Join(dir, "synthetic-ring")
+	keyDir := filepath.Join(dir, "keys")
+	require.NoError(t, credentialcrypto.InitializeLocalDirectory(keyDir))
+	path := filepath.Join(keyDir, "synthetic-ring")
 	require.NoError(t, credentialcrypto.InitializeLocalFile(path))
 	p, err := credentialcrypto.NewLocalFileKeyProvider(path)
 	require.NoError(t, err)
@@ -87,16 +170,18 @@ func TestEncryptedChannelMigrationBackupMultiKeyAndRevocation(t *testing.T) {
 	r := &credentials.Resolver{Environment: "test", Repository: s, Providers: map[string]credentialcrypto.KeyProvider{"local-test": p}, Audit: s}
 	old := SetChannelCredentialResolver(r)
 	defer SetChannelCredentialResolver(old)
-	resolved, err := ResolveChannelForRequest(ctx, &cached, 123)
-	require.NoError(t, err)
-	require.Equal(t, []string{"synthetic-one", "synthetic-two"}, resolved.GetKeys())
+	h := credentials.Principal{TenantID: "default", UserID: "admin", PlatformOperator: true}
+	require.NoError(t, r.WithCredential(ctx, h, ref, 1, "relay", func(secret []byte) error {
+		candidate := model.Channel{Key: string(secret)}
+		require.Equal(t, []string{"synthetic-one", "synthetic-two"}, candidate.GetKeys())
+		return nil
+	}))
 	require.Empty(t, cached.Key)
 	require.Empty(t, cached.Keys)
-	h := credentials.Principal{TenantID: "default", UserID: "admin", PlatformOperator: true}
 	_, err = s.Replace(ctx, h, ref, 1, []byte("wrong-slot-count"))
 	require.Error(t, err)
 	require.NoError(t, s.SetStatus(ctx, h, ref, 1, "revoked"))
-	_, err = ResolveChannelForRequest(ctx, &cached, 123)
+	err = r.WithCredential(ctx, h, ref, 1, "relay", func([]byte) error { t.Fatal("revoked credential used"); return nil })
 	require.Error(t, err)
 	// Backup remains intact and actually restores the original legacy key.
 	restored, err := gorm.Open(sqlite.Open(backup), &gorm.Config{})
