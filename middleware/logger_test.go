@@ -21,15 +21,15 @@ func TestSetUpLoggerMasksQueryCredentials(t *testing.T) {
 	})
 
 	for _, tc := range []struct{ target, loggedPath string }{
-		{"/v1/models?%6bey=first&key=second&API-Key=third&session_token=fourth&alt=sse",
-			"/v1/models?API-Key=%2A%2A%2Amasked%2A%2A%2A&alt=sse&key=%2A%2A%2Amasked%2A%2A%2A&session_token=%2A%2A%2Amasked%2A%2A%2A"},
-		{"/v1/models%23test%25?key=#secret&alt=#sse",
-			"/v1/models%23test%25?alt=%23sse&key=%2A%2A%2Amasked%2A%2A%2A"},
-		{"//v1%2Fmodels?key=secret", "//v1%2Fmodels?key=%2A%2A%2Amasked%2A%2A%2A"},
-		{"/v1/models?key=bad%ZZ&%ZZ=bad&token=bad;other=true&alt=sse", "/v1/models?alt=sse"},
-		{"/v1/models?key=bad%ZZ", "/v1/models?"},
-		{"/v1/models?alt=sse&api-version=2024-02-01", "/v1/models?alt=sse&api-version=2024-02-01"},
+		{"/v1/models?%6bey=first&key=second&API-Key=third&session_token=fourth&alt=sse", "/v1/models?[query omitted]"},
+		{"/v1/models%23test%25?key=#secret&alt=#sse", "/v1/models%23test%25?[query omitted]"},
+		{"//v1%2Fmodels?key=secret", "//v1%2Fmodels?[query omitted]"},
+		{"/v1/models?key=bad%ZZ&%ZZ=bad&token=bad;other=true&alt=sse", "/v1/models?[query omitted]"},
+		{"/v1/models?key=bad%ZZ", "/v1/models?[query omitted]"},
+		{"/v1/models?alt=sse&api-version=2024-02-01", "/v1/models?[query omitted]"},
+		{"/v1/models?custom_auth=synthetic-opaque-header", "/v1/models?[query omitted]"},
 		{"/v1/models", "/v1/models"},
+		{"/v1/%0Ainjected", "/v1/\\ninjected"},
 		{"/%61pi/oauth/test?code=secret&state=secret", "/api/oauth/test"},
 	} {
 		t.Run(tc.target, func(t *testing.T) {

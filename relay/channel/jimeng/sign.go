@@ -46,7 +46,7 @@ func SetPayloadHash(c *gin.Context, req any) error {
 	if err != nil {
 		return err
 	}
-	logger.LogInfo(c, common.LogText("SetPayloadHash body: %s", body))
+	logger.LogInfo(c, common.LogText("event=payload_hash bytes=%d", len(body)))
 	payloadHash := sha256.Sum256(body)
 	hexPayloadHash := hex.EncodeToString(payloadHash[:])
 	c.Set(HexPayloadHashKey, hexPayloadHash)

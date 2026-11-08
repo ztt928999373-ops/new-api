@@ -97,6 +97,7 @@ func LogDebug(ctx context.Context, msg string, args ...any) {
 }
 
 func logHelper(ctx context.Context, level string, msg string) {
+	msg = common.SanitizeRequestDiagnostic(ctx, nil, msg)
 	var id any = "SYSTEM"
 	if ctx != nil {
 		if requestID := ctx.Value(common.RequestIdKey); requestID != nil {
@@ -109,7 +110,7 @@ func logHelper(ctx context.Context, level string, msg string) {
 	if level == loggerINFO {
 		writer = gin.DefaultWriter
 	}
-	_, _ = fmt.Fprintf(writer, "[%s] %v | %s | %s \n", level, now.Format("2006/01/02 - 15:04:05"), id, msg)
+	_, _ = fmt.Fprintf(writer, "[%s] %v | %s | %s \n", level, now.Format("2006/01/02 - 15:04:05"), common.SanitizeRequestDiagnostic(ctx, nil, fmt.Sprint(id)), msg)
 	common.LogWriterMu.RUnlock()
 	logCount++ // we don't need accurate count, so no lock here
 	if logCount > maxLogCount && !setupLogWorking {
@@ -180,10 +181,5 @@ func LogJson(ctx context.Context, msg string, obj any) {
 	if !common.DebugEnabled {
 		return
 	}
-	jsonStr, err := common.Marshal(obj)
-	if err != nil {
-		LogError(ctx, common.LogText("json marshal failed: %s", err.Error()))
-		return
-	}
-	LogDebug(ctx, "%s | %s", msg, jsonStr)
+	LogDebug(ctx, "%s | payload_type=%T payload=omitted", msg, obj)
 }

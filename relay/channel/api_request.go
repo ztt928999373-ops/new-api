@@ -156,12 +156,12 @@ func applyHeaderOverridePlaceholders(template string, c *gin.Context, apiKey str
 		afterPrefix := trimmed[len(clientHeaderPlaceholderPrefix):]
 		end := strings.Index(afterPrefix, "}")
 		if end < 0 || end != len(afterPrefix)-1 {
-			return "", false, fmt.Errorf("client_header placeholder must be the full value: %q", template)
+			return "", false, errors.New("client_header placeholder must be the full value")
 		}
 
 		name := strings.TrimSpace(afterPrefix[:end])
 		if name == "" {
-			return "", false, fmt.Errorf("client_header placeholder name is empty: %q", template)
+			return "", false, errors.New("client_header placeholder name is empty")
 		}
 		if c == nil || c.Request == nil {
 			return "", false, fmt.Errorf("missing request context for client_header placeholder")
@@ -328,7 +328,7 @@ func DoApiRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 	logger.LogDebug(c, "fullRequestURL: %s", common.SanitizeURLForLog(fullRequestURL))
 	req, err := http.NewRequest(c.Request.Method, fullRequestURL, requestBody)
 	if err != nil {
-		return nil, fmt.Errorf("new request failed: %w", err)
+		return nil, fmt.Errorf("new request failed: %w", common2.SafeOutboundError(err))
 	}
 	ApplyUpstreamBodyMetadata(req, requestBody)
 	headers := req.Header
@@ -356,7 +356,7 @@ func DoFormRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBod
 	logger.LogDebug(c, "fullRequestURL: %s", common.SanitizeURLForLog(fullRequestURL))
 	req, err := http.NewRequest(c.Request.Method, fullRequestURL, requestBody)
 	if err != nil {
-		return nil, fmt.Errorf("new request failed: %w", err)
+		return nil, fmt.Errorf("new request failed: %w", common2.SafeOutboundError(err))
 	}
 	ApplyUpstreamBodyMetadata(req, requestBody)
 	// set form data
@@ -410,7 +410,7 @@ func DoWssRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 	if info.ChannelSetting.Proxy != "" {
 		proxyURL, _, proxyErr := common2.ParseProxyURLRuntime(info.ChannelSetting.Proxy)
 		if proxyErr != nil {
-			return nil, proxyErr
+			return nil, common2.SafeOutboundError(proxyErr)
 		}
 		dialer.Proxy = http.ProxyURL(proxyURL)
 	}
@@ -426,7 +426,7 @@ func DoWssRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 				_ = resp.Body.Close()
 			}
 		}
-		return nil, types.NewErrorWithStatusCode(fmt.Errorf("dial failed to %s: %w", common.SanitizeURLForLog(fullRequestURL), err), types.ErrorCodeDoRequestFailed, statusCode)
+		return nil, types.NewErrorWithStatusCode(common2.SafeOutboundError(err), types.ErrorCodeDoRequestFailed, statusCode)
 	}
 	return targetConn, nil
 }
@@ -457,7 +457,7 @@ func keepUpstreamRedirectResponse(_ *http.Request, _ []*http.Request) error {
 func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http.Response, error) {
 	client, err := service.GetHttpClientWithProxySettings(info.ChannelSetting.Proxy, info.ChannelSetting)
 	if err != nil {
-		return nil, fmt.Errorf("new proxy http client failed: %w", err)
+		return nil, common2.SafeOutboundError(err)
 	}
 	// Clients are cached and shared across channels, so override redirect
 	// behavior on a shallow copy instead of mutating the cached client. This
@@ -488,8 +488,9 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 	common2.SetContextKey(c, appconstant.ContextKeyUpstreamRequestOrigin, req.URL.Scheme+"://"+req.URL.Host)
 	resp, err := relayClient.Do(req)
 	if err != nil {
-		logger.LogError(c, common2.LogText("do request failed: %s", err.Error()))
-		return nil, types.NewError(err, types.ErrorCodeDoRequestFailed, types.ErrOptionWithHideErrMsg("upstream error: do request failed"))
+		safeErr := common2.SafeOutboundError(err)
+		logger.LogError(c, fmt.Sprintf("event=upstream_request_failed channel_id=%d channel_type=%d reason=%s", info.ChannelId, info.ChannelType, safeErr.Error()))
+		return nil, types.NewError(safeErr, types.ErrorCodeDoRequestFailed, types.ErrOptionWithHideErrMsg("upstream error: do request failed"))
 	}
 	if resp == nil {
 		return nil, errors.New("resp is nil")
@@ -520,7 +521,7 @@ func DoTaskApiRequest(a TaskAdaptor, c *gin.Context, info *common.RelayInfo, req
 	}
 	req, err := newTaskAPIRequest(c, fullRequestURL, requestBody)
 	if err != nil {
-		return nil, fmt.Errorf("new request failed: %w", err)
+		return nil, fmt.Errorf("new request failed: %w", common2.SafeOutboundError(err))
 	}
 	ApplyUpstreamBodyMetadata(req, requestBody)
 	// Do NOT wrap requestBody in a GetBody closure here: returning the same

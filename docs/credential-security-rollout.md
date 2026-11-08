@@ -108,3 +108,67 @@ OAuth/JSON 私钥不从原文末尾截取，使用随机展示标识。默认没
 不宣称完整产品、全部供应商/秘密迁移、数据库矩阵或真实供应商已验收。
 安全依据：OWASP Secrets Management、Key Management、Cryptographic Storage Cheat Sheets；
 认证与会话沿用 OWASP Authentication、Session Management；不宣称完整 ASVS 合规。
+
+
+## 第一批日志安全修复（2026-11-08）
+
+本批基于 a38a81786ec9f9de4088c920d1bf8813e50f21f1，仅修改诊断输出和秘密字段登记。
+不修改 OAuth 刷新算法/持久化、多 Key 轮询、Task.PrivateData、历史迁移或数据库 schema。
+
+### 日志边界
+
+- 智谱错误格式不再输出原始 Key，记录 provider、event、reason。
+- common/logger/relaykit 日志出口统一处理明确认证字段、认证方案、私钥和常见 token；
+  请求级额外移除已知渠道凭据、认证包字符串成员、自定义 Header 值及查询值，不保留全局秘密集合。
+- 原始请求/响应、流式帧、OpenRouter 企业错误 data、音频 multipart 内容及任意 LogJson
+  改为类型/长度/渠道等元数据；Debug 也不允许恢复这些内容。
+- HTTP/WebSocket/OAuth transport 错误仅显示安全原因，保留底层 cause 供 errors.Is/As 使用。
+  OAuth 请求、刷新 token 处理和数据库写回不在本批改动中。
+- 公共 OpenAI 错误封装不再将 OpenRouter 任意 metadata 拼接进消息；公开错误只保留安全标量，
+  保留项目 ErrorCode 的类型/序列化兼容性，覆盖绕过 HTTP handler 的其他 Relay 路径。
+- RelayErrorHandler 不再因 showBodyWhenFail 或 Debug 回显原始 body；过滤已知秘密，
+  删除可能含任意 Header/秘密的 error metadata 和非标复合 code，保留可用的错误类型、状态和安全消息。
+- HTTP 访问日志省略所有 query 值，包括未知参数；不修改实际请求 URL。
+- 请求 ID 经过日志清理，文本换行转义，避免上游伪造多条日志。
+
+这是“源头省略 + 已知请求秘密移除 + 出口防御”，不是任意文本秘密识别器。
+未知自定义响应若在脱离请求/凭据上下文的路径中出现无标记秘密，不能仅靠正则证明安全。
+第三方 SDK、GORM/SQL 日志及外围代理访问日志仍须分别核验配置，不能宣称全部日志系统完成验收。
+
+### 秘密字段登记
+
+service/credentials/secret_fields.go 使用准确的命名空间路径，区分供应商、OAuth、第三方秘密、
+秘密容器、公开配置和插件标识。未知字段返回 pending_confirmation；格式审查与字段分类分离。
+只登记现有受限 OpenAI bundle 格式，不扩大迁移白名单。登记结果不是加密或迁移授权。
+
+### 仍未迁移的秘密面
+
+- 旧 Channel.Key、多 Key/JSON Key 与长期缓存；仅既有受限 OpenAI 引用已接入。
+- Codex access/refresh/ID token 的版本化写回与并发刷新。
+- Vertex 服务账号、AWS/百度/讯飞/腾讯等复合认证、派生 Token 缓存。
+- HeaderOverride/Other/Settings/ParamOverride、自定义 JSON、带凭据 URL/代理。
+- 异步任务明文快照、固定凭据版本、并发撤销及在途取消。
+- 全局 options、登录/支付/邮件/对象存储等相邻秘密域，以及旧备份/WAL/binlog。
+
+下一批先统一 OAuth 写入入口、刷新租约/CAS 和派生缓存版本，再处理任务凭据固定版本与撤销。
+本批不自动开始上述工作，仍禁止真实 Key 接入和全量迁移。
+
+安全参考：OWASP Logging Cheat Sheet 的 Data to exclude、Verification 和 Log Injection；
+Authentication/Session Management 的秘密与 token 不进入日志原则。本批不宣称完整 ASVS 合规。
+https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html
+https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html
+https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html
+
+### 本批本地验证记录
+
+- Windows Go 1.26.10：根模块 `go vet ./...`、`go build ./...` 通过。
+- relaykit：`GOWORK=off go vet ./...`、`go build ./...`、`go test ./...` 通过。
+- 新增智谱/OpenAI/OpenRouter/OAuth/HTTP 错误脱敏、未知字段和正常诊断用例通过；
+  同时验证公共错误 metadata 旁路、错误码兼容性、换行和请求 ID。
+- 前端：`node node_modules/vitest/vitest.mjs run --pool=threads --maxWorkers=2 --reporter=verbose`，
+  209 个文件、2509 个用例全部通过。默认进程池未正常结束后已停止，采用线程池完成相同完整测试集；
+  未修改前端代码、配置或依赖。jsdom scrollTo/canvas 和已有 UI 警告不影响最终通过结果。
+- 完整后端回归仍存在 Windows HTTP/2 GOAWAY/不可重放及亲和性计数失败；
+  均已在未修改的 product/v1（47f3f7bebfff8c422fb55980118390c398060c01）复现，不作为新增回归修复。
+  不宣称全套测试、远端 CI 或 Linux 验证已通过。
+- 未执行数据库迁移、真实供应商调用或部署。GitHub CLI 未登录，远端 PR 更新与 CI 验证暂停。

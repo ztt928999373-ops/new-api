@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
-	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/gin-gonic/gin"
 )
 
@@ -35,13 +34,14 @@ func SetUpLogger(server *gin.Engine) {
 		if strings.HasPrefix(path, "/api/oauth/") || strings.HasPrefix(path, "/oauth/") {
 			path, _, _ = strings.Cut(path, "?")
 		} else if param.Request.URL.RawQuery != "" {
-			query := param.Request.URL.Query().Encode()
-			path = param.Request.URL.EscapedPath() + relaycommon.SanitizeURLForLog("?"+query)
+			// Unknown query names may carry credentials too. Never log their values.
+			path = param.Request.URL.EscapedPath() + "?[query omitted]"
 		}
+		path = common.SanitizeRequestDiagnostic(nil, param.Request, path)
 		return fmt.Sprintf("[GIN] %s | %s | %s | %3d | %13v | %15s | %7s %s\n",
 			param.TimeStamp.Format("2006/01/02 - 15:04:05"),
-			tag,
-			requestID,
+			common.SanitizeRequestDiagnostic(nil, param.Request, tag),
+			common.SanitizeRequestDiagnostic(nil, param.Request, requestID),
 			param.StatusCode,
 			param.Latency,
 			param.ClientIP,

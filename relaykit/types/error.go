@@ -211,7 +211,7 @@ func (e *NewAPIError) ToOpenAIError(upstreamURLs ...string) OpenAIError {
 	if result.Message == "" {
 		result.Message = string(e.errorType)
 	}
-	return result
+	return sanitizeOpenAIError(result)
 }
 
 // ToClaudeError masks the upstream addresses like ToOpenAIError.
@@ -241,7 +241,28 @@ func (e *NewAPIError) ToClaudeError(upstreamURLs ...string) ClaudeError {
 	if result.Message == "" {
 		result.Message = string(e.errorType)
 	}
+	result.Type = kitutil.MaskSensitiveInfo(result.Type, upstreamURLs...)
 	return result
+}
+
+// Provider metadata is arbitrary and can contain request headers or tokens.
+// Keep the error contract's diagnostic scalar fields, never append opaque
+// provider objects to the message or expose them on alternate relay paths.
+func sanitizeOpenAIError(value OpenAIError) OpenAIError {
+	value.Metadata = nil
+	value.Message = kitutil.MaskSensitiveInfo(value.Message)
+	value.Type = kitutil.MaskSensitiveInfo(value.Type)
+	value.Param = kitutil.MaskSensitiveInfo(value.Param)
+	switch code := value.Code.(type) {
+	case string:
+		value.Code = kitutil.MaskSensitiveInfo(code)
+	case ErrorCode:
+		value.Code = ErrorCode(kitutil.MaskSensitiveInfo(string(code)))
+	case nil, int, int64, float64, json.Number:
+	default:
+		value.Code = nil
+	}
+	return value
 }
 
 type NewAPIErrorOptions func(*NewAPIError)
@@ -320,6 +341,7 @@ func NewErrorWithStatusCode(err error, errorCode ErrorCode, statusCode int, ops 
 }
 
 func WithOpenAIError(openAIError OpenAIError, statusCode int, ops ...NewAPIErrorOptions) *NewAPIError {
+	openAIError = sanitizeOpenAIError(openAIError)
 	code, ok := openAIError.Code.(string)
 	if !ok {
 		if openAIError.Code != nil {
@@ -337,13 +359,6 @@ func WithOpenAIError(openAIError OpenAIError, statusCode int, ops ...NewAPIError
 		StatusCode: statusCode,
 		Err:        errors.New(openAIError.Message),
 		errorCode:  ErrorCode(code),
-	}
-	// OpenRouter
-	if len(openAIError.Metadata) > 0 {
-		openAIError.Message = fmt.Sprintf("%s (%s)", openAIError.Message, openAIError.Metadata)
-		e.Metadata = openAIError.Metadata
-		e.RelayError = openAIError
-		e.Err = errors.New(openAIError.Message)
 	}
 	for _, op := range ops {
 		op(e)

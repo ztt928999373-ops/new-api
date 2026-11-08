@@ -11,6 +11,31 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestSecretFieldClassificationRequiresExplicitContext(t *testing.T) {
+	require.Equal(t, "restricted_openai_only", CredentialFormatReview("openai", "channel_key_bundle"))
+	for _, provider := range []string{"vertex", "codex", "custom", "OpenAI"} {
+		require.Equal(t, "pending_confirmation", CredentialFormatReview(provider, "channel_key_bundle"))
+	}
+	for path, class := range map[string]FieldClassification{
+		"channel.key":              SupplierCredential,
+		"codex.refresh_token":      OAuthCredential,
+		"options.ResendApiKey":     ThirdPartySecret,
+		"channel.header_override":  SecretContainer,
+		"channel.name":             PublicConfiguration,
+		"task.plugin_snapshot.key": PluginIdentifier,
+		"custom_json.Key":          PendingClassification,
+		"unknown.api_key":          PendingClassification,
+		"channel.KEY":              PendingClassification,
+	} {
+		require.Equal(t, class, ClassifySecretField(path), path)
+	}
+	copy := SecretFieldInventory()
+	copy["channel.key"] = PublicConfiguration
+	delete(copy, "codex.refresh_token")
+	require.Equal(t, SupplierCredential, ClassifySecretField("channel.key"))
+	require.Equal(t, OAuthCredential, ClassifySecretField("codex.refresh_token"))
+}
+
 type syntheticStore struct{ record Record }
 
 func (s *syntheticStore) GetForUse(context.Context, string, uint64) (Record, error) {
