@@ -344,6 +344,17 @@ func awaitH2ServerResult(t *testing.T, resultCh <-chan h2ServerResult) h2ServerR
 	}
 }
 
+// finishH2TestConnection preserves queued protocol frames while closing a TCP
+// fixture. All accepted connections already have a bounded read/write deadline.
+func finishH2TestConnection(conn net.Conn) error {
+	defer conn.Close()
+	if err := conn.(*net.TCPConn).CloseWrite(); err != nil {
+		return err
+	}
+	_, err := io.Copy(io.Discard, conn)
+	return err
+}
+
 // runResetOnFirstStreamServer speaks just enough raw HTTP/2 to emulate an
 // upstream that accepts the first request, waits until the request body has
 // been fully written, and then resets the stream with REFUSED_STREAM (the
@@ -361,7 +372,11 @@ func runResetOnFirstStreamServer(ln net.Listener, expectRetry bool) <-chan h2Ser
 			res.err = err
 			return
 		}
-		defer conn.Close()
+		defer func() {
+			if err := finishH2TestConnection(conn); res.err == nil {
+				res.err = err
+			}
+		}()
 
 	attempts:
 		for attempt := 0; ; attempt++ {
@@ -417,15 +432,10 @@ func runGoAwayAfterFirstRequestServer(ln net.Listener) <-chan h2ServerResult {
 			if attempt == 0 {
 				err = framer.WriteGoAway(0, http2.ErrCodeNo, nil)
 				if err == nil {
-					// A TCP listener supplies TCPConn here. Half-close and drain
-					// under the existing deadline so unread client frames cannot
-					// turn this graceful GOAWAY fixture into a Windows TCP reset.
-					err = conn.(*net.TCPConn).CloseWrite()
-					if err == nil {
-						_, err = io.Copy(io.Discard, conn)
-					}
+					err = finishH2TestConnection(conn)
+				} else {
+					conn.Close()
 				}
-				conn.Close()
 				if err != nil {
 					res.err = err
 					return
@@ -434,7 +444,11 @@ func runGoAwayAfterFirstRequestServer(ln net.Listener) <-chan h2ServerResult {
 			}
 
 			err = writeH2TestResponse(framer, streamID)
-			conn.Close()
+			if err == nil {
+				err = finishH2TestConnection(conn)
+			} else {
+				conn.Close()
+			}
 			if err != nil {
 				res.err = err
 			}
