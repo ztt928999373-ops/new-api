@@ -27,6 +27,7 @@ const (
 const maxLogCount = 1000000
 
 var logCount int
+var logStateMu sync.Mutex // guards count and the single pending rotation
 var setupLogLock sync.Mutex
 var setupLogWorking bool
 var currentLogPath string
@@ -40,18 +41,19 @@ func GetCurrentLogPath() string {
 }
 
 func SetupLogger() {
+	if !setupLogLock.TryLock() {
+		log.Println(common.LogText("setup log is already working"))
+		return
+	}
 	defer func() {
+		// Release the setup lock while holding state protection so a new
+		// trigger cannot be lost between clearing the flag and unlocking.
+		logStateMu.Lock()
 		setupLogWorking = false
+		setupLogLock.Unlock()
+		logStateMu.Unlock()
 	}()
 	if *common.LogDir != "" {
-		ok := setupLogLock.TryLock()
-		if !ok {
-			log.Println(common.LogText("setup log is already working"))
-			return
-		}
-		defer func() {
-			setupLogLock.Unlock()
-		}()
 		logPath := filepath.Join(*common.LogDir, fmt.Sprintf("oneapi-%s.log", time.Now().Format("20060102150405")))
 		fd, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
@@ -112,10 +114,16 @@ func logHelper(ctx context.Context, level string, msg string) {
 	}
 	_, _ = fmt.Fprintf(writer, "[%s] %v | %s | %s \n", level, now.Format("2006/01/02 - 15:04:05"), common.SanitizeRequestDiagnostic(ctx, nil, fmt.Sprint(id)), msg)
 	common.LogWriterMu.RUnlock()
-	logCount++ // we don't need accurate count, so no lock here
+	logStateMu.Lock()
+	logCount++
+	rotate := false
 	if logCount > maxLogCount && !setupLogWorking {
 		logCount = 0
 		setupLogWorking = true
+		rotate = true
+	}
+	logStateMu.Unlock()
+	if rotate {
 		gopool.Go(func() {
 			SetupLogger()
 		})
