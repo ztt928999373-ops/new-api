@@ -7,9 +7,16 @@ on:
       - '!*-*'  # Ignore pre-release tags like v1.0.0-beta
       - '!*-alpha*' # Ignore alpha tags like v1.0.0-alpha
   workflow_dispatch:  # Allows manual triggering
+    inputs:
+      batch_d_acceptance:
+        description: 'Run only isolated Batch D Windows acceptance on its PR branch'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   build:
+    if: github.event_name != 'workflow_dispatch' || inputs.batch_d_acceptance != true
     strategy:
       matrix:
         # os: [macos-latest, windows-latest]
@@ -120,6 +127,46 @@ jobs:
           name: windows-build
           path: |
             electron/dist/*.exe
+
+  windows_acceptance:
+    name: Batch D independent Windows acceptance
+    if: github.event_name == 'workflow_dispatch' && inputs.batch_d_acceptance == true && github.repository == 'ztt928999373-ops/new-api' && github.ref == 'refs/heads/fix/v1-batchd-backend-acceptance'
+    runs-on: windows-2022
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: go.mod
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: '1.4.4'
+      - name: Build production frontend for the real local executable
+        working-directory: web
+        run: |
+          bun install --frozen-lockfile
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          bun run build
+          exit $LASTEXITCODE
+      - name: Windows private-directory, API, Mock and recovery acceptance
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: ./.github/scripts/windows-acceptance.ps1 -ExpectedSha $env:EXPECTED_SHA
+      - name: Preserve synthetic test evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: batchd-windows-${{ github.sha }}
+          path: windows-acceptance-logs/
+          retention-days: 7
 
   release:
     needs: build
