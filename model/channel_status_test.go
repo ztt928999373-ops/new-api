@@ -279,6 +279,10 @@ func testCommittedChannelRefreshFailure(t *testing.T) {
 	require.NoError(t, DB.Create(&ch).Error)
 	t.Cleanup(func() { DB.Where("channel_id = ?", ch.Id).Delete(&Ability{}); DB.Delete(&Channel{}, ch.Id) })
 	require.NoError(t, DB.Create(&Ability{ChannelId: ch.Id, Group: "default", Model: "synthetic-failure", Enabled: true}).Error)
+	healthy := Channel{Name: "synthetic-healthy", Key: "synthetic", Group: "default", Models: "synthetic-healthy", Status: common.ChannelStatusEnabled}
+	require.NoError(t, DB.Create(&healthy).Error)
+	require.NoError(t, DB.Create(&Ability{ChannelId: healthy.Id, Group: "default", Model: "synthetic-healthy", Enabled: true}).Error)
+	t.Cleanup(func() { DB.Where("channel_id = ?", healthy.Id).Delete(&Ability{}); DB.Delete(&Channel{}, healthy.Id) })
 	for _, table := range []string{"channels", "abilities"} {
 		_, err := SetChannelOverallStatus([]int{ch.Id}, common.ChannelStatusEnabled, "setup")
 		require.NoError(t, err)
@@ -303,6 +307,7 @@ func testCommittedChannelRefreshFailure(t *testing.T) {
 		require.NoError(t, err)
 		require.Nil(t, selected)
 		require.NoError(t, InitChannelCache())
+		require.True(t, IsChannelEnabledForGroupModel("default", "synthetic-healthy", healthy.Id))
 		require.False(t, IsChannelEnabledForGroupModel("default", "synthetic-failure", ch.Id))
 	}
 }

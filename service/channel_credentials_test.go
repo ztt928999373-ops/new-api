@@ -19,13 +19,37 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/require"
+	"gorm.io/driver/mysql"
+	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
 
 func TestManagedRequestPollingCacheAndRevocation(t *testing.T) {
 	ctx := context.Background()
-	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "managed.db")), &gorm.Config{})
+	previousType := common.MainDatabaseType()
+	defer common.SetMainDatabaseType(previousType)
+	var dialect gorm.Dialector = sqlite.Open(filepath.Join(t.TempDir(), "managed.db"))
+	switch os.Getenv("SYNTHETIC_MANAGED_DATABASE") {
+	case "mysql":
+		require.Equal(t, "local-synthetic", os.Getenv("SUANJIE_TEST_DATABASES"))
+		common.SetMainDatabaseType(common.DatabaseTypeMySQL)
+		dialect = mysql.Open("root:synthetic-test-only@tcp(127.0.0.1:23316)/credential_test?parseTime=true")
+	case "postgres":
+		require.Equal(t, "local-synthetic", os.Getenv("SUANJIE_TEST_DATABASES"))
+		common.SetMainDatabaseType(common.DatabaseTypePostgreSQL)
+		dialect = postgres.Open("host=127.0.0.1 port=25436 user=postgres password=synthetic-test-only dbname=credential_test sslmode=disable")
+	default:
+		common.SetMainDatabaseType(common.DatabaseTypeSQLite)
+	}
+	db, err := gorm.Open(dialect, &gorm.Config{})
 	require.NoError(t, err)
+	versionSQL := "SELECT VERSION()"
+	if db.Dialector.Name() == "sqlite" {
+		versionSQL = "SELECT sqlite_version()"
+	}
+	var engineVersion string
+	require.NoError(t, db.Raw(versionSQL).Scan(&engineVersion).Error)
+	t.Logf("managed database=%s engine=%s", db.Dialector.Name(), engineVersion)
 	sqlDB, err := db.DB()
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, sqlDB.Close()) })
@@ -47,6 +71,7 @@ func TestManagedRequestPollingCacheAndRevocation(t *testing.T) {
 	oldDB, oldMemory := model.DB, common.MemoryCacheEnabled
 	model.DB, common.MemoryCacheEnabled = db, true
 	t.Cleanup(func() {
+		require.NoError(t, db.Where("channel_id = ?", ch.Id).Delete(&model.Ability{}).Error)
 		require.NoError(t, db.Delete(&model.Channel{}, ch.Id).Error)
 		model.InitChannelCache()
 		model.DB, common.MemoryCacheEnabled = oldDB, oldMemory
