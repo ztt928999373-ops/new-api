@@ -57,7 +57,7 @@ func rejectUnsupportedManagedChannelOperation(c *gin.Context) {
 			return
 		}
 	}
-	if (route == "/" && c.Request.Method == http.MethodPost) || route == "/priority/reorder" {
+	if ((route == "/" || route == "/openai-integration") && c.Request.Method == http.MethodPost) || route == "/priority/reorder" {
 		c.Next()
 		return
 	}
@@ -124,6 +124,7 @@ func registerChannelRoutes(apiRouter *gin.RouterGroup) {
 }
 
 var channelPermissionRoutes = []permissionRoute{
+	{method: http.MethodPost, path: "/openai-integration", permission: authz.ChannelSensitiveWrite, handler: controller.PrepareOpenAIIntegration},
 	{method: http.MethodPost, path: "/credentials/:id/rewrap", permission: authz.ChannelSensitiveWrite, handler: controller.RewrapSupplierCredential},
 	{method: http.MethodPost, path: "/credentials", permission: authz.ChannelSensitiveWrite, handler: controller.CreateSupplierCredential},
 	{method: http.MethodGet, path: "/credentials/:id", permission: authz.ChannelRead, handler: controller.GetSupplierCredential},
