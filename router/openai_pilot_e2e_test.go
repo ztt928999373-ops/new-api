@@ -21,6 +21,7 @@ import (
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/service/credentials"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
+	"github.com/bytedance/gopkg/util/gopool"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
@@ -32,6 +33,13 @@ func TestOpenAIPilotAuthenticatedSettlement(t *testing.T) {
 			oldDB, oldLog := model.DB, model.LOG_DB
 			t.Cleanup(func() { model.DB, model.LOG_DB = oldDB, oldLog })
 			setupRelayRouterTestDB(t)
+			// All request producers below finish before this deferred barrier.
+			// gopool v0.1.3 decrements WorkerCount only after the task callback
+			// returns and its queue is empty. Drain before t.Cleanup restores
+			// RedisEnabled/DB/config that asynchronous metrics and refunds read.
+			defer func() {
+				require.Eventually(t, func() bool { return gopool.WorkerCount() == 0 }, 5*time.Second, time.Millisecond, "asynchronous relay work did not drain before fixture cleanup")
+			}()
 			require.NoError(t, model.DB.AutoMigrate(&model.Channel{}, &model.Log{}, &model.Option{}, &model.UserSubscription{}, &model.SubscriptionPlan{}, &model.SubscriptionPreConsumeRecord{}))
 			cache, batch, consume := common.MemoryCacheEnabled, common.BatchUpdateEnabled, common.LogConsumeEnabled
 			retry, timeout, count, streamTimeout := common.RetryTimes, common.RelayTimeout, constant.CountToken, constant.StreamingTimeout
@@ -135,9 +143,25 @@ func TestOpenAIPilotAuthenticatedSettlement(t *testing.T) {
 			w := httptest.NewRecorder()
 			if scenario == "concurrent" {
 				responses := make(chan *httptest.ResponseRecorder, 4)
+				requestCtx, cancelRequests := context.WithCancel(context.Background())
+				pending := 4
+				defer func() {
+					cancelRequests()
+					deadline := time.NewTimer(5 * time.Second)
+					defer deadline.Stop()
+					for pending > 0 {
+						select {
+						case <-responses:
+							pending--
+						case <-deadline.C:
+							t.Error("concurrent request producers did not finish before fixture cleanup")
+							return
+						}
+					}
+				}()
 				for range 4 {
 					go func() {
-						req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+						req := httptest.NewRequestWithContext(requestCtx, http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
 						req.Header = r.Header.Clone()
 						rec := httptest.NewRecorder()
 						engine.ServeHTTP(rec, req)
@@ -147,6 +171,7 @@ func TestOpenAIPilotAuthenticatedSettlement(t *testing.T) {
 				for range 4 {
 					select {
 					case rec := <-responses:
+						pending--
 						require.Equal(t, 200, rec.Code, rec.Body.String())
 						w = rec
 					case <-time.After(5 * time.Second):
