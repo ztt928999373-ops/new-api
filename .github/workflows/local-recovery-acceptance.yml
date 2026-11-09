@@ -43,13 +43,14 @@ jobs:
           set -uo pipefail
           status=0
           start=$SECONDS
-          go test -json -race ./internal/localops ./pkg/credentialcrypto ./service/credentials -count=1 -timeout=8m > local-recovery-logs/recovery.json 2>&1 || status=1
+          go test -json -race ./internal/localops ./pkg/credentialcrypto ./service/credentials ./logger -count=1 -timeout=8m > local-recovery-logs/recovery.json 2>&1 || status=1
           go test -json -race ./model -run '^(TestOverallChannelStatusIndependentOfCredentials|TestPreparedDatabaseOpenNeverMigrates)$' -count=1 -timeout=4m > local-recovery-logs/cache.json 2>&1 || status=1
           go test -json -race ./controller ./router -run '^(TestSetupTransactionRollbackAndConcurrentWinner|TestSupplierCredentialManagementNeverReturnsPlaintext|TestOpenAIPreparation.*|TestOpenAIPilotAuthenticatedSettlement|TestManageMultiKeysOverallStatusContention)$' -count=1 -timeout=4m > local-recovery-logs/api.json 2>&1 || status=1
           echo "exit=$status duration_seconds=$((SECONDS-start))" | tee local-recovery-logs/results.log
           if [ "$status" -ne 0 ]; then tail -n 100 local-recovery-logs/*.json; fi
           exit "$status"
       - name: Actual Linux binary initialize, repeat start and recover
+        if: success() || failure()
         shell: bash
         run: |
           set -euo pipefail
