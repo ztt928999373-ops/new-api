@@ -9,11 +9,50 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/credentialcrypto"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/service/credentials"
 	"github.com/gin-gonic/gin"
 )
+
+// GetChannelCredential exposes only authorized metadata, never the channel key.
+func GetChannelCredential(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id <= 0 {
+		credentialFailure(c)
+		return
+	}
+	channel, err := model.GetChannelById(id, false)
+	if err != nil {
+		credentialFailure(c)
+		return
+	}
+	if channel.CredentialRef == "" {
+		c.JSON(http.StatusOK, gin.H{"success": true, "managed": false})
+		return
+	}
+	s := service.ConfiguredCredentialStore()
+	if s == nil {
+		credentialFailure(c)
+		return
+	}
+	head, err := s.Metadata(c.Request.Context(), platformCredentialActor(c), channel.CredentialRef)
+	if err != nil {
+		credentialFailure(c)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "managed": true, "data": head})
+}
+
+func credentialMutationFailure(c *gin.Context, s *credentials.Store, revision int64) {
+	head, err := s.Metadata(c.Request.Context(), platformCredentialActor(c), c.Param("id"))
+	if err == nil && head.Revision != revision {
+		c.JSON(http.StatusConflict, gin.H{"success": false, "code": "CREDENTIAL_REVISION_CONFLICT", "message": "Reload credential metadata before retrying"})
+		return
+	}
+	credentialFailure(c)
+}
 
 // Platform ownership is derived here, never accepted from request JSON.
 func platformCredentialActor(c *gin.Context) credentials.Principal {
@@ -82,7 +121,7 @@ func ReplaceSupplierCredential(c *gin.Context) {
 	}
 	h, err := s.Replace(c.Request.Context(), platformCredentialActor(c), c.Param("id"), input.Revision, []byte(input.Key))
 	if err != nil {
-		credentialFailure(c)
+		credentialMutationFailure(c, s, input.Revision)
 		return
 	}
 	recordManageAudit(c, "credential.replace", map[string]any{"id": h.ID, "version": h.CurrentVersion})
@@ -103,7 +142,7 @@ func SetSupplierCredentialStatus(c *gin.Context) {
 		return
 	}
 	if s.SetStatus(c.Request.Context(), platformCredentialActor(c), c.Param("id"), input.Revision, input.Status) != nil {
-		credentialFailure(c)
+		credentialMutationFailure(c, s, input.Revision)
 		return
 	}
 	recordManageAudit(c, "credential.status", map[string]any{"id": c.Param("id"), "status": input.Status})

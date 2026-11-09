@@ -71,6 +71,7 @@ import {
 import type { Channel } from '../types'
 import { ChannelRowActionsLayoutContext } from './channel-row-actions-context'
 import { useChannels } from './channels-provider'
+import { CredentialManager } from './credential-manager'
 
 interface DataTableRowActionsProps {
   row: Row<Channel>
@@ -366,6 +367,7 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
         </DropdownMenuContent>
       </DropdownMenu>
 
+      <CredentialManager channelId={channel.id} />
       <ConfirmDialog
         open={deleteConfirmOpen}
         onOpenChange={setDeleteConfirmOpen}

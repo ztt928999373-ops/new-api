@@ -124,6 +124,7 @@ func registerChannelRoutes(apiRouter *gin.RouterGroup) {
 }
 
 var channelPermissionRoutes = []permissionRoute{
+	{method: http.MethodGet, path: "/credentials/channel/:id", permission: authz.ChannelRead, handler: controller.GetChannelCredential},
 	{method: http.MethodPost, path: "/openai-integration", permission: authz.ChannelSensitiveWrite, handler: controller.PrepareOpenAIIntegration},
 	{method: http.MethodPost, path: "/credentials/:id/rewrap", permission: authz.ChannelSensitiveWrite, handler: controller.RewrapSupplierCredential},
 	{method: http.MethodPost, path: "/credentials", permission: authz.ChannelSensitiveWrite, handler: controller.CreateSupplierCredential},
