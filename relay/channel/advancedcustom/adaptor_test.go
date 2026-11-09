@@ -2,6 +2,7 @@ package advancedcustom
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -87,9 +88,11 @@ func TestAdaptorMasksDialedHostsInDialFailure(t *testing.T) {
 
 			var apiErr *types.NewAPIError
 			require.ErrorAs(t, err, &apiErr)
-			require.Contains(t, apiErr.Error(), tc.hidden)
+			require.Contains(t, apiErr.Error(), "upstream transport error:")
+			require.NotNil(t, errors.Unwrap(apiErr.Err), "retain the cause for errors.Is/As, not display")
 			message := apiErr.ToOpenAIError(common.UpstreamAddresses(c)...).Message
-			assert.Contains(t, message, "dial failed to ws://***:"+upstreamURL.Port()+"/***/***")
+			assert.Contains(t, message, "upstream transport error:")
+			assert.NotContains(t, apiErr.Error(), tc.hidden)
 			assert.NotContains(t, message, tc.hidden)
 		})
 	}

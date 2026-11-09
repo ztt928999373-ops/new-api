@@ -1,3 +1,4 @@
+import { toast } from 'sonner'
 /*
 Copyright (C) 2023-2026 QuantumNous
 
@@ -16,12 +17,73 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 
+import { handleServerError } from '@/lib/handle-server-error'
+
+import { updateChannelStatus, batchUpdateChannelStatus } from '../../api'
+import {
+  handleEnableChannel,
+  handleDisableChannel,
+  handleBatchEnable,
+  handleBatchDisable,
+} from '../channel-actions'
 import {
   CHANNEL_FIELD_UPDATE_DELAY_MS,
   createChannelFieldUpdateScheduler,
 } from '../channel-field-update'
+
+vi.mock('../../api')
+vi.mock('sonner', () => ({ toast: { success: vi.fn(), error: vi.fn() } }))
+vi.mock('@/lib/handle-server-error', () => ({ handleServerError: vi.fn() }))
+
+describe('channel status action results', () => {
+  test.each([handleEnableChannel, handleDisableChannel])(
+    'single operation reports only actual success',
+    async (action) => {
+      vi.clearAllMocks()
+      vi.mocked(updateChannelStatus).mockResolvedValueOnce({
+        success: false,
+        message: 'Invalid request',
+      })
+      const done = vi.fn()
+      await action(42, undefined, done)
+      expect(toast.success).not.toHaveBeenCalled()
+      expect(done).not.toHaveBeenCalled()
+      expect(handleServerError).toHaveBeenCalledOnce()
+      vi.mocked(updateChannelStatus).mockResolvedValueOnce({
+        success: true,
+        data: false,
+      })
+      await action(42, undefined, done)
+      expect(toast.success).toHaveBeenCalledOnce()
+      expect(done).toHaveBeenCalledOnce() // already in target state is successful
+    }
+  )
+  test.each([handleBatchEnable, handleBatchDisable])(
+    'batch rollback does not show success',
+    async (action) => {
+      vi.clearAllMocks()
+      vi.mocked(batchUpdateChannelStatus).mockResolvedValueOnce({
+        success: false,
+        message: 'Invalid request',
+      })
+      const done = vi.fn()
+      await action([41, 42], undefined, done)
+      expect(toast.success).not.toHaveBeenCalled()
+      expect(done).not.toHaveBeenCalled()
+      expect(handleServerError).toHaveBeenCalledOnce()
+      vi.mocked(batchUpdateChannelStatus).mockResolvedValueOnce({
+        success: true,
+        data: 2,
+      })
+      await action([41, 42], undefined, done)
+      expect(toast.success).toHaveBeenCalledOnce()
+      expect(done).toHaveBeenCalledOnce()
+      expect(toast.error).not.toHaveBeenCalled()
+    }
+  )
+})
 
 function createFakeTimers() {
   const pending = new Map<number, () => void>()

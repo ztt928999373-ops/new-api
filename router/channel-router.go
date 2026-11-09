@@ -1,13 +1,20 @@
 package router
 
 import (
+	"bytes"
+	"io"
 	"net/http"
 	"path"
+	"strconv"
+	"strings"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/controller"
 	"github.com/QuantumNous/new-api/middleware"
+	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service/authz"
 	"github.com/gin-gonic/gin"
+	"github.com/gin-gonic/gin/binding"
 )
 
 type permissionRoute struct {
@@ -21,7 +28,68 @@ type permissionRoute struct {
 // permission as the access token scope that route requires.
 func handlePermissionRoute(group *gin.RouterGroup, method, relativePath string, permission authz.Permission, handlers ...gin.HandlerFunc) {
 	middleware.DeclareAccessTokenPermissionRoute(method, joinPaths(group.BasePath(), relativePath), permission)
-	group.Handle(method, relativePath, append([]gin.HandlerFunc{middleware.RequirePermission(permission)}, handlers...)...)
+	group.Handle(method, relativePath, append([]gin.HandlerFunc{middleware.RequirePermission(permission), rejectUnsupportedManagedChannelOperation}, handlers...)...)
+}
+
+// This guard follows authentication AND permission checks. Legacy operations
+// must not silently succeed with an empty key or duplicate a credential ref.
+// Batch operations without a proven per-channel implementation are rejected
+// as a whole when they could touch a managed channel.
+func rejectUnsupportedManagedChannelOperation(c *gin.Context) {
+	full := c.FullPath()
+	if !strings.HasPrefix(full, "/api/channel/") {
+		c.Next()
+		return
+	}
+	route := strings.TrimPrefix(full, "/api/channel")
+	if strings.HasPrefix(route, "/credentials") {
+		c.Next()
+		return
+	}
+	if c.Request.Method == http.MethodPost && (route == "/:id/status" || route == "/status/batch") {
+		c.Next()
+		return
+	}
+	if c.Request.Method == http.MethodGet {
+		switch route {
+		case "/", "/search", "/models", "/models_enabled", "/default_base_urls", "/ops", "/priority/order", "/:id":
+			c.Next()
+			return
+		}
+	}
+	if ((route == "/" || route == "/openai-integration") && c.Request.Method == http.MethodPost) || route == "/priority/reorder" {
+		c.Next()
+		return
+	}
+	query := model.DB.Model(&model.Channel{}).Where("credential_ref IS NOT NULL AND credential_ref <> ?", "")
+	if id := c.Param("id"); id != "" {
+		n, err := strconv.Atoi(id)
+		if err != nil || n <= 0 {
+			c.Next()
+			return
+		}
+		query = query.Where("id = ?", n)
+	} else if route == "/" && c.Request.Method == http.MethodPut {
+		var input struct {
+			ID int `json:"id"`
+		}
+		if c.ShouldBindBodyWith(&input, binding.JSON) != nil {
+			c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"success": false, "message": "Invalid request"})
+			return
+		}
+		if body, ok := c.Get(gin.BodyBytesKey); ok {
+			if data, valid := body.([]byte); valid {
+				c.Request.Body = io.NopCloser(bytes.NewReader(data))
+			}
+		}
+		query = query.Where("id = ?", input.ID)
+	}
+	var count int64
+	if query.Count(&count).Error != nil || count > 0 {
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"success": false, "code": "MANAGED_CREDENTIAL_OPERATION_UNSUPPORTED", "message": common.NewMessage("Invalid request").Error()})
+		return
+	}
+	c.Next()
 }
 
 // joinPaths matches gin's route path joining, which keeps a trailing slash
@@ -46,6 +114,7 @@ func registerChannelRoutes(apiRouter *gin.RouterGroup) {
 		middleware.CriticalRateLimit(),
 		middleware.DisableCache(),
 		middleware.SecureVerificationRequired(),
+		rejectUnsupportedManagedChannelOperation,
 		controller.GetChannelKey,
 	)
 
@@ -56,6 +125,12 @@ func registerChannelRoutes(apiRouter *gin.RouterGroup) {
 
 var channelPermissionRoutes = []permissionRoute{
 	{method: http.MethodPost, path: "/openai-integration", permission: authz.ChannelSensitiveWrite, handler: controller.PrepareOpenAIIntegration},
+	{method: http.MethodPost, path: "/credentials/:id/rewrap", permission: authz.ChannelSensitiveWrite, handler: controller.RewrapSupplierCredential},
+	{method: http.MethodPost, path: "/credentials", permission: authz.ChannelSensitiveWrite, handler: controller.CreateSupplierCredential},
+	{method: http.MethodGet, path: "/credentials/:id", permission: authz.ChannelRead, handler: controller.GetSupplierCredential},
+	{method: http.MethodPut, path: "/credentials/:id", permission: authz.ChannelSensitiveWrite, handler: controller.ReplaceSupplierCredential},
+	{method: http.MethodPost, path: "/credentials/:id/status", permission: authz.ChannelSensitiveWrite, handler: controller.SetSupplierCredentialStatus},
+	{method: http.MethodPost, path: "/credentials/:id/test", permission: authz.ChannelOperate, handler: controller.TestSupplierCredential},
 	{method: http.MethodGet, path: "/priority/order", permission: authz.ChannelRead, handler: controller.GetChannelPriorityOrder},
 	{method: http.MethodPost, path: "/priority/reorder", permission: authz.ChannelWrite, handler: controller.ReorderChannelPriority},
 	{method: http.MethodGet, path: "/", permission: authz.ChannelRead, handler: controller.GetAllChannels},

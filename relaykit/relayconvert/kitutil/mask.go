@@ -99,6 +99,7 @@ func maskURLQuery(rawQuery string) string {
 // https://docs.example.org/errors -> unchanged
 // https://auth.example.org/token?client_secret=s -> https://auth.example.org/token?client_secret=***
 func MaskSensitiveInfo(str string, upstreamURLs ...string) string {
+	str = sanitizeCredentialText(str)
 	// Mask API keys (e.g., "api_key:AIzaSyAAAaUooTUni8AdaOkSRMda30n_Q4vrV70" -> "api_key:***")
 	str = maskApiKeyPattern.ReplaceAllString(str, "${1}api_key:***${3}")
 
@@ -134,7 +135,7 @@ func MaskSensitiveInfo(str string, upstreamURLs ...string) string {
 		suffix := match[len(urlStr):]
 		u, err := url.Parse(urlStr)
 		if err != nil {
-			return match
+			return "[URL omitted]" + suffix
 		}
 		host := strings.TrimSuffix(u.Hostname(), ".")
 		if !slices.ContainsFunc(upstreamHosts, func(upstreamHost string) bool { return strings.EqualFold(upstreamHost, host) }) {

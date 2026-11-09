@@ -220,6 +220,9 @@ func initTaskArtifactAdaptor(task *model.Task) (relaychannel.TaskAdaptor, error)
 	if err != nil {
 		return nil, fmt.Errorf("%w: channel unavailable", errTaskArtifactPluginUnavailable)
 	}
+	if channelModel.CredentialRef != "" {
+		return nil, errTaskArtifactPluginUnavailable
+	}
 	adaptor := relay.GetTaskAdaptor(task.Platform)
 	if adaptor == nil {
 		return nil, errTaskArtifactPluginUnavailable

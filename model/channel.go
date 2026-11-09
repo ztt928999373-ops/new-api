@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"slices"
 	"strings"
 	"sync"
 
@@ -21,6 +22,7 @@ import (
 )
 
 type Channel struct {
+	CredentialRef      string  `json:"-" gorm:"size:64;index"`
 	Id                 int     `json:"id"`
 	Type               int     `json:"type" gorm:"default:0"`
 	Key                string  `json:"key" gorm:"not null"`
@@ -257,6 +259,14 @@ func (channel *Channel) GetNextEnabledKey() (string, int, *types.NewAPIError) {
 		selectedIdx := enabledIdx[rand.Intn(len(enabledIdx))]
 		return keys[selectedIdx], selectedIdx, nil
 	case constant.MultiKeyModePolling:
+		if channel.CredentialRef != "" && common.MemoryCacheEnabled {
+			idx, err := nextManagedPollingIndex(channel.Id, channel.CredentialRef, len(keys))
+			if err != nil {
+				return "", 0, types.NewError(err, types.ErrorCodeChannelNoAvailableKey)
+			}
+			channel.ChannelInfo.MultiKeyPollingIndex = (idx + 1) % len(keys)
+			return keys[idx], idx, nil
+		}
 		// Use channel-specific lock to ensure thread-safe polling
 
 		channelInfo, err := CacheGetChannelInfo(channel.Id)
@@ -455,6 +465,11 @@ func GetChannelById(id int, selectAll bool) (*Channel, error) {
 }
 
 func BatchInsertChannels(channels []Channel) error {
+	for _, channel := range channels {
+		if channel.CredentialRef != "" {
+			return errors.New("managed channel creation requires a supported credential binding operation")
+		}
+	}
 	if len(channels) == 0 {
 		return nil
 	}
@@ -551,6 +566,9 @@ func (channel *Channel) GetStatusCodeMapping() string {
 }
 
 func (channel *Channel) Insert() error {
+	if channel.CredentialRef != "" {
+		return errors.New("managed channel creation requires a supported credential binding operation")
+	}
 	var err error
 	err = DB.Create(channel).Error
 	if err != nil {
@@ -561,8 +579,22 @@ func (channel *Channel) Insert() error {
 }
 
 func (channel *Channel) Update() error {
+	var persisted Channel
+	if err := DB.Select("id", "credential_ref", "channel_info").First(&persisted, channel.Id).Error; err != nil {
+		return err
+	}
+	managed := persisted.CredentialRef != ""
+	if managed {
+		if channel.Key != "" {
+			return errors.New("encrypted credentials require managed replacement")
+		}
+		channel.CredentialRef = persisted.CredentialRef
+		channel.ChannelInfo = persisted.ChannelInfo
+	} else if channel.CredentialRef != "" {
+		return errors.New("credential binding requires managed migration")
+	}
 	// If this is a multi-key channel, recalculate MultiKeySize based on the current key list to avoid inconsistency after editing keys
-	if channel.ChannelInfo.IsMultiKey {
+	if channel.ChannelInfo.IsMultiKey && !managed {
 		var keyStr string
 		if channel.Key != "" {
 			keyStr = channel.Key
@@ -740,85 +772,110 @@ func hasEnabledMultiKey(keys []string, statusList map[int]int) bool {
 	return false
 }
 
-func UpdateChannelStatus(channelId int, usingKey string, status int, reason string) bool {
-	if common.MemoryCacheEnabled {
-		channelStatusLock.Lock()
-		defer channelStatusLock.Unlock()
+// SetChannelOverallStatus changes routing availability, never credential slots.
+// Persist channel and ability state atomically; repeated requests are successful
+// no-ops. Sorted locks also serialize against the existing slot/polling writer.
+func SetChannelOverallStatus(ids []int, status int, reason string) (int, error) {
+	if len(ids) == 0 || (status != common.ChannelStatusEnabled && status != common.ChannelStatusManuallyDisabled) {
+		return 0, errors.New("invalid channel status request")
 	}
+	// Keep the post-commit cache refresh in the same serialized operation, so
+	// an older refresh cannot overwrite a newer overall/slot status change.
+	channelStatusLock.Lock()
+	defer channelStatusLock.Unlock()
+	ordered := slices.Clone(ids)
+	slices.Sort(ordered)
+	ordered = slices.Compact(ordered)
+	for _, id := range ordered {
+		if id <= 0 {
+			return 0, errors.New("invalid channel id")
+		}
+	}
+	for _, id := range ordered {
+		lock := GetChannelPollingLock(id)
+		lock.Lock()
+		defer lock.Unlock()
+	}
+	changed := 0
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		for _, id := range ordered {
+			var ch Channel
+			if err := lockForUpdate(tx).Select("id", "status", "other_info").First(&ch, id).Error; err != nil {
+				return err
+			}
+			if ch.Status != status || (status == common.ChannelStatusManuallyDisabled && ch.GetOtherInfo()["status_reason"] == ChannelStatusReasonAllKeysDisabled) {
+				info := ch.GetOtherInfo()
+				info["status_reason"], info["status_time"] = reason, common.GetTimestamp()
+				ch.SetOtherInfo(info)
+				if err := tx.Model(&Channel{}).Where("id = ?", id).Updates(map[string]any{"status": status, "other_info": ch.OtherInfo}).Error; err != nil {
+					return err
+				}
+				changed++
+			}
+			if err := tx.Model(&Ability{}).Where("channel_id = ?", id).Update("enabled", status == common.ChannelStatusEnabled).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	if err := initChannelCacheLocked(); err != nil {
+		return changed, ErrChannelCacheSync
+	}
+	return changed, nil
+}
 
-	// ChannelInfo stores both multi-key status and the polling cursor. Hold the
-	// same per-channel lock from the first read through persistence so neither
-	// writer can save a stale JSON snapshot over the other.
+func UpdateChannelStatus(channelId int, usingKey string, status int, reason string) bool {
+	channelStatusLock.Lock()
+	defer channelStatusLock.Unlock()
 	pollingLock := GetChannelPollingLock(channelId)
 	pollingLock.Lock()
 	defer pollingLock.Unlock()
-
-	if common.MemoryCacheEnabled {
-		channelCache, _ := CacheGetChannel(channelId)
-		if channelCache == nil {
-			return false
+	changed := false
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		var channel Channel
+		if err := lockForUpdate(tx).First(&channel, channelId).Error; err != nil {
+			return err
 		}
-		if channelCache.ChannelInfo.IsMultiKey {
-			beforeStatus := channelCache.Status
-			// 如果是多Key模式，更新缓存中的状态
-			handlerMultiKeyUpdate(channelCache, usingKey, status, reason)
-			if beforeStatus != channelCache.Status {
-				CacheUpdateChannelStatus(channelId, channelCache.Status)
-			}
-			//CacheUpdateChannel(channelCache)
-			//return true
-		} else {
-			// 如果缓存渠道存在，且状态已是目标状态，直接返回
-			if channelCache.Status == status {
-				return false
-			}
-			CacheUpdateChannelStatus(channelId, status)
+		if channel.CredentialRef != "" {
+			return errors.New("managed slot operation unsupported")
 		}
-	}
-
-	shouldUpdateAbilities := false
-	defer func() {
-		if shouldUpdateAbilities {
-			err := UpdateAbilityStatus(channelId, status == common.ChannelStatusEnabled)
-			if err != nil {
-				common.SysLog(common.LogText("failed to update ability status: channel_id=%d, error=%v", channelId, err))
-			}
+		overrides := channel.ChannelInfo.IsMultiKey && usingKey == "" && status == common.ChannelStatusManuallyDisabled && reason != ChannelStatusReasonAllKeysDisabled && channel.GetOtherInfo()["status_reason"] == ChannelStatusReasonAllKeysDisabled
+		if channel.Status == status && !overrides {
+			return nil
 		}
-	}()
-	channel, err := GetChannelById(channelId, true)
-	if err != nil {
-		return false
-	} else {
-		// A manual channel operation must replace the exhaustion reason even
-		// when the status value is already manually disabled.
-		overridesKeyExhaustion := channel.ChannelInfo.IsMultiKey && usingKey == "" &&
-			status == common.ChannelStatusManuallyDisabled && reason != ChannelStatusReasonAllKeysDisabled &&
-			channel.GetOtherInfo()["status_reason"] == ChannelStatusReasonAllKeysDisabled
-		if channel.Status == status && !overridesKeyExhaustion {
-			return false
-		}
-
 		if channel.ChannelInfo.IsMultiKey {
-			beforeStatus := channel.Status
-			handlerMultiKeyUpdate(channel, usingKey, status, reason)
-			if beforeStatus != channel.Status {
-				shouldUpdateAbilities = true
-			}
+			handlerMultiKeyUpdate(&channel, usingKey, status, reason)
 		} else {
 			info := channel.GetOtherInfo()
-			info["status_reason"] = reason
-			info["status_time"] = common.GetTimestamp()
+			info["status_reason"], info["status_time"] = reason, common.GetTimestamp()
 			channel.SetOtherInfo(info)
 			channel.Status = status
-			shouldUpdateAbilities = true
 		}
-		err = channel.saveStatusState()
-		if err != nil {
-			common.SysLog(common.LogText("failed to update channel status: channel_id=%d, status=%d, error=%v", channel.Id, status, err))
-			return false
+		updates := map[string]any{"status": channel.Status, "other_info": channel.OtherInfo}
+		if channel.ChannelInfo.IsMultiKey {
+			updates["channel_info"] = channel.ChannelInfo
+		}
+		if err := tx.Model(&Channel{}).Where("id = ?", channelId).Updates(updates).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&Ability{}).Where("channel_id = ?", channelId).Update("enabled", channel.Status == common.ChannelStatusEnabled).Error; err != nil {
+			return err
+		}
+		changed = true
+		return nil
+	})
+	if err != nil {
+		return false
+	}
+	if changed {
+		if err := initChannelCacheLocked(); err != nil {
+			common.SysError("channel status committed; cache synchronization failed")
 		}
 	}
-	return true
+	return changed
 }
 
 func EnableChannelByTag(tag string) error {
@@ -1198,4 +1255,16 @@ func CountChannelsGroupByType() (map[int64]int64, error) {
 		counts[r.Type] = r.Count
 	}
 	return counts, nil
+}
+
+// ErrChannelCacheSync means the database committed, but the cache was invalidated.
+var ErrChannelCacheSync = errors.New("channel status committed; cache synchronization failed")
+
+// LockChannelStatusMutation establishes status -> polling -> cache lock order.
+// Release only after all database writes and the final cache rebuild complete.
+func LockChannelStatusMutation(id int) func() {
+	channelStatusLock.Lock()
+	lock := GetChannelPollingLock(id)
+	lock.Lock()
+	return func() { lock.Unlock(); channelStatusLock.Unlock() }
 }

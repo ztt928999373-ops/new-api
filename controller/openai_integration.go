@@ -2,20 +2,19 @@
 package controller
 
 import (
-	"bytes"
-	"io"
 	"net/http"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
-// PrepareOpenAIIntegration creates a disabled, single-model pilot channel through
-// the ordinary channel creation and audit path. Credentials are write-only here.
-// The existing privileged key-view endpoint remains unchanged.
+// PrepareOpenAIIntegration atomically creates an encrypted credential and a
+// disabled single-model channel. Plaintext never enters the channel row.
 func PrepareOpenAIIntegration(c *gin.Context) {
 	var input struct {
 		Name  string `json:"name"`
@@ -33,16 +32,37 @@ func PrepareOpenAIIntegration(c *gin.Context) {
 		return
 	}
 	baseURL := "https://api.openai.com"
-	payload, err := common.Marshal(AddChannelRequest{Mode: "single", Channel: &model.Channel{
-		Type: constant.ChannelTypeOpenAI, Name: input.Name, Key: input.Key,
-		Models: input.Model, Group: "openai-pilot", BaseURL: &baseURL,
-		Status: common.ChannelStatusManuallyDisabled,
-	}})
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"success": false, "message": "Invalid request"})
+	store := service.ConfiguredCredentialStore()
+	if store == nil || c.GetInt("id") <= 0 {
+		credentialFailure(c)
 		return
 	}
-	c.Request.Body = io.NopCloser(bytes.NewReader(payload))
-	c.Request.ContentLength = int64(len(payload))
-	AddChannel(c)
+	channel := model.Channel{
+		Type: constant.ChannelTypeOpenAI, Name: input.Name,
+		Models: input.Model, Group: "openai-pilot", BaseURL: &baseURL,
+		Status: common.ChannelStatusManuallyDisabled,
+	}
+	err := store.DB.WithContext(c.Request.Context()).Transaction(func(tx *gorm.DB) error {
+		local := *store
+		local.DB = tx
+		head, err := local.Create(c.Request.Context(), platformCredentialActor(c), true, "openai", "api_key", "relay", []byte(input.Key))
+		if err != nil {
+			return err
+		}
+		channel.CredentialRef = head.ID
+		if err := tx.Create(&channel).Error; err != nil {
+			return err
+		}
+		return channel.AddAbilities(tx)
+	})
+	if err != nil {
+		credentialFailure(c)
+		return
+	}
+	recordManageAudit(c, "channel.openai_prepare", map[string]any{"id": channel.Id})
+	if err := model.InitChannelCache(); err != nil {
+		channelCacheSyncFailure(c, channel.Id)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"success": true, "data": gin.H{"id": channel.Id}})
 }

@@ -2,9 +2,11 @@
 package router
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -15,7 +17,9 @@ import (
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/credentialcrypto"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/service/credentials"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -23,7 +27,7 @@ import (
 
 func TestOpenAIPilotAuthenticatedSettlement(t *testing.T) {
 	require.NoError(t, i18n.Init())
-	for _, scenario := range []string{"ordinary", "stream", "retry", "failure", "timeout", "interrupted", "insufficient", "invalid_token"} {
+	for _, scenario := range []string{"ordinary", "stream", "retry", "failure", "timeout", "interrupted", "insufficient", "invalid_token", "disabled", "revoked", "concurrent"} {
 		t.Run(scenario, func(t *testing.T) {
 			oldDB, oldLog := model.DB, model.LOG_DB
 			t.Cleanup(func() { model.DB, model.LOG_DB = oldDB, oldLog })
@@ -68,7 +72,7 @@ func TestOpenAIPilotAuthenticatedSettlement(t *testing.T) {
 				}
 				if scenario == "failure" || (scenario == "retry" && n == 1) {
 					w.WriteHeader(500)
-					_, _ = io.WriteString(w, `{"error":{"type":"server_error","message":"synthetic failure"}}`)
+					_, _ = io.WriteString(w, `{"error":{"type":"server_error","message":"synthetic failure echo syntheticpilotsupplier"}}`)
 					return
 				}
 				if scenario == "stream" || scenario == "interrupted" {
@@ -91,9 +95,29 @@ func TestOpenAIPilotAuthenticatedSettlement(t *testing.T) {
 			defer upstream.Close()
 			defer close(release)
 			url := upstream.URL
-			channel := model.Channel{Type: constant.ChannelTypeOpenAI, Key: "syntheticpilotsupplier", Name: "pilot", Status: common.ChannelStatusEnabled, BaseURL: &url, Models: "pilot-e2e", Group: "default"}
+			dir := filepath.Join(t.TempDir(), "keys")
+			require.NoError(t, credentialcrypto.InitializeLocalDirectory(dir))
+			path := filepath.Join(dir, "ring")
+			require.NoError(t, credentialcrypto.InitializeLocalFile(path))
+			provider, err := credentialcrypto.NewLocalFileKeyProvider(path)
+			require.NoError(t, err)
+			store := &credentials.Store{DB: model.DB, Environment: "test", ProviderID: "local-test", Provider: provider}
+			require.NoError(t, store.MigrateSchema())
+			owner := credentials.Principal{TenantID: "default", UserID: "synthetic-admin", PlatformOperator: true}
+			head, err := store.Create(context.Background(), owner, true, "openai", "api_key", "relay", []byte("syntheticpilotsupplier"))
+			require.NoError(t, err)
+			previous := service.SetChannelCredentialResolver(&credentials.Resolver{Environment: "test", Repository: store, Providers: map[string]credentialcrypto.KeyProvider{"local-test": provider}, Audit: store})
+			t.Cleanup(func() { service.SetChannelCredentialResolver(previous) })
+			channel := model.Channel{Type: constant.ChannelTypeOpenAI, CredentialRef: head.ID, Name: "pilot", Status: common.ChannelStatusEnabled, BaseURL: &url, Models: "pilot-e2e", Group: "default"}
 			require.NoError(t, model.DB.Create(&channel).Error)
 			require.NoError(t, model.DB.Create(&model.Ability{Group: "default", Model: "pilot-e2e", ChannelId: channel.Id, Enabled: true}).Error)
+			if scenario == "disabled" {
+				_, err := model.SetChannelOverallStatus([]int{channel.Id}, common.ChannelStatusManuallyDisabled, "test")
+				require.NoError(t, err)
+			}
+			if scenario == "revoked" {
+				require.NoError(t, store.SetStatus(context.Background(), owner, head.ID, 1, "revoked"))
+			}
 			engine := gin.New()
 			engine.Use(middleware.RequestId())
 			SetRelayRouter(engine)
@@ -109,7 +133,29 @@ func TestOpenAIPilotAuthenticatedSettlement(t *testing.T) {
 				r.Header.Set("Authorization", "Bearer invalid")
 			}
 			w := httptest.NewRecorder()
-			engine.ServeHTTP(w, r)
+			if scenario == "concurrent" {
+				responses := make(chan *httptest.ResponseRecorder, 4)
+				for range 4 {
+					go func() {
+						req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+						req.Header = r.Header.Clone()
+						rec := httptest.NewRecorder()
+						engine.ServeHTTP(rec, req)
+						responses <- rec
+					}()
+				}
+				for range 4 {
+					select {
+					case rec := <-responses:
+						require.Equal(t, 200, rec.Code, rec.Body.String())
+						w = rec
+					case <-time.After(5 * time.Second):
+						t.Fatal("concurrent request did not finish")
+					}
+				}
+			} else {
+				engine.ServeHTTP(w, r)
+			}
 			if scenario == "failure" || scenario == "timeout" {
 				require.Eventually(t, func() bool {
 					var u model.User
@@ -132,7 +178,13 @@ func TestOpenAIPilotAuthenticatedSettlement(t *testing.T) {
 			}
 			require.Equal(t, charged, initial-after.Quota, w.Body.String())
 			require.Equal(t, charged, 1000000-afterToken.RemainQuota)
-			require.LessOrEqual(t, len(logs), 1, "retries and stream termination must not settle twice")
+			expectedRequests := 1
+			if scenario == "concurrent" {
+				expectedRequests = 4
+				require.Equal(t, int32(4), calls.Load())
+				require.Len(t, logs, 4)
+			}
+			require.LessOrEqual(t, len(logs), expectedRequests, "retries and stream termination must not settle twice")
 			require.NotContains(t, w.Body.String(), "syntheticpilotsupplier")
 			if scenario == "ordinary" || scenario == "stream" || scenario == "retry" {
 				require.Equal(t, 200, w.Code, w.Body.String())
@@ -142,11 +194,11 @@ func TestOpenAIPilotAuthenticatedSettlement(t *testing.T) {
 				require.Equal(t, 3, logs[0].CompletionTokens)
 				require.Equal(t, channel.Id, logs[0].ChannelId)
 				require.Contains(t, w.Body.String(), "hello")
-			} else if scenario != "interrupted" {
+			} else if scenario != "interrupted" && scenario != "concurrent" {
 				require.GreaterOrEqual(t, w.Code, 400, w.Body.String())
 				require.Zero(t, charged)
 			}
-			if scenario == "invalid_token" || scenario == "insufficient" {
+			if scenario == "invalid_token" || scenario == "insufficient" || scenario == "disabled" || scenario == "revoked" {
 				require.Zero(t, calls.Load())
 			}
 			if scenario == "retry" {

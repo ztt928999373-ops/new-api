@@ -300,10 +300,10 @@ streamLoop:
 					return respErr, nil
 				}
 			case *bedrockruntimeTypes.UnknownUnionMember:
-				fmt.Println(common.LogText("unknown tag: %v", v.Tag))
+				common.SysError("provider=aws event=unknown_stream_tag")
 				return types.NewError(errors.New("unknown response type"), types.ErrorCodeInvalidRequest), nil
 			default:
-				fmt.Println(common.LogText("union is nil or unknown type"))
+				common.SysError("provider=aws event=unknown_stream_union")
 				return types.NewError(errors.New("nil or unknown response type"), types.ErrorCodeInvalidRequest), nil
 			}
 		}

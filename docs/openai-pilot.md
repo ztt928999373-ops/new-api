@@ -11,11 +11,12 @@
 
 入口固定 OpenAI 官方地址 `https://api.openai.com`、类型 OpenAI、单模型、
 `openai-pilot` 分组、手动禁用状态。请求中的地址、状态、分组和覆盖参数均不会生效。
-保存复用现有 AddChannel 验证、持久化和操作审计，响应不回传凭据。
+保存通过已配置的凭据仓储，在同一事务中创建加密凭据、渠道引用及能力记录，响应仅返回渠道 ID。
 
-凭据存储沿用现有 Channel.Key；本变更不声称已实现静态加密或秘密管理服务。
-既有 Root＋安全验证的密钥查看接口仍存在。部署前必须限制管理权限、数据库和备份访问，
-禁止开启包含供应商原始报文的 Debug 日志，并配置凭据轮换。
+本入口要求 PR #5 的 CredentialResolver/Store 已配置；不可用时失败关闭。
+渠道 Key 保持空值，供应商凭据进入信封加密仓储，以 CredentialRef 绑定。
+请求级解析和租约沿用 PR #5；普通和流式调用均不将明文写回渠道或共享缓存。
+受控渠道的旧 Key 查看、复制及不支持的管理路径继续拒绝。
 公开页面与普通调用客户端不能取得供应商密钥。
 
 ## 调用及人工启用
@@ -46,7 +47,7 @@
 
 参考 OWASP Authentication、Session Management 与 Secrets Management Cheat Sheets：
 服务端授权、最小权限、敏感值不入响应/审计、TLS、轮换和数据库访问隔离。
-不宣称完整 ASVS 合规认证；静态加密、真实供应商及完整结算验收仍待专项验证。
+不宣称完整 ASVS 合规认证；真实供应商、跨节点撤销及完整结算验收仍待专项验证。
 
 - https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html
 - https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html

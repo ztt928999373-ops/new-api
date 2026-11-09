@@ -2,6 +2,10 @@
 
 ## 已确认的实现
 
+以下旧路径调查保留作为历史记录。本次与已合并 PR #5 整合后，OpenAI 准备接口不再调用
+明文 AddChannel 路径，而是在事务中创建加密凭据与渠道引用；Channel.Key 为空。
+受控渠道使用 Resolver 准入与请求租约，旧 Key 查看被拒绝。旧明文渠道仍存在，不作全系统无明文声明。
+
 - `model.Channel.Key` 为持久化字符串，BatchInsertChannels 直接 Create；当前路径没有加解密钩子。
 - 常规列表和 GetChannelById(false) 使用 Omit("key")；缓存和转发路径需要完整凭据。
 - `/api/channel/:id/key` 受 AdminAuth、RootAuth、CriticalRateLimit、DisableCache、SecureVerificationRequired 保护。
@@ -30,7 +34,7 @@ Root 查看接口如何替换为“仅替换/轮换”需单独确认，不在�
 
 安全存储方案批准、解析路径覆盖、禁止回显策略、秘密日志过滤及测试、轮换/撤销、
 备份权限与恢复演练完成后，才允许录入真实供应商 Key。
-当前仅使用合成凭据，未读取 .env.local；不宣称静态加密或完整 ASVS 合规已完成。
+当前仅使用合成凭据，未读取 .env.local；本入口已使用 PR #5 静态加密，未宣称完整 ASVS 合规。
 
 ## Windows SQLite 既有清理失败定位
 
