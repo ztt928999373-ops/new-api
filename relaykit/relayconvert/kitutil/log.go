@@ -35,6 +35,7 @@ func SetSystemErrorLogging(errorFn LogFunc) {
 }
 
 func LogInfo(message string) {
+	message = SanitizeLogText(message)
 	if fn := logInfo.Load(); fn != nil {
 		(*fn)(message)
 		return
@@ -43,6 +44,7 @@ func LogInfo(message string) {
 }
 
 func LogError(message string) {
+	message = SanitizeLogText(message)
 	if fn := logError.Load(); fn != nil {
 		(*fn)(message)
 		return
@@ -53,6 +55,7 @@ func LogError(message string) {
 // LogSystemError reports an internal converter failure through its dedicated
 // hook, keeping it distinct from malformed request-data diagnostics.
 func LogSystemError(message string) {
+	message = SanitizeLogText(message)
 	if fn := logSystemError.Load(); fn != nil {
 		(*fn)(message)
 		return

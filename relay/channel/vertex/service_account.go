@@ -139,5 +139,5 @@ func exchangeJwtForAccessToken(signedJWT string, proxy string) (string, error) {
 	if accessToken, ok := result["access_token"].(string); ok {
 		return accessToken, nil
 	}
-	return "", fmt.Errorf("failed to get access token: %v", result)
+	return "", fmt.Errorf("failed to get access token: status=%d", resp.StatusCode)
 }

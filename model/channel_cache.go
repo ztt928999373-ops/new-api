@@ -24,17 +24,32 @@ var channelsIDM map[int]*Channel                     // all channels include dis
 var channel2advancedCustomConfig map[int]*kitdto.AdvancedCustomConfig
 var channelSyncLock sync.RWMutex
 
-func InitChannelCache() {
+// Serialize database reads through publication with status writers.
+// Lock order: channelStatusLock, polling lock, channelSyncLock.
+func InitChannelCache() error {
+	channelStatusLock.Lock()
+	defer channelStatusLock.Unlock()
+	return initChannelCacheLocked()
+}
+
+// Caller holds channelStatusLock; do not recursively call the public wrapper.
+func initChannelCacheLocked() error {
 	if !common.MemoryCacheEnabled {
 		InvalidatePricingCache()
 		rebuildTaskAliasView()
-		return
+		return nil
 	}
 	newChannelId2channel := make(map[int]*Channel)
 	newChannel2advancedCustomConfig := make(map[int]*kitdto.AdvancedCustomConfig)
 	var channels []*Channel
-	DB.Find(&channels)
+	if err := DB.Find(&channels).Error; err != nil {
+		invalidateChannelCacheLocked()
+		return err
+	}
 	for _, channel := range channels {
+		if channel.CredentialRef != "" {
+			channel.Key, channel.Keys = "", nil
+		}
 		newChannelId2channel[channel.Id] = channel
 		if channel.Type == constant.ChannelTypeAdvancedCustom {
 			if config := channel.GetOtherSettings().AdvancedCustom; config != nil {
@@ -43,7 +58,10 @@ func InitChannelCache() {
 		}
 	}
 	var abilities []*Ability
-	DB.Find(&abilities)
+	if err := DB.Find(&abilities).Error; err != nil {
+		invalidateChannelCacheLocked()
+		return err
+	}
 	groups := make(map[string]bool)
 	for _, ability := range abilities {
 		groups[ability.Group] = true
@@ -104,6 +122,33 @@ func InitChannelCache() {
 	InvalidatePricingCache()
 	rebuildTaskAliasView()
 	common.SysLog(common.LogText("channels synced from database"))
+	return nil
+}
+
+// nextManagedPollingIndex shares only slot metadata. Request-local decrypted
+// keys must never be written into channelsIDM, including during cache refresh.
+// Caller holds the existing per-channel polling lock; cache refresh uses this
+// same channelSyncLock for the metadata handoff.
+func nextManagedPollingIndex(id int, reference string, size int) (int, error) {
+	channelSyncLock.Lock()
+	defer channelSyncLock.Unlock()
+	ch := channelsIDM[id]
+	if ch == nil || ch.CredentialRef != reference || ch.Key != "" || len(ch.Keys) != 0 || size <= 0 || ch.ChannelInfo.MultiKeySize != size {
+		return 0, errors.New("managed credential unavailable")
+	}
+	start := ch.ChannelInfo.MultiKeyPollingIndex
+	if start < 0 || start >= size {
+		start = 0
+	}
+	for i := range size {
+		idx := (start + i) % size
+		status, found := ch.ChannelInfo.MultiKeyStatusList[idx]
+		if !found || status == common.ChannelStatusEnabled {
+			ch.ChannelInfo.MultiKeyPollingIndex = (idx + 1) % size
+			return idx, nil
+		}
+	}
+	return 0, errors.New("no enabled credential slots")
 }
 
 func SyncChannelCache(frequency int) {
@@ -307,3 +352,19 @@ func CacheUpdateChannel(channel *Channel) {
 	channelSyncLock.Unlock()
 	InvalidatePricingCache()
 }
+
+// Caller holds channelStatusLock. Remove routing and direct lookup snapshots
+// together: no stale enabled entry remains usable after a failed rebuild.
+func invalidateChannelCacheLocked() {
+	common.SysError("channel cache rebuild failed; routing cache invalidated")
+	channelSyncLock.Lock()
+	group2model2channels = nil
+	channelsIDM = nil
+	channel2advancedCustomConfig = nil
+	channelSyncLock.Unlock()
+	InvalidatePricingCache()
+}
+
+// RefreshChannelCacheForMutation requires the guard returned by
+// LockChannelStatusMutation. It never reacquires the status lock.
+func RefreshChannelCacheForMutation() error { return initChannelCacheLocked() }

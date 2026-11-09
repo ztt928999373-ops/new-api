@@ -509,6 +509,11 @@ func GetChannelKey(c *gin.Context) {
 		return
 	}
 
+	if channel.CredentialRef != "" {
+		credentialFailure(c)
+		return
+	}
+
 	// 记录操作审计日志（高危：查看渠道密钥）
 	recordManageAudit(c, "channel.key_view", map[string]any{
 		"id":   channelId,
@@ -1277,12 +1282,18 @@ func UpdateChannelStatus(c *gin.Context) {
 		common.ApiErrorT(c, "Invalid parameters")
 		return
 	}
-	changed := model.UpdateChannelStatus(id, "", req.Status, "manual operation")
-	if changed {
-		model.InitChannelCache()
-		if req.Status != common.ChannelStatusEnabled {
-			closeActiveChannelWebSockets([]int{id})
+	count, err := model.SetChannelOverallStatus([]int{id}, req.Status, "manual operation")
+	if err != nil {
+		if errors.Is(err, model.ErrChannelCacheSync) {
+			channelCacheSyncFailure(c, id)
+			return
 		}
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "Failed to update channel", "database_committed": false, "cache_synchronized": false})
+		return
+	}
+	changed := count > 0
+	if changed && req.Status != common.ChannelStatusEnabled {
+		closeActiveChannelWebSockets([]int{id})
 	}
 	recordManageAudit(c, "channel.status_update", map[string]any{
 		"id":      id,
@@ -1290,7 +1301,8 @@ func UpdateChannelStatus(c *gin.Context) {
 		"changed": changed,
 	})
 	c.JSON(http.StatusOK, gin.H{
-		"success": true,
+		"success":            true,
+		"database_committed": true, "cache_synchronized": true,
 		"message": "",
 		"data":    changed,
 	})
@@ -1302,18 +1314,20 @@ func BatchUpdateChannelStatus(c *gin.Context) {
 		common.ApiErrorT(c, "Invalid parameters")
 		return
 	}
-	changedCount := 0
+	changedCount, err := model.SetChannelOverallStatus(req.Ids, req.Status, "manual batch operation")
+	if err != nil {
+		if errors.Is(err, model.ErrChannelCacheSync) {
+			channelCacheSyncFailure(c, req.Ids...)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"success": false, "message": "Failed to update channel", "database_committed": false, "cache_synchronized": false})
+		return
+	}
 	var disabledIDs []int
 	for _, id := range req.Ids {
-		if model.UpdateChannelStatus(id, "", req.Status, "manual batch operation") {
-			changedCount++
-			if req.Status != common.ChannelStatusEnabled {
-				disabledIDs = append(disabledIDs, id)
-			}
+		if req.Status != common.ChannelStatusEnabled {
+			disabledIDs = append(disabledIDs, id)
 		}
-	}
-	if changedCount > 0 {
-		model.InitChannelCache()
 	}
 	if len(disabledIDs) > 0 {
 		closeActiveChannelWebSockets(disabledIDs)
@@ -1324,9 +1338,10 @@ func BatchUpdateChannelStatus(c *gin.Context) {
 		"status": req.Status,
 	})
 	c.JSON(http.StatusOK, gin.H{
-		"success": true,
+		"success":            true,
+		"database_committed": true, "cache_synchronized": true,
 		"message": "",
-		"data":    changedCount,
+		"data":    len(req.Ids),
 	})
 }
 
@@ -1644,6 +1659,8 @@ func ManageMultiKeys(c *gin.Context) {
 		return
 	}
 
+	release := model.LockChannelStatusMutation(request.ChannelId)
+	defer release()
 	channel, err := model.GetChannelById(request.ChannelId, true)
 	if err != nil {
 		common.ApiErrorT(c, "Channel does not exist")
@@ -1669,10 +1686,6 @@ func ManageMultiKeys(c *gin.Context) {
 			"id":     channel.Id,
 		})
 	}
-
-	lock := model.GetChannelPollingLock(channel.Id)
-	lock.Lock()
-	defer lock.Unlock()
 
 	switch request.Action {
 	case "get_key_status":
@@ -1816,7 +1829,10 @@ func ManageMultiKeys(c *gin.Context) {
 			common.ApiError(c, err)
 			return
 		}
-		model.InitChannelCache()
+		if err := model.RefreshChannelCacheForMutation(); err != nil {
+			channelCacheSyncFailure(c, channel.Id)
+			return
+		}
 		if shouldCloseWebSocket {
 			closeActiveChannelWebSockets([]int{channel.Id})
 		}
@@ -1853,7 +1869,10 @@ func ManageMultiKeys(c *gin.Context) {
 			return
 		}
 
-		model.InitChannelCache()
+		if err := model.RefreshChannelCacheForMutation(); err != nil {
+			channelCacheSyncFailure(c, channel.Id)
+			return
+		}
 		common.ApiSuccessT(c, "Key enabled", nil)
 		return
 
@@ -1875,7 +1894,10 @@ func ManageMultiKeys(c *gin.Context) {
 			return
 		}
 
-		model.InitChannelCache()
+		if err := model.RefreshChannelCacheForMutation(); err != nil {
+			channelCacheSyncFailure(c, channel.Id)
+			return
+		}
 		common.ApiSuccessT(c, "Enabled {{count}} keys", nil, map[string]any{"count": enabledCount})
 		return
 
@@ -1916,7 +1938,10 @@ func ManageMultiKeys(c *gin.Context) {
 			common.ApiError(c, err)
 			return
 		}
-		model.InitChannelCache()
+		if err := model.RefreshChannelCacheForMutation(); err != nil {
+			channelCacheSyncFailure(c, channel.Id)
+			return
+		}
 		if shouldCloseWebSocket {
 			closeActiveChannelWebSockets([]int{channel.Id})
 		}
@@ -1987,7 +2012,10 @@ func ManageMultiKeys(c *gin.Context) {
 			common.ApiError(c, err)
 			return
 		}
-		model.InitChannelCache()
+		if err := model.RefreshChannelCacheForMutation(); err != nil {
+			channelCacheSyncFailure(c, channel.Id)
+			return
+		}
 		if shouldCloseWebSocket {
 			closeActiveChannelWebSockets([]int{channel.Id})
 		}
@@ -2052,7 +2080,10 @@ func ManageMultiKeys(c *gin.Context) {
 			common.ApiError(c, err)
 			return
 		}
-		model.InitChannelCache()
+		if err := model.RefreshChannelCacheForMutation(); err != nil {
+			channelCacheSyncFailure(c, channel.Id)
+			return
+		}
 		if shouldCloseWebSocket {
 			closeActiveChannelWebSockets([]int{channel.Id})
 		}
@@ -2323,4 +2354,10 @@ func OllamaVersion(c *gin.Context) {
 			"version": version,
 		},
 	})
+}
+
+func channelCacheSyncFailure(c *gin.Context, ids ...int) {
+	closeActiveChannelWebSockets(ids)
+	recordManageAudit(c, "channel.cache_sync_failed", map[string]any{"ids": ids, "database_committed": true})
+	c.JSON(http.StatusServiceUnavailable, gin.H{"success": false, "message": "Failed to update channel", "code": "CHANNEL_CACHE_SYNC_FAILED", "database_committed": true, "cache_synchronized": false})
 }

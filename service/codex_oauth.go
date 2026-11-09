@@ -33,7 +33,7 @@ func RefreshCodexOAuthToken(ctx context.Context, refreshToken string) (*CodexOAu
 func RefreshCodexOAuthTokenWithProxy(ctx context.Context, refreshToken string, proxyURL string) (*CodexOAuthTokenResult, error) {
 	client, err := getCodexOAuthHTTPClient(proxyURL)
 	if err != nil {
-		return nil, err
+		return nil, common.SafeOutboundError(err)
 	}
 	return refreshCodexOAuthToken(ctx, client, codexOAuthTokenURL, codexOAuthClientID, refreshToken)
 }
@@ -57,14 +57,14 @@ func refreshCodexOAuthToken(
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
-		return nil, err
+		return nil, common.SafeOutboundError(err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, common.SafeOutboundError(err)
 	}
 	defer resp.Body.Close()
 

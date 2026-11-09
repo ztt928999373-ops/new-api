@@ -622,6 +622,9 @@ func fetchAdvancedCustomBalance(channel *model.Channel) (channelBalanceResult, e
 }
 
 func updateChannelBalance(channel *model.Channel) (channelBalanceResult, error) {
+	if channel == nil || channel.CredentialRef != "" {
+		return channelBalanceResult{}, fmt.Errorf("managed credential balance operations are not supported")
+	}
 	if channel.Type == constant.ChannelTypeAdvancedCustom {
 		return fetchAdvancedCustomBalance(channel)
 	}

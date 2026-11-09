@@ -264,6 +264,9 @@ func updateBatchTasks(ctx context.Context, adaptor BatchTaskPollingAdaptor, chan
 		return err
 	}
 	proxy := ch.GetSetting().Proxy
+	if ch.CredentialRef != "" {
+		return fmt.Errorf("managed credentials are not supported for tasks")
+	}
 	baseURL := ch.GetBaseURL()
 	if baseURL == "" {
 		baseURL = constant.GetChannelBaseURL(ch.Type)
@@ -450,6 +453,9 @@ func updateVideoTasks(ctx context.Context, platform constant.TaskPlatform, chann
 		return fmt.Errorf("CacheGetChannel failed: %w", err)
 	}
 	adaptor := GetTaskAdaptorFunc(platform)
+	if cacheGetChannel.CredentialRef != "" {
+		return fmt.Errorf("managed credentials are not supported for tasks")
+	}
 	if adaptor == nil {
 		return fmt.Errorf("video adaptor not found")
 	}
@@ -486,6 +492,9 @@ func updateVideoTasks(ctx context.Context, platform constant.TaskPlatform, chann
 }
 
 func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *model.Channel, taskId string, taskM map[string]*model.Task) error {
+	if ch == nil || ch.CredentialRef != "" {
+		return fmt.Errorf("managed credentials are not supported for tasks")
+	}
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}

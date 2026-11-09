@@ -452,7 +452,7 @@ func ClaudeHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayI
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeBadResponseBody)
 	}
-	logger.LogDebug(c, "responseBody: %s", responseBody)
+	logger.LogDebug(c, "event=upstream_response channel_id=%d channel_type=%d body_bytes=%d", info.ChannelId, info.ChannelType, len(responseBody))
 	handleErr := HandleClaudeResponseData(c, info, claudeInfo, resp, responseBody)
 	if handleErr != nil {
 		return nil, handleErr

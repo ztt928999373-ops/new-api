@@ -78,7 +78,7 @@ func PrepareResponsesRequest(c *gin.Context, info *relaycommon.RelayInfo, req *d
 		}
 	}
 
-	logger.LogDebug(c, "requestBody: %s", jsonData)
+	logger.LogDebug(c, "event=relay_payload bytes=%d", len(jsonData))
 	body, closer, err := relaycommon.NewOutboundJSONBody(jsonData)
 	if err != nil {
 		return nil, nil, nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
