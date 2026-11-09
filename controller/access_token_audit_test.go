@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"net"
@@ -826,6 +827,27 @@ type releasedAuditLog struct {
 
 func (releasedAuditLog) TableName() string { return "logs" }
 
+func TestAuditSQLiteFixtureReleasesWALFiles(t *testing.T) {
+	var path string
+	var connection *sql.DB
+	require.True(t, t.Run("write WAL and close", func(t *testing.T) {
+		db, name := newAuditTestDatabase(t, "sqlite", "")
+		path = name
+		var err error
+		connection, err = db.DB()
+		require.NoError(t, err)
+		require.NoError(t, db.Exec("PRAGMA journal_mode=WAL").Error)
+		require.NoError(t, db.Exec("CREATE TABLE fixture (id INTEGER PRIMARY KEY)").Error)
+		require.NoError(t, db.Exec("INSERT INTO fixture (id) VALUES (1)").Error)
+		require.FileExists(t, path+"-wal")
+		require.FileExists(t, path+"-shm")
+	}))
+	assert.Zero(t, connection.Stats().OpenConnections)
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		assert.NoFileExists(t, path+suffix)
+	}
+}
+
 // External tests create a new database per case on a loopback-only disposable
 // instance. They never drop databases or tables supplied through an environment variable.
 func newAuditTestDatabase(t *testing.T, kind, dsn string) (*gorm.DB, string) {
@@ -834,6 +856,10 @@ func newAuditTestDatabase(t *testing.T, kind, dsn string) (*gorm.DB, string) {
 		path := t.TempDir() + "/audit.db"
 		db, err := gorm.Open(sqlite.Open(path), &gorm.Config{})
 		require.NoError(t, err)
+		connection, err := db.DB()
+		require.NoError(t, err)
+		// Close before TempDir cleanup (LIFO), including WAL/SHM handles.
+		t.Cleanup(func() { require.NoError(t, connection.Close()) })
 		return db, path
 	}
 	require.NotEmpty(t, dsn)
@@ -1076,6 +1102,10 @@ func TestAuditDatabaseMatrix(t *testing.T) {
 					}
 					for range 2 {
 						require.NoError(t, model.InitDB())
+						connection, err := model.DB.DB()
+						require.NoError(t, err)
+						// InitDB opens a new pool on each simulated startup.
+						t.Cleanup(func() { require.NoError(t, connection.Close()) })
 						require.NoError(t, model.InitLogDB())
 					}
 					if !upgrade {
