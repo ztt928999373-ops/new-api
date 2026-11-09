@@ -86,6 +86,14 @@ func TestCredentialRoutesAuthenticateAuthorizeAndRejectUnsupported(t *testing.T)
 		{"managed balance rejected", http.MethodGet, fmt.Sprintf("/api/channel/update_balance/%d", managed.Id), "", common.RoleRootUser, 503},
 		{"managed test rejected", http.MethodGet, fmt.Sprintf("/api/channel/test/%d", managed.Id), "", common.RoleRootUser, 503},
 		{"managed edit rejected", http.MethodPut, "/api/channel/", fmt.Sprintf(`{"id":%d,"key":"synthetic-new"}`, managed.Id), common.RoleRootUser, 503},
+		{"legacy disable", http.MethodPost, fmt.Sprintf("/api/channel/%d/status", legacy.Id), `{"status":2}`, common.RoleRootUser, 200},
+		{"legacy reenable", http.MethodPost, fmt.Sprintf("/api/channel/%d/status", legacy.Id), `{"status":1}`, common.RoleRootUser, 200},
+		{"managed disable", http.MethodPost, fmt.Sprintf("/api/channel/%d/status", managed.Id), `{"status":2}`, common.RoleRootUser, 200},
+		{"managed reenable", http.MethodPost, fmt.Sprintf("/api/channel/%d/status", managed.Id), `{"status":1}`, common.RoleRootUser, 200},
+		{"managed idempotent", http.MethodPost, fmt.Sprintf("/api/channel/%d/status", managed.Id), `{"status":1}`, common.RoleRootUser, 200},
+		{"invalid missing channel", http.MethodPost, "/api/channel/999999/status", `{"status":1}`, common.RoleRootUser, 200},
+		{"mixed batch status", http.MethodPost, "/api/channel/status/batch", fmt.Sprintf(`{"ids":[%d,%d],"status":1}`, managed.Id, legacy.Id), common.RoleRootUser, 200},
+		{"invalid batch rollback", http.MethodPost, "/api/channel/status/batch", fmt.Sprintf(`{"ids":[%d,999999],"status":2}`, managed.Id), common.RoleRootUser, 200},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
@@ -98,12 +106,38 @@ func TestCredentialRoutesAuthenticateAuthorizeAndRejectUnsupported(t *testing.T)
 			require.Equal(t, tc.status, w.Code, w.Body.String())
 			require.NotContains(t, w.Body.String(), "synthetic-platform-secret")
 			require.NotContains(t, w.Body.String(), "synthetic-byok-secret")
+			if tc.method == http.MethodPost && strings.Contains(tc.path, "/status") {
+				if strings.HasPrefix(tc.name, "invalid") {
+					require.Contains(t, w.Body.String(), `"success":false`)
+				} else {
+					require.Contains(t, w.Body.String(), `"success":true`)
+					var input struct {
+						Status int   `json:"status"`
+						Ids    []int `json:"ids"`
+					}
+					require.NoError(t, common.UnmarshalJsonStr(tc.body, &input))
+					if len(input.Ids) == 0 {
+						var id int
+						_, err := fmt.Sscanf(tc.path, "/api/channel/%d/status", &id)
+						require.NoError(t, err)
+						input.Ids = []int{id}
+					}
+					for _, id := range input.Ids {
+						var stored model.Channel
+						require.NoError(t, db.First(&stored, id).Error)
+						require.Equal(t, input.Status, stored.Status)
+					}
+				}
+			}
 			if tc.status == 503 && strings.Contains(tc.name, "managed") {
 				require.Contains(t, w.Body.String(), "MANAGED_CREDENTIAL_OPERATION_UNSUPPORTED")
 			}
 		})
 	}
 	var copies int64
+	var after model.Channel
+	require.NoError(t, db.First(&after, managed.Id).Error)
+	require.Equal(t, common.ChannelStatusEnabled, after.Status, "failed batch must not persist its preceding update")
 	require.NoError(t, db.Model(&model.Channel{}).Where("credential_ref = ?", platform.ID).Count(&copies).Error)
 	require.EqualValues(t, 1, copies, "rejected copy must not duplicate a credential binding")
 }

@@ -24,16 +24,28 @@ var channelsIDM map[int]*Channel                     // all channels include dis
 var channel2advancedCustomConfig map[int]*kitdto.AdvancedCustomConfig
 var channelSyncLock sync.RWMutex
 
-func InitChannelCache() {
+// Serialize database reads through publication with status writers.
+// Lock order: channelStatusLock, polling lock, channelSyncLock.
+func InitChannelCache() error {
+	channelStatusLock.Lock()
+	defer channelStatusLock.Unlock()
+	return initChannelCacheLocked()
+}
+
+// Caller holds channelStatusLock; do not recursively call the public wrapper.
+func initChannelCacheLocked() error {
 	if !common.MemoryCacheEnabled {
 		InvalidatePricingCache()
 		rebuildTaskAliasView()
-		return
+		return nil
 	}
 	newChannelId2channel := make(map[int]*Channel)
 	newChannel2advancedCustomConfig := make(map[int]*kitdto.AdvancedCustomConfig)
 	var channels []*Channel
-	DB.Find(&channels)
+	if err := DB.Find(&channels).Error; err != nil {
+		invalidateChannelCacheLocked()
+		return err
+	}
 	for _, channel := range channels {
 		if channel.CredentialRef != "" {
 			channel.Key, channel.Keys = "", nil
@@ -46,7 +58,10 @@ func InitChannelCache() {
 		}
 	}
 	var abilities []*Ability
-	DB.Find(&abilities)
+	if err := DB.Find(&abilities).Error; err != nil {
+		invalidateChannelCacheLocked()
+		return err
+	}
 	groups := make(map[string]bool)
 	for _, ability := range abilities {
 		groups[ability.Group] = true
@@ -107,6 +122,7 @@ func InitChannelCache() {
 	InvalidatePricingCache()
 	rebuildTaskAliasView()
 	common.SysLog(common.LogText("channels synced from database"))
+	return nil
 }
 
 // nextManagedPollingIndex shares only slot metadata. Request-local decrypted
@@ -336,3 +352,19 @@ func CacheUpdateChannel(channel *Channel) {
 	channelSyncLock.Unlock()
 	InvalidatePricingCache()
 }
+
+// Caller holds channelStatusLock. Remove routing and direct lookup snapshots
+// together: no stale enabled entry remains usable after a failed rebuild.
+func invalidateChannelCacheLocked() {
+	common.SysError("channel cache rebuild failed; routing cache invalidated")
+	channelSyncLock.Lock()
+	group2model2channels = nil
+	channelsIDM = nil
+	channel2advancedCustomConfig = nil
+	channelSyncLock.Unlock()
+	InvalidatePricingCache()
+}
+
+// RefreshChannelCacheForMutation requires the guard returned by
+// LockChannelStatusMutation. It never reacquires the status lock.
+func RefreshChannelCacheForMutation() error { return initChannelCacheLocked() }

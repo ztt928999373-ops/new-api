@@ -46,6 +46,10 @@ func rejectUnsupportedManagedChannelOperation(c *gin.Context) {
 		c.Next()
 		return
 	}
+	if c.Request.Method == http.MethodPost && (route == "/:id/status" || route == "/status/batch") {
+		c.Next()
+		return
+	}
 	if c.Request.Method == http.MethodGet {
 		switch route {
 		case "/", "/search", "/models", "/models_enabled", "/default_base_urls", "/ops", "/priority/order", "/:id":
