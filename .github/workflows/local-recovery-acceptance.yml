@@ -45,6 +45,7 @@ jobs:
           start=$SECONDS
           go test -json -race ./internal/localops ./pkg/credentialcrypto ./service/credentials ./logger -count=1 -timeout=8m > local-recovery-logs/recovery.json 2>&1 || status=1
           go test -json -race ./service -run '^TestObserveChannelAffinityUsageCacheByRelayFormat_' -count=2 -timeout=1m > local-recovery-logs/affinity.json 2>&1 || status=1
+          go test -json -race ./relay/channel -run '^TestUpstreamGetBody_HTTP2' -count=1 -timeout=1m > local-recovery-logs/http2.json 2>&1 || status=1
           go test -json -race ./model -run '^(TestOverallChannelStatusIndependentOfCredentials|TestPreparedDatabaseOpenNeverMigrates)$' -count=1 -timeout=4m > local-recovery-logs/cache.json 2>&1 || status=1
           go test -json -race ./controller ./router -run '^(TestSetupTransactionRollbackAndConcurrentWinner|TestSupplierCredentialManagementNeverReturnsPlaintext|TestOpenAIPreparation.*|TestOpenAIPilotAuthenticatedSettlement|TestManageMultiKeysOverallStatusContention|TestAuditSQLiteFixtureReleasesWALFiles|TestAuditDatabaseMatrix|TestAdminUserRoutineEditsDoNotRequireProof|TestSecurityAccountMailsFollowTheOwnersLanguage)$' -count=1 -timeout=4m > local-recovery-logs/api.json 2>&1 || status=1
           echo "exit=$status duration_seconds=$((SECONDS-start))" | tee local-recovery-logs/results.log

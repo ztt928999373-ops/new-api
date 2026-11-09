@@ -416,6 +416,15 @@ func runGoAwayAfterFirstRequestServer(ln net.Listener) <-chan h2ServerResult {
 
 			if attempt == 0 {
 				err = framer.WriteGoAway(0, http2.ErrCodeNo, nil)
+				if err == nil {
+					// A TCP listener supplies TCPConn here. Half-close and drain
+					// under the existing deadline so unread client frames cannot
+					// turn this graceful GOAWAY fixture into a Windows TCP reset.
+					err = conn.(*net.TCPConn).CloseWrite()
+					if err == nil {
+						_, err = io.Copy(io.Discard, conn)
+					}
+				}
 				conn.Close()
 				if err != nil {
 					res.err = err
