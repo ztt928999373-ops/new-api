@@ -184,6 +184,14 @@ func chooseDB(envName string, isLog bool) (*gorm.DB, common.DatabaseType, error)
 }
 
 func InitDB() (err error) {
+	return initDB(true)
+}
+
+// OpenPreparedDB opens an explicitly prepared single-instance state without DDL.
+// Offline staging, schema upgrades and integrity checks belong to localops.
+func OpenPreparedDB() error { return initDB(false) }
+
+func initDB(migrate bool) (err error) {
 	db, dbType, err := chooseDB("SQL_DSN", false)
 	if err == nil {
 		common.SetMainDatabaseType(dbType)
@@ -212,7 +220,7 @@ func InitDB() (err error) {
 		sqlDB.SetMaxOpenConns(common.GetEnvOrDefault("SQL_MAX_OPEN_CONNS", 1000))
 		sqlDB.SetConnMaxLifetime(time.Second * time.Duration(common.GetEnvOrDefault("SQL_MAX_LIFETIME", 60)))
 
-		if !common.IsMasterNode {
+		if !common.IsMasterNode || !migrate {
 			// Only the master node migrates. A node that cannot read the deadline
 			// keeps rejecting legacy access tokens instead of refusing to start.
 			if err := EnsureLegacyAccessTokenRetireAt(common.GetTimestamp()); err != nil {
@@ -233,11 +241,17 @@ func InitDB() (err error) {
 }
 
 func InitLogDB() (err error) {
+	return initLogDB(true)
+}
+
+func OpenPreparedLogDB() error { return initLogDB(false) }
+
+func initLogDB(migrate bool) (err error) {
 	if os.Getenv("LOG_SQL_DSN") == "" {
 		LOG_DB = DB
 		common.SetLogDatabaseType(common.MainDatabaseType())
 		initCol()
-		if common.IsMasterNode {
+		if common.IsMasterNode && migrate {
 			return MigrateAuditLogs()
 		}
 		return
@@ -264,7 +278,7 @@ func InitLogDB() (err error) {
 		sqlDB.SetMaxOpenConns(common.GetEnvOrDefault("SQL_MAX_OPEN_CONNS", 1000))
 		sqlDB.SetConnMaxLifetime(time.Second * time.Duration(common.GetEnvOrDefault("SQL_MAX_LIFETIME", 60)))
 
-		if !common.IsMasterNode {
+		if !common.IsMasterNode || !migrate {
 			return nil
 		}
 		common.SysLog(common.LogText("database migration started"))

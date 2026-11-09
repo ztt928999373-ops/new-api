@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"sync"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -8,7 +9,10 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
+
+var setupMutex sync.Mutex
 
 type Setup struct {
 	Status       bool   `json:"status"`
@@ -25,6 +29,8 @@ type SetupRequest struct {
 }
 
 func GetSetup(c *gin.Context) {
+	common.OptionMapRWMutex.RLock()
+	defer common.OptionMapRWMutex.RUnlock()
 	setup := Setup{
 		Status: constant.Setup,
 	}
@@ -44,6 +50,8 @@ func GetSetup(c *gin.Context) {
 }
 
 func PostSetup(c *gin.Context) {
+	setupMutex.Lock()
+	defer setupMutex.Unlock()
 	// Check if setup is already completed
 	if constant.Setup {
 		common.ApiErrorT(c, "The system is already initialized")
@@ -51,7 +59,13 @@ func PostSetup(c *gin.Context) {
 	}
 
 	// Check if root user already exists
-	rootExists := model.RootUserExists()
+	var rootCount int64
+	if model.DB.Model(&model.User{}).Where("role = ?", common.RoleRootUser).Count(&rootCount).Error != nil {
+		common.ApiErrorT(c, "Invalid request")
+		return
+	}
+	rootExists := rootCount > 0
+	var rootUser *model.User
 
 	var req SetupRequest
 	err := c.ShouldBindJSON(&req)
@@ -87,7 +101,7 @@ func PostSetup(c *gin.Context) {
 			common.ApiErrorT(c, "System error: {{error}}", map[string]any{"error": err.Error()})
 			return
 		}
-		rootUser := model.User{
+		rootUser = &model.User{
 			Username:    req.Username,
 			Password:    hashedPassword,
 			Role:        common.RoleRootUser,
@@ -96,42 +110,43 @@ func PostSetup(c *gin.Context) {
 			AccessToken: nil,
 			Quota:       100000000,
 		}
-		err = model.DB.Create(&rootUser).Error
-		if err != nil {
-			common.ApiErrorT(c, "Failed to create the administrator account: {{error}}", map[string]any{"error": err.Error()})
-			return
-		}
 	}
 
-	// Set operation modes
+	// Publish no in-memory settings until every installation write commits.
+	values := map[string]string{"SelfUseModeEnabled": boolToString(req.SelfUseModeEnabled), "DemoSiteEnabled": boolToString(req.DemoSiteEnabled)}
+	err = model.DB.Transaction(func(tx *gorm.DB) error {
+		if rootUser != nil {
+			if err := tx.Create(rootUser).Error; err != nil {
+				return err
+			}
+		}
+		for key, value := range values {
+			option := model.Option{Key: key}
+			if err := tx.FirstOrCreate(&option, model.Option{Key: key}).Error; err != nil {
+				return err
+			}
+			option.Value = value
+			if err := tx.Save(&option).Error; err != nil {
+				return err
+			}
+		}
+		return tx.Create(&model.Setup{Version: common.Version, InitializedAt: time.Now().Unix()}).Error
+	})
+	if err != nil {
+		common.ApiErrorT(c, "Invalid request")
+		return
+	}
+	common.OptionMapRWMutex.Lock()
+	if common.OptionMap == nil {
+		common.OptionMap = make(map[string]string)
+	}
+	for key, value := range values {
+		common.OptionMap[key] = value
+	}
 	operation_setting.SelfUseModeEnabled = req.SelfUseModeEnabled
 	operation_setting.DemoSiteEnabled = req.DemoSiteEnabled
-
-	// Save operation modes to database for persistence
-	err = model.UpdateOption("SelfUseModeEnabled", boolToString(req.SelfUseModeEnabled))
-	if err != nil {
-		common.ApiErrorT(c, "Failed to save the self-use mode setting: {{error}}", map[string]any{"error": err.Error()})
-		return
-	}
-
-	err = model.UpdateOption("DemoSiteEnabled", boolToString(req.DemoSiteEnabled))
-	if err != nil {
-		common.ApiErrorT(c, "Failed to save the demo site mode setting: {{error}}", map[string]any{"error": err.Error()})
-		return
-	}
-
-	// Update setup status
 	constant.Setup = true
-
-	setup := model.Setup{
-		Version:       common.Version,
-		InitializedAt: time.Now().Unix(),
-	}
-	err = model.DB.Create(&setup).Error
-	if err != nil {
-		common.ApiErrorT(c, "Failed to initialize the system: {{error}}", map[string]any{"error": err.Error()})
-		return
-	}
+	common.OptionMapRWMutex.Unlock()
 
 	common.ApiSuccessT(c, "System initialized successfully", nil)
 }

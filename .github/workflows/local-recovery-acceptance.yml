@@ -1,0 +1,87 @@
+name: Batch C local recovery acceptance
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+    branches: [product/v1]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: batch-c-local-recovery
+  cancel-in-progress: false
+
+jobs:
+  recovery:
+    if: github.event.pull_request.draft == true && github.event.pull_request.head.ref == 'feature/v1-install-recovery' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GOWORK: 'off'
+      CGO_ENABLED: '1'
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Record exact environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p local-recovery-logs web/dist
+          touch web/dist/index.html
+          test "$(git rev-parse HEAD)" = '${{ github.event.pull_request.head.sha }}'
+          { git rev-parse HEAD; go version; gcc --version; go env CGO_ENABLED; date -u; } > local-recovery-logs/environment.log
+      - name: SQLite recovery, permissions and concurrency
+        shell: bash
+        run: |
+          set -uo pipefail
+          status=0
+          start=$SECONDS
+          go test -json -race ./internal/localops ./pkg/credentialcrypto ./service/credentials -count=1 -timeout=8m > local-recovery-logs/recovery.json 2>&1 || status=1
+          go test -json -race ./model -run '^(TestOverallChannelStatusIndependentOfCredentials|TestPreparedDatabaseOpenNeverMigrates)$' -count=1 -timeout=4m > local-recovery-logs/cache.json 2>&1 || status=1
+          go test -json -race ./controller ./router -run '^(TestSetupTransactionRollbackAndConcurrentWinner|TestSupplierCredentialManagementNeverReturnsPlaintext|TestOpenAIPreparation.*|TestOpenAIPilotAuthenticatedSettlement|TestManageMultiKeysOverallStatusContention)$' -count=1 -timeout=4m > local-recovery-logs/api.json 2>&1 || status=1
+          echo "exit=$status duration_seconds=$((SECONDS-start))" | tee local-recovery-logs/results.log
+          if [ "$status" -ne 0 ]; then tail -n 100 local-recovery-logs/*.json; fi
+          exit "$status"
+      - name: Actual Linux binary initialize, repeat start and recover
+        shell: bash
+        run: |
+          set -euo pipefail
+          go build -ldflags "-X github.com/QuantumNous/new-api/common.Version=${{ github.event.pull_request.head.sha }}" -o "$RUNNER_TEMP/new-api" .
+          binary="$RUNNER_TEMP/new-api"
+          root="$RUNNER_TEMP/batch-c-synthetic"
+          mkdir -m 700 "$root"
+          "$binary" ops init --state "$root/source" --environment test > local-recovery-logs/init.log 2>&1
+          "$binary" ops private-dir --state "$root/database-backups"
+          "$binary" ops private-dir --state "$root/key-backups"
+          "$binary" ops backup --state "$root/source" --database-backup "$root/database-backups/snapshot.sqlite" --key-backup "$root/key-backups/snapshot.ring" > local-recovery-logs/backup.log 2>&1
+          "$binary" ops restore --state "$root/restored" --database-backup "$root/database-backups/snapshot.sqlite" --key-backup "$root/key-backups/snapshot.ring" > local-recovery-logs/restore.log 2>&1
+          export SESSION_SECRET=synthetic-batch-c-linux-session-only
+          for iteration in 1 2; do
+            "$binary" ops serve --state "$root/restored" --port 5537 > "local-recovery-logs/start-$iteration.log" 2>&1 &
+            child=$!
+            trap 'kill "$child" 2>/dev/null || true' EXIT
+            ready=false
+            for attempt in $(seq 1 60); do
+              if curl --fail --silent http://127.0.0.1:5537/api/setup > "local-recovery-logs/setup-$iteration.json"; then ready=true; break; fi
+              if ! kill -0 "$child" 2>/dev/null; then cat "local-recovery-logs/start-$iteration.log"; exit 1; fi
+              sleep 1
+            done
+            test "$ready" = true
+            if [ "$iteration" = 1 ]; then kill -KILL "$child"; wait "$child" || true; else kill -TERM "$child"; wait "$child"; fi
+            trap - EXIT
+            "$binary" ops check --state "$root/restored"
+          done
+      - name: Preserve safe test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: batch-c-recovery-${{ github.event.pull_request.head.sha }}
+          path: local-recovery-logs/
+          retention-days: 14

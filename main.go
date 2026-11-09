@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -19,6 +20,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/controller"
 	"github.com/QuantumNous/new-api/i18n"
+	"github.com/QuantumNous/new-api/internal/localops"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
@@ -48,6 +50,20 @@ var buildFS embed.FS
 var indexPage []byte
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "ops" {
+		handled, release, err := localops.Dispatch(append([]string{os.Args[0]}, os.Args[2:]...))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "local operation unavailable; see docs/local-install-recovery.md")
+			os.Exit(1)
+		}
+		if release != nil {
+			defer release()
+		}
+		if handled {
+			fmt.Println("local operation completed")
+			return
+		}
+	}
 	if len(os.Args) > 1 && os.Args[1] == "plugin" {
 		os.Exit(jsplugin.RunCLI(os.Args[2:], os.Stdout, os.Stderr))
 	}
@@ -212,7 +228,7 @@ func main() {
 	}
 
 	srv := &http.Server{
-		Addr:    ":" + port,
+		Addr:    net.JoinHostPort(os.Getenv("BIND_ADDRESS"), port),
 		Handler: server,
 	}
 
@@ -291,7 +307,10 @@ func InjectGoogleAnalytics() {
 func InitResources() error {
 	// Initialize resources here if needed
 	// This is a placeholder function for future resource initialization
-	err := godotenv.Load(".env")
+	var err error
+	if os.Getenv("SUANJIE_STATE_DIR") == "" {
+		err = godotenv.Load(".env")
+	}
 	if err != nil {
 		if common.DebugEnabled {
 			common.SysLog(common.LogText("No .env file found, using default environment variables. If needed, please create a .env file and set the relevant variables."))
@@ -309,7 +328,11 @@ func InitResources() error {
 	service.InitHttpClient()
 
 	// Initialize SQL Database
-	err = model.InitDB()
+	if os.Getenv("SUANJIE_STATE_DIR") != "" {
+		err = model.OpenPreparedDB()
+	} else {
+		err = model.InitDB()
+	}
 	if err != nil {
 		common.FatalLog(common.LogText("failed to initialize database: %s", err.Error()))
 		return err
@@ -342,7 +365,11 @@ func InitResources() error {
 	common.CleanupOldCacheFiles()
 
 	// Initialize SQL Database
-	err = model.InitLogDB()
+	if os.Getenv("SUANJIE_STATE_DIR") != "" {
+		err = model.OpenPreparedLogDB()
+	} else {
+		err = model.InitLogDB()
+	}
 	if err != nil {
 		return err
 	}
