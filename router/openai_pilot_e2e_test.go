@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	urlpkg "net/url"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -26,9 +27,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestOpenAIPilotAuthenticatedSettlement(t *testing.T) {
+func TestOpenAIPilotAuthenticatedSettlement(t *testing.T)  { testPilotAuthenticatedSettlement(t, false) }
+func TestBailianPilotAuthenticatedSettlement(t *testing.T) { testPilotAuthenticatedSettlement(t, true) }
+
+type pilotTransport func(*http.Request) (*http.Response, error)
+
+func (f pilotTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+func testPilotAuthenticatedSettlement(t *testing.T, bailian bool) {
 	require.NoError(t, i18n.Init())
-	for _, scenario := range []string{"ordinary", "stream", "retry", "failure", "timeout", "interrupted", "insufficient", "invalid_token", "disabled", "revoked", "concurrent"} {
+	for _, scenario := range []string{"ordinary", "replaced", "stream", "retry", "failure", "timeout", "interrupted", "insufficient", "invalid_token", "disabled", "revoked", "concurrent"} {
 		t.Run(scenario, func(t *testing.T) {
 			oldDB, oldLog := model.DB, model.LOG_DB
 			t.Cleanup(func() { model.DB, model.LOG_DB = oldDB, oldLog })
@@ -52,22 +59,26 @@ func TestOpenAIPilotAuthenticatedSettlement(t *testing.T) {
 			})
 			service.InitHttpClient()
 			prices := ratio_setting.ModelPrice2JSONString()
-			require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"pilot-e2e":0.002}`))
+			require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"qwen3.7-flash-2026-07-15":0.002}`))
 			t.Cleanup(func() { require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(prices)) })
 			initial := 1000000
 			if scenario == "insufficient" {
 				initial = 0
 			}
-			user := model.User{Username: "pilot-e2e", Role: common.RoleCommonUser, Status: common.UserStatusEnabled, Group: "default", Quota: initial}
+			user := model.User{Username: "qwen3.7-flash-2026-07-15", Role: common.RoleCommonUser, Status: common.UserStatusEnabled, Group: "default", Quota: initial}
 			require.NoError(t, model.DB.Create(&user).Error)
 			token := model.Token{UserId: user.Id, Key: "syntheticpilotclient", Status: common.TokenStatusEnabled, ExpiredTime: -1, RemainQuota: 1000000}
 			require.NoError(t, model.DB.Create(&token).Error)
+			expectedKey := "syntheticpilotsupplier"
+			if scenario == "replaced" {
+				expectedKey = "syntheticreplacedsupplier"
+			}
 			var calls atomic.Int32
 			release := make(chan struct{})
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				_, _ = io.Copy(io.Discard, r.Body)
 				n := calls.Add(1)
-				if r.Header.Get("Authorization") != "Bearer syntheticpilotsupplier" {
+				if r.Header.Get("Authorization") != "Bearer "+expectedKey {
 					w.WriteHeader(401)
 					return
 				}
@@ -85,7 +96,7 @@ func TestOpenAIPilotAuthenticatedSettlement(t *testing.T) {
 				}
 				if scenario == "stream" || scenario == "interrupted" {
 					w.Header().Set("Content-Type", "text/event-stream")
-					_, _ = io.WriteString(w, "data: {\"id\":\"mock\",\"model\":\"pilot-e2e\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}\n\n")
+					_, _ = io.WriteString(w, "data: {\"id\":\"mock\",\"model\":\"qwen3.7-flash-2026-07-15\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}\n\n")
 					if scenario == "interrupted" {
 						w.(http.Flusher).Flush()
 						select {
@@ -94,15 +105,16 @@ func TestOpenAIPilotAuthenticatedSettlement(t *testing.T) {
 						}
 						return
 					}
-					_, _ = io.WriteString(w, "data: {\"id\":\"mock\",\"model\":\"pilot-e2e\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":3,\"total_tokens\":14}}\n\ndata: [DONE]\n\n")
+					_, _ = io.WriteString(w, "data: {\"id\":\"mock\",\"model\":\"qwen3.7-flash-2026-07-15\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":3,\"total_tokens\":14}}\n\ndata: [DONE]\n\n")
 					return
 				}
 				w.Header().Set("Content-Type", "application/json")
-				_, _ = io.WriteString(w, `{"id":"mock","model":"pilot-e2e","choices":[{"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":11,"completion_tokens":3,"total_tokens":14}}`)
+				_, _ = io.WriteString(w, `{"id":"mock","model":"qwen3.7-flash-2026-07-15","choices":[{"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":11,"completion_tokens":3,"total_tokens":14}}`)
 			}))
 			defer upstream.Close()
 			defer close(release)
-			url := upstream.URL
+			upstreamURL := upstream.URL
+			url := upstreamURL
 			dir := filepath.Join(t.TempDir(), "keys")
 			require.NoError(t, credentialcrypto.InitializeLocalDirectory(dir))
 			path := filepath.Join(dir, "ring")
@@ -112,15 +124,40 @@ func TestOpenAIPilotAuthenticatedSettlement(t *testing.T) {
 			store := &credentials.Store{DB: model.DB, Environment: "test", ProviderID: "local-test", Provider: provider}
 			require.NoError(t, store.MigrateSchema())
 			owner := credentials.Principal{TenantID: "default", UserID: "synthetic-admin", PlatformOperator: true}
-			head, err := store.Create(context.Background(), owner, true, "openai", "api_key", "relay", []byte("syntheticpilotsupplier"))
+			supplier := "openai"
+			if bailian {
+				supplier = "bailian"
+			}
+			head, err := store.Create(context.Background(), owner, true, supplier, "api_key", "relay", []byte("syntheticpilotsupplier"))
 			require.NoError(t, err)
 			previous := service.SetChannelCredentialResolver(&credentials.Resolver{Environment: "test", Repository: store, Providers: map[string]credentialcrypto.KeyProvider{"local-test": provider}, Audit: store})
 			t.Cleanup(func() { service.SetChannelCredentialResolver(previous) })
-			channel := model.Channel{Type: constant.ChannelTypeOpenAI, CredentialRef: head.ID, Name: "pilot", Status: common.ChannelStatusEnabled, BaseURL: &url, Models: "pilot-e2e", Group: "default"}
+			channel := model.Channel{Type: constant.ChannelTypeOpenAI, CredentialRef: head.ID, Name: "pilot", Status: common.ChannelStatusEnabled, BaseURL: &url, Models: "qwen3.7-flash-2026-07-15", Group: "default"}
+			if bailian {
+				channel.Type = constant.ChannelTypeAli
+				official := "https://dashscope.aliyuncs.com"
+				channel.BaseURL = &official
+				target, err := urlpkg.Parse(upstreamURL)
+				require.NoError(t, err)
+				client := service.GetHttpClient()
+				transport := client.Transport
+				client.Transport = pilotTransport(func(req *http.Request) (*http.Response, error) {
+					require.Equal(t, "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions", req.URL.String())
+					copied := req.Clone(req.Context())
+					address := *req.URL
+					address.Scheme, address.Host = target.Scheme, target.Host
+					copied.URL = &address
+					return transport.RoundTrip(copied)
+				})
+			}
 			require.NoError(t, model.DB.Create(&channel).Error)
-			require.NoError(t, model.DB.Create(&model.Ability{Group: "default", Model: "pilot-e2e", ChannelId: channel.Id, Enabled: true}).Error)
+			require.NoError(t, model.DB.Create(&model.Ability{Group: "default", Model: "qwen3.7-flash-2026-07-15", ChannelId: channel.Id, Enabled: true}).Error)
 			if scenario == "disabled" {
 				_, err := model.SetChannelOverallStatus([]int{channel.Id}, common.ChannelStatusManuallyDisabled, "test")
+				require.NoError(t, err)
+			}
+			if scenario == "replaced" {
+				_, err := store.Replace(context.Background(), owner, head.ID, 1, []byte(expectedKey))
 				require.NoError(t, err)
 			}
 			if scenario == "revoked" {
@@ -130,7 +167,7 @@ func TestOpenAIPilotAuthenticatedSettlement(t *testing.T) {
 			engine.Use(middleware.RequestId())
 			SetRelayRouter(engine)
 			stream := scenario == "stream" || scenario == "interrupted"
-			body := `{"model":"pilot-e2e","messages":[{"role":"user","content":"hi"}],"max_tokens":16}`
+			body := `{"model":"qwen3.7-flash-2026-07-15","messages":[{"role":"user","content":"hi"}],"max_tokens":16}`
 			if stream {
 				body = strings.TrimSuffix(body, "}") + `,"stream":true,"stream_options":{"include_usage":true}}`
 			}
@@ -181,7 +218,7 @@ func TestOpenAIPilotAuthenticatedSettlement(t *testing.T) {
 			} else {
 				engine.ServeHTTP(w, r)
 			}
-			if scenario == "failure" || scenario == "timeout" {
+			if scenario == "failure" || scenario == "timeout" || (bailian && scenario == "retry") {
 				require.Eventually(t, func() bool {
 					var u model.User
 					var tok model.Token
@@ -211,7 +248,7 @@ func TestOpenAIPilotAuthenticatedSettlement(t *testing.T) {
 			}
 			require.LessOrEqual(t, len(logs), expectedRequests, "retries and stream termination must not settle twice")
 			require.NotContains(t, w.Body.String(), "syntheticpilotsupplier")
-			if scenario == "ordinary" || scenario == "stream" || scenario == "retry" {
+			if scenario == "ordinary" || scenario == "replaced" || scenario == "stream" || (scenario == "retry" && !bailian) {
 				require.Equal(t, 200, w.Code, w.Body.String())
 				require.Len(t, logs, 1)
 				require.Positive(t, charged)
@@ -227,7 +264,11 @@ func TestOpenAIPilotAuthenticatedSettlement(t *testing.T) {
 				require.Zero(t, calls.Load())
 			}
 			if scenario == "retry" {
-				require.Equal(t, int32(2), calls.Load())
+				if bailian {
+					require.Equal(t, int32(1), calls.Load())
+				} else {
+					require.Equal(t, int32(2), calls.Load())
+				}
 			}
 			if scenario == "interrupted" {
 				require.Equal(t, int32(1), calls.Load(), "never replay a stream after output")
