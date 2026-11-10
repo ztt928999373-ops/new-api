@@ -3,6 +3,7 @@ package router
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -142,7 +143,9 @@ func testPilotAuthenticatedSettlement(t *testing.T, bailian bool) {
 				client := service.GetHttpClient()
 				transport := client.Transport
 				client.Transport = pilotTransport(func(req *http.Request) (*http.Response, error) {
-					require.Equal(t, "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions", req.URL.String())
+					if req.URL.String() != "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions" {
+						return nil, errors.New("unexpected synthetic upstream destination")
+					}
 					copied := req.Clone(req.Context())
 					address := *req.URL
 					address.Scheme, address.Host = target.Scheme, target.Host
@@ -236,6 +239,7 @@ func testPilotAuthenticatedSettlement(t *testing.T, bailian bool) {
 				charged += log.Quota
 				require.NotEmpty(t, log.RequestId)
 				require.NotContains(t, log.Other+log.Content, "syntheticpilotsupplier")
+				require.NotContains(t, log.Other+log.Content, expectedKey)
 				require.NotContains(t, log.Other+log.Content, "syntheticpilotclient")
 			}
 			require.Equal(t, charged, initial-after.Quota, w.Body.String())
@@ -248,6 +252,7 @@ func testPilotAuthenticatedSettlement(t *testing.T, bailian bool) {
 			}
 			require.LessOrEqual(t, len(logs), expectedRequests, "retries and stream termination must not settle twice")
 			require.NotContains(t, w.Body.String(), "syntheticpilotsupplier")
+			require.NotContains(t, w.Body.String(), expectedKey)
 			if scenario == "ordinary" || scenario == "replaced" || scenario == "stream" || (scenario == "retry" && !bailian) {
 				require.Equal(t, 200, w.Code, w.Body.String())
 				require.Len(t, logs, 1)

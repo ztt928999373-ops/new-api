@@ -67,7 +67,7 @@ func PrepareOpenAIIntegration(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": gin.H{"id": channel.Id}})
 }
 
-// PrepareBailianIntegration atomically creates an encrypted credential and a
+// PrepareBailianIntegration atomically creates an encrypted Beijing credential and a
 // disabled single-model channel. Plaintext never enters the channel row.
 func PrepareBailianIntegration(c *gin.Context) {
 	var input struct {
