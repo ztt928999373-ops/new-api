@@ -167,6 +167,7 @@ func TestChannelStatusRoutesUseExpectedPermissions(t *testing.T) {
 }
 
 func TestChannelDeleteRoutesUseSensitiveWritePermission(t *testing.T) {
+	assertChannelRoutePermission(t, http.MethodPost, "/bailian-integration", authz.ChannelSensitiveWrite, controller.PrepareBailianIntegration)
 	assertChannelRoutePermission(t, http.MethodPost, "/openai-integration", authz.ChannelSensitiveWrite, controller.PrepareOpenAIIntegration)
 	assertChannelRoutePermission(t, http.MethodPost, "/credentials/:id/rewrap", authz.ChannelSensitiveWrite, controller.RewrapSupplierCredential)
 	assertChannelRoutePermission(t, http.MethodPost, "/credentials", authz.ChannelSensitiveWrite, controller.CreateSupplierCredential)
@@ -181,6 +182,13 @@ func TestChannelDeleteRoutesUseSensitiveWritePermission(t *testing.T) {
 	assertChannelRoutePermission(t, http.MethodPost, "/batch/tag", authz.ChannelWrite, controller.BatchSetChannelTag)
 }
 
+func TestBailianPreparationRequiresAuthentication(t *testing.T) {
+	engine := gin.New()
+	registerChannelRoutes(engine.Group("/api"))
+	w := httptest.NewRecorder()
+	engine.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/channel/bailian-integration", nil))
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+}
 func TestOpenAIPreparationRequiresAuthentication(t *testing.T) {
 	engine := gin.New()
 	registerChannelRoutes(engine.Group("/api"))

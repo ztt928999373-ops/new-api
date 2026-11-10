@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"sync/atomic"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/credentialcrypto"
@@ -63,12 +64,34 @@ func acquireChannelForRequest(ctx context.Context, ch *model.Channel, userID int
 	if ch.CredentialRef == "" {
 		return ch, nil, nil
 	}
-	if ch.Type != constant.ChannelTypeOpenAI || ch.Other != "" || ch.OtherSettings != "" || (ch.Setting != nil && *ch.Setting != "") || (ch.HeaderOverride != nil && *ch.HeaderOverride != "") || (ch.ParamOverride != nil && *ch.ParamOverride != "") {
+	if (ch.Type != constant.ChannelTypeOpenAI && ch.Type != constant.ChannelTypeAli) || ch.Other != "" || ch.OtherSettings != "" || (ch.Setting != nil && *ch.Setting != "") || (ch.HeaderOverride != nil && *ch.HeaderOverride != "") || (ch.ParamOverride != nil && *ch.ParamOverride != "") {
 		return nil, nil, credentialcrypto.ErrUnavailable
 	}
 	r := channelCredentialResolver.Load()
 	if r == nil || userID <= 0 {
 		return nil, nil, credentialcrypto.ErrUnavailable
+	}
+	if ch.Type == constant.ChannelTypeOpenAI {
+		if store := ConfiguredCredentialStore(); store != nil {
+			head, err := store.Metadata(ctx, credentials.Principal{TenantID: "default", UserID: strconv.Itoa(userID), PlatformOperator: true}, ch.CredentialRef)
+			if err != nil || head.Provider == "bailian" {
+				return nil, nil, credentialcrypto.ErrUnavailable
+			}
+		}
+	}
+	// Bailian is a fixed Beijing pilot, never a configurable OpenAI redirect.
+	if ch.Type == constant.ChannelTypeAli {
+		if ch.BaseURL == nil || *ch.BaseURL != "https://dashscope.aliyuncs.com" || ch.Models != "qwen3.7-flash-2026-07-15" || (ch.ModelMapping != nil && *ch.ModelMapping != "") || ch.ChannelInfo.IsMultiKey || common.TLSInsecureSkipVerify || common.DebugEnabled {
+			return nil, nil, credentialcrypto.ErrUnavailable
+		}
+		store := ConfiguredCredentialStore()
+		if store == nil {
+			return nil, nil, credentialcrypto.ErrUnavailable
+		}
+		head, err := store.Metadata(ctx, credentials.Principal{TenantID: "default", UserID: strconv.Itoa(userID), PlatformOperator: true}, ch.CredentialRef)
+		if err != nil || head.Provider != "bailian" || head.CredentialType != "api_key" {
+			return nil, nil, credentialcrypto.ErrUnavailable
+		}
 	}
 	copy := *ch
 	copy.Key, copy.Keys = "", nil
@@ -99,6 +122,9 @@ func BindChannelCredentialRequest(c *gin.Context, ch *model.Channel, userID int)
 		return nil, err
 	}
 	if lease != nil {
+		if ch.Type == constant.ChannelTypeAli {
+			c.Set("bailian_pilot_no_retry", true)
+		}
 		c.Set(channelRequestLeaseKey, channelRequestLease{lease: lease, parent: parent})
 		c.Request = c.Request.WithContext(lease.Context())
 	}
