@@ -7447,5 +7447,7 @@
   "Change credential status?": "确认变更凭据状态？",
   "Revocation is irreversible. This does not change channel availability.": "撤销不可逆。此操作不会改变渠道启停状态。",
   "Mock or upstream authentication succeeded; model not verified.": "Mock 或上游认证成功；尚未验证模型。",
-  "Legacy edit, key viewing, copying and channel probes are unsupported for managed channels. Use credential operations here.": "受控渠道不支持旧编辑、查看密钥、复制或渠道探测，请在此管理凭据。"
+  "Legacy edit, key viewing, copying and channel probes are unsupported for managed channels. Use credential operations here.": "受控渠道不支持旧编辑、查看密钥、复制或渠道探测，请在此管理凭据。",
+  "Prepare secure Bailian channel": "準備安全百煉渠道",
+  "Bailian Beijing pilot. Channel remains disabled; no real API calls are authorized.": "百煉北京試點。渠道保持停用，尚未授權真實 API 呼叫。"
 }

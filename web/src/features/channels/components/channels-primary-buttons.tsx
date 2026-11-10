@@ -111,6 +111,7 @@ export function ChannelsPrimaryButtons() {
     <>
       <div className='flex flex-wrap items-center gap-2'>
         <CredentialManager />
+        <CredentialManager provider='bailian' />
         <div ref={setPriorityActionContainer} className='empty:hidden' />
         {/* Desktop: Toggle switches visible */}
         <div className='bg-muted/40 hidden h-8 shrink-0 items-center gap-2.5 rounded-lg border px-2.5 sm:flex'>
