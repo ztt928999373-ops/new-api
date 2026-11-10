@@ -168,6 +168,46 @@ jobs:
           path: windows-acceptance-logs/
           retention-days: 7
 
+  bailian_acceptance:
+    name: Batch E synthetic Bailian acceptance
+    if: github.event_name == 'workflow_dispatch' && inputs.batch_d_acceptance == true && github.repository == 'ztt928999373-ops/new-api' && github.ref == 'refs/heads/feat/v1-batche-bailian-safe'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      GOWORK: 'off'
+      CGO_ENABLED: '1'
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: go.mod
+      - name: Synthetic tests only
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p web/dist bailian-logs
+          touch web/dist/index.html
+          { git rev-parse HEAD; go version; date -u; } > bailian-logs/environment.log
+          result=0
+          go test -json ./... -count=1 -timeout=8m > bailian-logs/root.jsonl 2>&1 || result=1
+          (cd relaykit && go test -json ./... -count=1 -timeout=4m) > bailian-logs/relaykit.jsonl 2>&1 || result=1
+          (cd tokenkit && go test -json ./... -count=1 -timeout=4m) > bailian-logs/tokenkit.jsonl 2>&1 || result=1
+          go test -json -race ./controller ./router ./service ./service/credentials -run '^(TestBailian.*|TestOpenAIPreparation.*|TestOpenAIPilotAuthenticatedSettlement|TestChannelDeleteRoutesUseSensitiveWritePermission|TestManagedRequestPollingCacheAndRevocation|TestResolverOwnerPlatformRevocationAndAuditFailure)$' -count=1 -timeout=4m > bailian-logs/race.jsonl 2>&1 || result=1
+          echo "exit=$result" > bailian-logs/results.log
+          exit "$result"
+      - name: Preserve synthetic evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: batche-bailian-${{ github.sha }}
+          path: bailian-logs/
+          retention-days: 14
+
   release:
     needs: build
     runs-on: ubuntu-latest
