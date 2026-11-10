@@ -209,7 +209,9 @@ export function CredentialManager(props: {
                 : 'OpenAI connection test checks authentication only, not model availability.'
             )}
           </p>
-          {!channelId && props.provider === 'bailian' && <p>{t('Base URL')}: https://dashscope.aliyuncs.com</p>}
+          {!channelId && props.provider === 'bailian' && (
+            <p>{t('Base URL')}: https://dashscope.aliyuncs.com</p>
+          )}
           {channelId && (
             <p>
               {t('Channel ID')}: {channelId}
