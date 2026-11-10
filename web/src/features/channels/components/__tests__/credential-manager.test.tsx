@@ -53,14 +53,14 @@ afterEach(() => {
   cleanup()
   useAuthStore.getState().auth.setUser(null)
 })
-function mount(channelId?: number) {
+function mount(channelId?: number, provider?: 'openai' | 'bailian') {
   render(
     <QueryClientProvider
       client={
         new QueryClient({ defaultOptions: { queries: { retry: false } } })
       }
     >
-      <CredentialManager channelId={channelId} />
+      <CredentialManager channelId={channelId} provider={provider} />
     </QueryClientProvider>
   )
 }
@@ -197,3 +197,48 @@ test.each([
     await screen.findByText('synthetic-reference')
   }
 )
+
+test('Bailian creation uses its own protected endpoint and fixed model without a probe', async () => {
+  vi.mocked(api.request)
+    .mockResolvedValueOnce({ data: { success: true, data: { id: 43 } } })
+    .mockResolvedValueOnce({
+      data: {
+        success: true,
+        managed: true,
+        data: { ...metadata, provider: 'bailian' },
+      },
+    })
+  mount(undefined, 'bailian')
+  fireEvent.click(screen.getByText('Prepare secure Bailian channel'))
+  expect(screen.getByLabelText('Model')).toHaveValue('qwen3.7-flash-2026-07-15')
+  expect(screen.getByLabelText('Model')).toHaveAttribute('readonly')
+  fireEvent.change(screen.getByLabelText('Name'), {
+    target: { value: 'synthetic-bailian' },
+  })
+  fireEvent.change(screen.getByLabelText('New API Key'), {
+    target: { value: 'synthetic-bailian-secret' },
+  })
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Create disabled channel' })
+  )
+  await screen.findByText('synthetic-reference')
+  expect(api.request).toHaveBeenCalledWith(
+    expect.objectContaining({
+      url: '/api/channel/bailian-integration',
+      data: expect.objectContaining({
+        model: 'qwen3.7-flash-2026-07-15',
+        key: 'synthetic-bailian-secret',
+      }),
+    })
+  )
+  expect(screen.getByLabelText('New API Key')).toHaveValue('')
+  expect(
+    screen.getByRole('button', { name: 'Test credential connection' })
+  ).toBeDisabled()
+  expect(document.body.textContent).not.toContain('synthetic-bailian-secret')
+  expect(api.request).not.toHaveBeenCalledWith(
+    expect.objectContaining({
+      url: expect.stringMatching(/openai-integration|\/test$/),
+    })
+  )
+})

@@ -59,7 +59,10 @@ type Result = {
 }
 
 // Only non-secret metadata enters state outside the short-lived password form.
-export function CredentialManager(props: { channelId?: number }) {
+export function CredentialManager(props: {
+  channelId?: number
+  provider?: 'openai' | 'bailian'
+}) {
   const { t } = useTranslation()
   const user = useAuthStore((s) => s.auth.user)
   const canRead = hasPermission(user, 'channel', 'read')
@@ -75,7 +78,11 @@ export function CredentialManager(props: { channelId?: number }) {
   const [pendingStatus, setPendingStatus] = useState<string>()
   const form = useForm<Fields>({
     resolver: zodResolver(schema),
-    defaultValues: { name: '', model: '', key: '' },
+    defaultValues: {
+      name: '',
+      model: props.provider === 'bailian' ? 'qwen3.7-flash-2026-07-15' : '',
+      key: '',
+    },
   })
 
   async function request(
@@ -159,7 +166,9 @@ export function CredentialManager(props: { channelId?: number }) {
       } else {
         const result = await request(
           'post',
-          '/api/channel/openai-integration',
+          props.provider === 'bailian'
+            ? '/api/channel/bailian-integration'
+            : '/api/channel/openai-integration',
           values
         )
         const id = Number(result.data?.id)
@@ -178,7 +187,9 @@ export function CredentialManager(props: { channelId?: number }) {
         {t(
           props.channelId
             ? 'Secure credential'
-            : 'Prepare secure OpenAI channel'
+            : props.provider === 'bailian'
+              ? 'Prepare secure Bailian channel'
+              : 'Prepare secure OpenAI channel'
         )}
       </Button>
       <Dialog open={open} onOpenChange={changeOpen}>
@@ -193,9 +204,14 @@ export function CredentialManager(props: { channelId?: number }) {
           </DialogHeader>
           <p>
             {t(
-              'OpenAI connection test checks authentication only, not model availability.'
+              (metadata?.provider ?? props.provider) === 'bailian'
+                ? 'Bailian Beijing pilot. Channel remains disabled; no real API calls are authorized.'
+                : 'OpenAI connection test checks authentication only, not model availability.'
             )}
           </p>
+          {!channelId && props.provider === 'bailian' && (
+            <p>{t('Base URL')}: https://dashscope.aliyuncs.com</p>
+          )}
           {channelId && (
             <p>
               {t('Channel ID')}: {channelId}
@@ -246,6 +262,7 @@ export function CredentialManager(props: { channelId?: number }) {
                     <Label htmlFor='secure-model'>{t('Model')}</Label>
                     <Input
                       id='secure-model'
+                      readOnly={props.provider === 'bailian'}
                       {...form.register('model', { required: true })}
                       required
                       maxLength={128}
@@ -276,7 +293,12 @@ export function CredentialManager(props: { channelId?: number }) {
           {metadata && (
             <div className='flex flex-wrap gap-2'>
               <Button
-                disabled={busy || !canOperate || metadata.status !== 'active'}
+                disabled={
+                  busy ||
+                  !canOperate ||
+                  metadata.status !== 'active' ||
+                  metadata.provider !== 'openai'
+                }
                 onClick={() =>
                   void run(async () => {
                     await request(
