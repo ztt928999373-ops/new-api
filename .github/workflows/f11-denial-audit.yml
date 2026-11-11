@@ -1,13 +1,13 @@
 name: F1.1 denial audit regression
 on:
   pull_request:
-    types: [opened, synchronize]
+    types: [opened, synchronize, reopened, ready_for_review]
     branches: [product/v1]
 permissions:
   contents: read
 jobs:
   denial-audit:
-    if: github.event.pull_request.draft == true && github.event.pull_request.head.ref == 'fix/v1-f11-denial-audit' && github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event.pull_request.head.ref == 'fix/v1-f11-denial-audit' && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     services:
