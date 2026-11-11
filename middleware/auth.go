@@ -58,6 +58,8 @@ func authHelper(c *gin.Context, minRole int) {
 		writeDashboardAuthError(c, err)
 		return
 	}
+	// Audit identity comes only from successful server-side authentication.
+	c.Set(dashboardDenialActorKey, denialAuditActor{ID: user.Id, Role: user.Role, AccessToken: useAccessToken})
 	if user.Status != common.UserStatusEnabled {
 		abortWithWebMessage(c, http.StatusUnauthorized, "AUTH_USER_DISABLED", common.NewMessage("User has been banned"))
 		return
@@ -374,6 +376,9 @@ func setDashboardAuthContext(c *gin.Context, user *model.UserBase, identity serv
 // abortWithWebMessage answers a web console request; the web console
 // translates the message, and code, when set, stays a stable error code.
 func abortWithWebMessage(c *gin.Context, status int, code string, message *common.Message) {
+	if status == http.StatusUnauthorized || status == http.StatusForbidden {
+		recordDashboardDenial(c, status, code)
+	}
 	var fields []gin.H
 	if code != "" {
 		fields = append(fields, gin.H{"code": code})

@@ -984,8 +984,15 @@ func verifyAPITokenAudit(t *testing.T) {
 		} {
 			response := auditRequest(router, tc.method, tc.path, tc.credential)
 			var count int64
-			require.NoError(t, model.LOG_DB.Model(&model.AuditLog{}).Where("request_id = ?", response.Header().Get(common.RequestIdKey)).Count(&count).Error)
+			require.NoError(t, model.LOG_DB.Model(&model.AuditLog{}).Where("request_id = ? AND category = ?", response.Header().Get(common.RequestIdKey), model.AuditCategoryOperation).Count(&count).Error)
 			assert.Zero(t, count)
+			var denied int64
+			require.NoError(t, model.LOG_DB.Model(&model.AuditLog{}).Where("request_id = ? AND action = ?", response.Header().Get(common.RequestIdKey), "auth.denied").Count(&denied).Error)
+			if tc.credential == "" {
+				assert.EqualValues(t, 1, denied, "unauthenticated write adds a security rejection, not an operation event")
+			} else {
+				assert.Zero(t, denied)
+			}
 		}
 	})
 
