@@ -17,6 +17,7 @@ import (
 )
 
 const UpstreamBudgetManagedKey = "upstream_budget_managed_channel"
+const UpstreamBudgetProtectedKey = "upstream_budget_protected_channel"
 
 type UpstreamBudgetAttempt struct {
 	id   string
@@ -69,7 +70,7 @@ func (a *UpstreamBudgetAttempt) BindResponse(resp *http.Response) {
 // and parameter overrides. Only the existing managed OpenAI text pilot opts in.
 // A declared ceiling is financial configuration, never an observed invoice.
 func BeginUpstreamBudget(c *gin.Context, req *http.Request, channelID, channelType int) (*UpstreamBudgetAttempt, error) {
-	if !c.GetBool(UpstreamBudgetManagedKey) {
+	if !c.GetBool(UpstreamBudgetManagedKey) && !c.GetBool(UpstreamBudgetProtectedKey) {
 		return nil, nil
 	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)

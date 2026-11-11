@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -23,6 +24,7 @@ import (
 	"github.com/QuantumNous/new-api/pkg/credentialcrypto"
 	"github.com/QuantumNous/new-api/relay/channel"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/service/authz"
 	"github.com/QuantumNous/new-api/service/credentials"
@@ -30,6 +32,7 @@ import (
 	"github.com/bytedance/gopkg/util/gopool"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
+	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/require"
 	"gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"
@@ -84,17 +87,8 @@ func setupUpstreamBudgetDB(t *testing.T, kind string) *gorm.DB {
 	return db
 }
 
-func TestUpstreamBudgetAuthenticatedRetryStopsBeforeSecondSend(t *testing.T) {
-	db := setupUpstreamBudgetDB(t, "sqlite")
-	require.NoError(t, db.AutoMigrate(&model.UpstreamBudget{}, &model.UpstreamCostReservation{}, &model.User{}, &model.Token{}, &model.Ability{}, &model.Channel{}, &model.Option{}, &model.Log{}, &model.UserSubscription{}, &model.SubscriptionPlan{}, &model.SubscriptionPreConsumeRecord{}))
-	ch, p := syntheticBudgetChannel(t, db)
-	p.LimitMicros = 10
-	require.NoError(t, model.ConfigureUpstreamBudget(context.Background(), db, p, 1))
-	p.Revision = 2
-	user := model.User{Username: "synthetic-budget-client", Role: 1, Status: 1, Group: "default", Quota: 1000000, AffCode: "budget-client"}
-	require.NoError(t, db.Create(&user).Error)
-	token := model.Token{UserId: user.Id, Key: "syntheticbudgetclient", Status: 1, ExpiredTime: -1, RemainQuota: 1000000}
-	require.NoError(t, db.Create(&token).Error)
+func installBudgetTestCredential(t *testing.T, db *gorm.DB, userID int) string {
+	t.Helper()
 	keyDir := filepath.Join(t.TempDir(), "keys")
 	require.NoError(t, credentialcrypto.InitializeLocalDirectory(keyDir))
 	keyPath := filepath.Join(keyDir, "ring")
@@ -103,11 +97,35 @@ func TestUpstreamBudgetAuthenticatedRetryStopsBeforeSecondSend(t *testing.T) {
 	require.NoError(t, err)
 	store := &credentials.Store{DB: db, Environment: "test", ProviderID: "local-test", Provider: provider}
 	require.NoError(t, store.MigrateSchema())
-	head, err := store.Create(context.Background(), credentials.Principal{TenantID: "default", UserID: fmt.Sprint(user.Id), PlatformOperator: true}, true, "openai", "api_key", "relay", []byte("synthetic-budget-supplier"))
+	head, err := store.Create(context.Background(), credentials.Principal{TenantID: "default", UserID: fmt.Sprint(userID), PlatformOperator: true}, true, "openai", "api_key", "relay", []byte("synthetic-budget-supplier"))
 	require.NoError(t, err)
-	oldResolver := service.SetChannelCredentialResolver(&credentials.Resolver{Environment: "test", Repository: store, Providers: map[string]credentialcrypto.KeyProvider{"local-test": provider}, Audit: store})
-	t.Cleanup(func() { service.SetChannelCredentialResolver(oldResolver) })
-	require.NoError(t, db.Model(&ch).Updates(map[string]any{"credential_ref": head.ID, "models": "synthetic-model", "group": "default"}).Error)
+	previous := service.SetChannelCredentialResolver(&credentials.Resolver{Environment: "test", Repository: store, Providers: map[string]credentialcrypto.KeyProvider{"local-test": provider}, Audit: store})
+	t.Cleanup(func() { service.SetChannelCredentialResolver(previous) })
+	return head.ID
+}
+
+func TestUpstreamBudgetAuthenticatedRetryStopsBeforeSecondSend(t *testing.T) {
+	db := setupUpstreamBudgetDB(t, "sqlite")
+	require.NoError(t, db.AutoMigrate(&model.UpstreamBudget{}, &model.UpstreamCostReservation{}, &model.User{}, &model.Token{}, &model.Ability{}, &model.Channel{}, &model.Option{}, &model.Log{}, &model.UserSubscription{}, &model.SubscriptionPlan{}, &model.SubscriptionPreConsumeRecord{}))
+	require.NoError(t, db.AutoMigrate(&model.UserSession{}, &model.UserAccessToken{}, &model.AuditLog{}, &model.CasbinRule{}, &model.AuthzRole{}))
+	require.NoError(t, authz.Init(db))
+	master, sessionSecret := common.IsMasterNode, common.SessionSecret
+	common.IsMasterNode, common.SessionSecret = true, "synthetic-budget-freeze-session"
+	t.Cleanup(func() { common.IsMasterNode, common.SessionSecret = master, sessionSecret })
+	root := model.User{Username: "synthetic-budget-root", Role: 100, Status: 1, Group: "default", AffCode: "budget-root"}
+	require.NoError(t, db.Create(&root).Error)
+	login, err := service.CreateLoginSession(root.Id, "synthetic", "127.0.0.1", "synthetic")
+	require.NoError(t, err)
+	ch, p := syntheticBudgetChannel(t, db)
+	p.LimitMicros = 10
+	require.NoError(t, model.ConfigureUpstreamBudget(context.Background(), db, p, 1))
+	p.Revision = 2
+	user := model.User{Username: "synthetic-budget-client", Role: 1, Status: 1, Group: "default", Quota: 1000000, AffCode: "budget-client"}
+	require.NoError(t, db.Create(&user).Error)
+	token := model.Token{UserId: user.Id, Key: "syntheticbudgetclient", Status: 1, ExpiredTime: -1, RemainQuota: 1000000}
+	require.NoError(t, db.Create(&token).Error)
+	credentialID := installBudgetTestCredential(t, db, user.Id)
+	require.NoError(t, db.Model(&ch).Updates(map[string]any{"credential_ref": credentialID, "models": "synthetic-model", "group": "default"}).Error)
 	require.NoError(t, db.Create(&model.Ability{ChannelId: ch.Id, Group: "default", Model: "synthetic-model", Enabled: true}).Error)
 	previousPrices := ratio_setting.ModelPrice2JSONString()
 	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"synthetic-model":0.002}`))
@@ -133,8 +151,10 @@ func TestUpstreamBudgetAuthenticatedRetryStopsBeforeSecondSend(t *testing.T) {
 		require.Eventually(t, func() bool { return gopool.WorkerCount() == 0 }, 5*time.Second, time.Millisecond)
 	})
 	engine := gin.New()
+	engine.Use(func(c *gin.Context) { c.Set(common.RequestIdKey, "synthetic-budget-freeze"); c.Next() })
+	registerChannelRoutes(engine.Group("/api"))
 	SetRelayRouter(engine)
-	for range 2 {
+	for index := range 2 {
 		req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"synthetic-model","messages":[{"role":"user","content":"hi"}],"max_tokens":16}`))
 		req.Header.Set("Authorization", "Bearer syntheticbudgetclient")
 		req.Header.Set("Content-Type", "application/json")
@@ -142,6 +162,39 @@ func TestUpstreamBudgetAuthenticatedRetryStopsBeforeSecondSend(t *testing.T) {
 		engine.ServeHTTP(w, req)
 		require.GreaterOrEqual(t, w.Code, 400, w.Body.String())
 		require.NotContains(t, w.Body.String(), "synthetic-budget-supplier")
+		if index == 0 {
+			// Close the budget through the real authorized management route while
+			// the channel remains enabled, then repeat the ordinary relay call.
+			p.Enabled = false
+			data, err := common.Marshal(p)
+			require.NoError(t, err)
+			var input map[string]any
+			require.NoError(t, common.Unmarshal(data, &input))
+			input["expected_revision"] = p.Revision
+			data, err = common.Marshal(input)
+			require.NoError(t, err)
+			request := httptest.NewRequest("PUT", fmt.Sprintf("/api/channel/%d/upstream-budget", ch.Id), strings.NewReader(string(data)))
+			request.Header.Set("Authorization", "Bearer "+login.AccessToken)
+			request.Header.Set("Content-Type", "application/json")
+			result := httptest.NewRecorder()
+			engine.ServeHTTP(result, request)
+			require.Equal(t, 200, result.Code, result.Body.String())
+			require.Contains(t, result.Body.String(), `"protection":"retained"`)
+			var frozen model.Channel
+			require.NoError(t, db.First(&frozen, ch.Id).Error)
+			require.Equal(t, common.ChannelStatusEnabled, frozen.Status)
+			require.True(t, frozen.UpstreamBudgetEnabled)
+			var audit model.AuditLog
+			require.NoError(t, db.Where("action = ?", "upstream_budget.configure").First(&audit).Error)
+			require.True(t, audit.Success)
+			require.Equal(t, root.Id, audit.UserId)
+			require.Equal(t, "synthetic-budget-freeze", audit.RequestId)
+			encoded, err := common.Marshal(audit)
+			require.NoError(t, err)
+			require.Contains(t, string(encoded), "retained")
+			require.NotContains(t, string(encoded), login.AccessToken)
+			require.NotContains(t, string(encoded), "synthetic-budget-supplier")
+		}
 	}
 	require.Eventually(t, func() bool { return gopool.WorkerCount() == 0 }, 5*time.Second, time.Millisecond)
 	require.EqualValues(t, 1, calls.Load(), "budget denial skips retry and never submits a second payable attempt")
@@ -265,6 +318,20 @@ func TestUpstreamBudgetDatabaseMatrix(t *testing.T) {
 			var marker model.Channel
 			require.NoError(t, db.First(&marker, ch.Id).Error)
 			require.True(t, marker.UpstreamBudgetEnabled, "breach freezes admission, never opts out")
+			// Closing a policy with outstanding liabilities keeps both counters
+			// and the protected marker. This also models reconfiguring a restore freeze.
+			p.Enabled = false
+			require.NoError(t, model.ConfigureUpstreamBudget(ctx, db, p, 1))
+			var frozen model.UpstreamBudget
+			require.NoError(t, db.First(&frozen, "channel_id = ?", ch.Id).Error)
+			require.False(t, frozen.Enabled)
+			require.Equal(t, state.HeldMicros, frozen.HeldMicros)
+			require.Equal(t, state.ChargedMicros, frozen.ChargedMicros)
+			require.NoError(t, db.First(&marker, ch.Id).Error)
+			require.True(t, marker.UpstreamBudgetEnabled)
+			p.Revision = frozen.Revision
+			_, err = model.ReserveUpstreamCost(ctx, db, p)
+			require.Error(t, err)
 			// Multiple above-ceiling invoices can exceed the configured budget.
 			// Even then an outstanding attempt must never wrap its final charge.
 			require.NoError(t, db.Model(&state).Update("charged_micros", int64(math.MaxInt64)).Error)
@@ -406,17 +473,120 @@ func TestUpstreamBudgetHTTPAttemptsAndPermissions(t *testing.T) {
 	_, err = send(body)
 	require.Error(t, err)
 	require.EqualValues(t, 10, calls.Load())
-	// Default/off is an explicit opt-out and retains existing channel behavior.
+	// Disabling a configured budget freezes dispatch; it never opts out.
 	p.Enabled = false
 	p.ValidUntil = time.Now().Unix() + 3600
 	require.NoError(t, model.ConfigureUpstreamBudget(context.Background(), db, p, p.Revision))
-	r, err := send(`{"legacy":"unrestricted-by-this-feature"}`)
-	require.NoError(t, err)
-	require.NoError(t, r.Body.Close())
-	require.EqualValues(t, 11, calls.Load())
+	_, err = send(body)
+	require.Error(t, err)
+	require.EqualValues(t, 10, calls.Load(), "disabled budget must not dispatch an unreserved request")
+	var frozen model.Channel
+	require.NoError(t, db.First(&frozen, ch.Id).Error)
+	require.True(t, frozen.UpstreamBudgetEnabled)
 	state = model.UpstreamBudget{}
 	require.NoError(t, db.First(&state, "channel_id = ?", ch.Id).Error)
 	require.EqualValues(t, 100, state.ChargedMicros)
+}
+
+func TestUpstreamBudgetWebSocketRoutes(t *testing.T) {
+	db := setupUpstreamBudgetDB(t, "sqlite")
+	require.NoError(t, db.AutoMigrate(&model.UpstreamBudget{}, &model.UpstreamCostReservation{}, &model.User{}, &model.Token{}, &model.Ability{}, &model.Option{}, &model.Log{}, &model.UserSubscription{}, &model.SubscriptionPlan{}, &model.SubscriptionPreConsumeRecord{}))
+	ch, _ := syntheticBudgetChannel(t, db)
+	user := model.User{Username: "synthetic-budget-ws", Role: 1, Status: 1, Group: "default", Quota: 1000000, AffCode: "budget-ws"}
+	require.NoError(t, db.Create(&user).Error)
+	token := model.Token{UserId: user.Id, Key: "syntheticbudgetws", Status: 1, ExpiredTime: -1, RemainQuota: 1000000}
+	require.NoError(t, db.Create(&token).Error)
+	credentialID := installBudgetTestCredential(t, db, user.Id)
+	require.NoError(t, db.Model(&ch).Updates(map[string]any{"models": "synthetic-model", "group": "default"}).Error)
+	require.NoError(t, db.Create(&model.Ability{ChannelId: ch.Id, Group: "default", Model: "synthetic-model", Enabled: true}).Error)
+	prices := ratio_setting.ModelPrice2JSONString()
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"synthetic-model":0.002}`))
+	t.Cleanup(func() { require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(prices)) })
+	retries, memory, batch := common.RetryTimes, common.MemoryCacheEnabled, common.BatchUpdateEnabled
+	common.RetryTimes, common.MemoryCacheEnabled, common.BatchUpdateEnabled = 0, false, false
+	t.Cleanup(func() {
+		common.RetryTimes, common.MemoryCacheEnabled, common.BatchUpdateEnabled = retries, memory, batch
+	})
+	// Intercept the real upstream WebSocket dial, never resolve or connect to a supplier.
+	previousDialer := websocket.DefaultDialer
+	dialer := *previousDialer
+	var upstreamDials atomic.Int64
+	dialer.NetDialContext = func(context.Context, string, string) (net.Conn, error) {
+		upstreamDials.Add(1)
+		return nil, errors.New("synthetic-upstream-dial-intercepted")
+	}
+	websocket.DefaultDialer = &dialer
+	t.Cleanup(func() { websocket.DefaultDialer = previousDialer })
+	finished := make(chan struct{}, 1)
+	engine := gin.New()
+	engine.Use(func(c *gin.Context) { defer func() { finished <- struct{}{} }(); c.Next() })
+	SetRelayRouter(engine)
+	gateway := httptest.NewServer(engine)
+	t.Cleanup(gateway.Close)
+	// This also proves the instrumented route can reach DoWssRequest when no
+	// protection is configured. A detached credential binding must not remove
+	// an existing budget's final egress guard.
+	for _, scenario := range []struct {
+		name                        string
+		managed, protected, enabled bool
+	}{
+		{"managed", true, true, true},
+		{"protected_binding_detached", false, true, true},
+		{"frozen_binding_detached", false, true, false},
+		{"unconfigured_legacy_control", false, false, false},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			ref := ""
+			settings, err := common.Marshal(dto.ChannelSettings{ResponsesWebSocketEnabled: true})
+			require.NoError(t, err)
+			key := "synthetic-ws-supplier"
+			if scenario.managed {
+				ref, key, settings = credentialID, "", nil
+			}
+			require.NoError(t, db.Model(&ch).Updates(map[string]any{"credential_ref": ref, "key": key, "setting": string(settings), "upstream_budget_enabled": scenario.protected}).Error)
+			require.NoError(t, db.Model(&model.UpstreamBudget{}).Where("channel_id = ?", ch.Id).Update("enabled", scenario.enabled).Error)
+			for _, protocol := range []string{"realtime?model=synthetic-model", "responses"} {
+				t.Run(protocol, func(t *testing.T) {
+					before := upstreamDials.Load()
+					clientDialer := websocket.Dialer{HandshakeTimeout: 5 * time.Second}
+					client, response, err := clientDialer.Dial("ws"+strings.TrimPrefix(gateway.URL, "http")+"/v1/"+protocol, http.Header{"Authorization": {"Bearer syntheticbudgetws"}})
+					t.Cleanup(func() {
+						if client != nil {
+							_ = client.Close()
+						}
+						select {
+						case <-finished:
+						case <-time.After(5 * time.Second):
+							t.Error("WebSocket route did not finish")
+						}
+						require.Eventually(t, func() bool { return gopool.WorkerCount() == 0 }, 5*time.Second, time.Millisecond)
+					})
+					if err == nil {
+						require.NoError(t, client.SetReadDeadline(time.Now().Add(5*time.Second)))
+						if protocol == "responses" {
+							require.NoError(t, client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","response":{"model":"synthetic-model","input":"hi","max_output_tokens":16}}`)))
+						}
+						_, payload, readErr := client.ReadMessage()
+						require.NoError(t, readErr)
+						require.Contains(t, string(payload), `"error"`)
+						require.NotContains(t, string(payload), "synthetic-ws-supplier")
+					} else {
+						require.NotNil(t, response)
+						require.GreaterOrEqual(t, response.StatusCode, 400)
+						_ = response.Body.Close()
+					}
+					if scenario.protected {
+						require.Equal(t, before, upstreamDials.Load(), "protected protocol must never dial upstream without reservation")
+					} else {
+						require.Equal(t, before+1, upstreamDials.Load(), "positive control must reach the intercepted upstream dial")
+					}
+					var count int64
+					require.NoError(t, db.Model(&model.UpstreamCostReservation{}).Count(&count).Error)
+					require.Zero(t, count)
+				})
+			}
+		})
+	}
 }
 
 func TestUpstreamBudgetCancellationAndUnsupportedProtocols(t *testing.T) {

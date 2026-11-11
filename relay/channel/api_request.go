@@ -384,6 +384,11 @@ func DoFormRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBod
 // request context, and reports a rejected handshake as a *types.NewAPIError
 // carrying the upstream status code (types.NewError preserves it).
 func DoWssRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody io.Reader) (*websocket.Conn, error) {
+	// WebSocket sessions have no supported finite cost envelope in this pilot.
+	// Enforce this at the final egress boundary as well as credential binding.
+	if c.GetBool(service.UpstreamBudgetManagedKey) || c.GetBool(service.UpstreamBudgetProtectedKey) {
+		return nil, types.NewErrorWithStatusCode(errors.New(i18n.T(c, i18n.MsgUpstreamBudgetDenied)), types.ErrorCodeInvalidRequest, http.StatusServiceUnavailable, types.ErrOptionWithSkipRetry())
+	}
 	fullRequestURL, err := a.GetRequestURL(info)
 	if err != nil {
 		return nil, fmt.Errorf("get request url failed: %w", err)

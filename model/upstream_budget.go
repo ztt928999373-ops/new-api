@@ -79,7 +79,10 @@ func ConfigureUpstreamBudget(ctx context.Context, db *gorm.DB, policy UpstreamBu
 		if result.Error != nil || result.RowsAffected != 1 {
 			return ErrUpstreamBudget
 		}
-		result = tx.Model(&Channel{}).Where("id = ? AND credential_ref <> ?", policy.ChannelID, "").Update("upstream_budget_enabled", policy.Enabled)
+		// Configuration enrolls the channel permanently in this pilot. Disabled
+		// means frozen, never an opt-out; no exit API is offered. Preserve this
+		// marker through restore and all future configuration changes.
+		result = tx.Model(&Channel{}).Where("id = ? AND credential_ref <> ?", policy.ChannelID, "").Update("upstream_budget_enabled", true)
 		if result.Error != nil {
 			return ErrUpstreamBudget
 		}

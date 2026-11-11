@@ -56,6 +56,7 @@ jobs:
           git rev-parse HEAD > "$RUNNER_TEMP/f2-logs/f2-sha.txt"
           go version > "$RUNNER_TEMP/f2-logs/go-version.txt"
           SUANJIE_TEST_DATABASES=local-synthetic go test -json -race -count=1 ./router -run '^TestUpstreamBudget' > "$RUNNER_TEMP/f2-logs/f2-budget-race-three-db.jsonl"
+          SUANJIE_TEST_DATABASES=local-synthetic go test -json -race -count=1 ./middleware ./model ./service/credentials -run '^(TestDashboardDenialAudit.*|TestOverallChannelStatusIndependentOfCredentials|TestStoreDatabaseMatrix|TestResolverOwnerPlatformRevocationAndAuditFailure)$' > "$RUNNER_TEMP/f2-logs/f2-head-security-race.jsonl"
           go test -json -count=1 ./internal/localops > "$RUNNER_TEMP/f2-logs/f2-cold-recovery.jsonl"
       - uses: actions/upload-artifact@v4
         if: always()

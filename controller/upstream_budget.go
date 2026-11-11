@@ -82,8 +82,8 @@ func ConfigureUpstreamBudget(c *gin.Context) {
 		c.JSON(409, gin.H{"success": false, "code": "UPSTREAM_BUDGET_CONFLICT_OR_INVALID"})
 		return
 	}
-	recordManageAudit(c, "upstream_budget.configure", map[string]any{"channel_id": id, "enabled": input.Enabled, "revision": input.ExpectedRevision + 1, "limit_micros": input.LimitMicros, "attempt_ceiling_micros": input.AttemptCeilingMicros, "cost_basis_hash": input.CostBasisHash, "valid_until": input.ValidUntil})
-	c.JSON(200, gin.H{"success": true})
+	recordManageAudit(c, "upstream_budget.configure", map[string]any{"channel_id": id, "enabled": input.Enabled, "protection": "retained", "revision": input.ExpectedRevision + 1, "limit_micros": input.LimitMicros, "attempt_ceiling_micros": input.AttemptCeilingMicros, "cost_basis_hash": input.CostBasisHash, "valid_until": input.ValidUntil})
+	c.JSON(200, gin.H{"success": true, "protection": "retained", "budget_enabled": input.Enabled})
 }
 
 func ReconcileUpstreamBudget(c *gin.Context) {
