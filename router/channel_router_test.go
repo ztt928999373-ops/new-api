@@ -77,6 +77,34 @@ func TestCredentialRoutesAuthenticateAuthorizeAndRejectUnsupported(t *testing.T)
 		require.NoError(t, db.Create(&model.QuotaData{UserID: 1, CreatedAt: common.GetTimestamp(), Username: "F1-other-user-only"}).Error)
 		api := gin.New()
 		SetApiRouter(api)
+		for _, tc := range []struct {
+			method, path, body string
+			allowed            int
+		}{
+			{"POST", "/api/channel/credentials", `{"key":"synthetic-F1-created"}`, 200},
+			{"PUT", "/api/channel/credentials/" + platform.ID, `{"key":"synthetic-F1-stale","revision":99}`, 409},
+			{"POST", "/api/channel/credentials/" + platform.ID + "/status", `{"status":"disabled","revision":99}`, 409},
+		} {
+			for _, role := range []int{0, common.RoleCommonUser, common.RoleAdminUser, common.RoleRootUser} {
+				t.Run(fmt.Sprintf("%s %s/role=%d", tc.method, tc.path, role), func(t *testing.T) {
+					req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+					req.Header.Set("Content-Type", "application/json")
+					if role != 0 {
+						req.Header.Set("Authorization", "Bearer "+tokens[role])
+					}
+					w := httptest.NewRecorder()
+					api.ServeHTTP(w, req)
+					want := http.StatusForbidden
+					if role == 0 {
+						want = http.StatusUnauthorized
+					} else if role == common.RoleRootUser {
+						want = tc.allowed
+					}
+					require.Equal(t, want, w.Code, w.Body.String())
+					require.NotContains(t, w.Body.String(), "synthetic-F1-created")
+				})
+			}
+		}
 		for _, endpoint := range []string{"/api/channel/", "/api/channel/credentials/" + platform.ID, "/api/models/", "/api/log/", "/api/data/", "/api/log/self", "/api/data/self"} {
 			for _, role := range []int{0, common.RoleCommonUser, common.RoleAdminUser, common.RoleRootUser} {
 				t.Run(fmt.Sprintf("%s/role=%d", endpoint, role), func(t *testing.T) {
@@ -211,6 +239,17 @@ func TestCredentialRoutesAuthenticateAuthorizeAndRejectUnsupported(t *testing.T)
 		require.NoError(t, err)
 		require.NotContains(t, string(data), "synthetic-platform-secret")
 		require.NotContains(t, string(data), "synthetic-rejected-secret")
+	})
+	t.Run("F1 revoked dashboard session is 401", func(t *testing.T) {
+		bundle, err := service.CreateLoginSession(1, "synthetic", "127.0.0.1", "F1")
+		require.NoError(t, err)
+		require.NoError(t, service.RevokeByRefreshToken(bundle.RefreshToken, bundle.Session.SID, "F1 synthetic logout"))
+		req := httptest.NewRequest("GET", "/api/channel/credentials/"+platform.ID, nil)
+		req.Header.Set("Authorization", "Bearer "+bundle.AccessToken)
+		w := httptest.NewRecorder()
+		engine.ServeHTTP(w, req)
+		require.Equal(t, 401, w.Code, w.Body.String())
+		require.Contains(t, w.Body.String(), "AUTH_SESSION_REVOKED")
 	})
 }
 
