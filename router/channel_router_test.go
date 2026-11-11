@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -26,7 +27,24 @@ import (
 	gormlogger "gorm.io/gorm/logger"
 )
 
+type denySupplierTransport struct{ t *testing.T }
+
+func (d denySupplierTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	d.t.Error("unexpected supplier request: outbound transport is blocked")
+	return nil, errors.New("synthetic outbound denied")
+}
+
 func TestCredentialRoutesAuthenticateAuthorizeAndRejectUnsupported(t *testing.T) {
+	// Keep the real revocation path, but make any accidental provider request fail locally.
+	if service.GetHttpClient() == nil {
+		service.InitHttpClient()
+	}
+	if client := service.GetHttpClient(); client != nil {
+		original := client.Transport
+		client.Transport = denySupplierTransport{t}
+		t.Cleanup(func() { client.Transport = original })
+	}
+
 	oldType := common.MainDatabaseType()
 	common.SetMainDatabaseType(common.DatabaseTypeSQLite)
 	t.Cleanup(func() { common.SetMainDatabaseType(oldType) })
@@ -71,6 +89,89 @@ func TestCredentialRoutesAuthenticateAuthorizeAndRejectUnsupported(t *testing.T)
 	require.NoError(t, db.Create(&legacy).Error)
 	engine := gin.New()
 	registerChannelRoutes(engine.Group("/api"))
+	t.Run("F1 role matrix", func(t *testing.T) {
+		require.NoError(t, db.AutoMigrate(&model.Model{}, &model.Vendor{}, &model.Log{}, &model.QuotaData{}))
+		require.NoError(t, db.Create(&model.Log{UserId: 1, CreatedAt: common.GetTimestamp(), Content: "F1-other-user-only", Username: "F1-other-user-only"}).Error)
+		require.NoError(t, db.Create(&model.QuotaData{UserID: 1, CreatedAt: common.GetTimestamp(), Username: "F1-other-user-only"}).Error)
+		for _, id := range []int{2, 3} {
+			marker := fmt.Sprintf("F1-own-user-%d", id)
+			require.NoError(t, db.Create(&model.Log{UserId: id, CreatedAt: common.GetTimestamp(), Content: marker, Username: marker}).Error)
+			require.NoError(t, db.Create(&model.QuotaData{UserID: id, CreatedAt: common.GetTimestamp(), Username: marker}).Error)
+		}
+		api := gin.New()
+		SetApiRouter(api)
+		for _, tc := range []struct {
+			method, path, body string
+			allowed            int
+		}{
+			{"POST", "/api/channel/credentials", `{"key":"synthetic-F1-created"}`, 200},
+			{"PUT", "/api/channel/credentials/" + platform.ID, `{"key":"synthetic-F1-stale","revision":99}`, 409},
+			{"POST", "/api/channel/credentials/" + platform.ID + "/status", `{"status":"disabled","revision":99}`, 409},
+		} {
+			for _, role := range []int{0, common.RoleCommonUser, common.RoleAdminUser, common.RoleRootUser} {
+				t.Run(fmt.Sprintf("%s %s/role=%d", tc.method, tc.path, role), func(t *testing.T) {
+					req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+					req.Header.Set("Content-Type", "application/json")
+					if role != 0 {
+						req.Header.Set("Authorization", "Bearer "+tokens[role])
+					}
+					w := httptest.NewRecorder()
+					api.ServeHTTP(w, req)
+					want := http.StatusForbidden
+					if role == 0 {
+						want = http.StatusUnauthorized
+					} else if role == common.RoleRootUser {
+						want = tc.allowed
+					}
+					require.Equal(t, want, w.Code, w.Body.String())
+					require.NotContains(t, w.Body.String(), "synthetic-F1-created")
+				})
+			}
+		}
+		for _, endpoint := range []string{"/api/channel/", "/api/channel/credentials/" + platform.ID, "/api/models/", "/api/log/", "/api/data/", "/api/log/self", "/api/data/self"} {
+			for _, role := range []int{0, common.RoleCommonUser, common.RoleAdminUser, common.RoleRootUser} {
+				t.Run(fmt.Sprintf("%s/role=%d", endpoint, role), func(t *testing.T) {
+					requestPath := endpoint
+					if strings.HasPrefix(endpoint, "/api/data/") || strings.HasPrefix(endpoint, "/api/log/") {
+						requestPath += fmt.Sprintf("?start_timestamp=%d&end_timestamp=%d", common.GetTimestamp()-3600, common.GetTimestamp()+3600)
+					}
+					req := httptest.NewRequest(http.MethodGet, requestPath, nil)
+					if role != 0 {
+						req.Header.Set("Authorization", "Bearer "+tokens[role])
+					}
+					w := httptest.NewRecorder()
+					api.ServeHTTP(w, req)
+					want := http.StatusOK
+					if role == 0 {
+						want = http.StatusUnauthorized
+					} else if role == common.RoleCommonUser && !strings.HasSuffix(endpoint, "/self") {
+						want = http.StatusForbidden
+					}
+					require.Equal(t, want, w.Code, w.Body.String())
+					var payload struct {
+						Success bool `json:"success"`
+					}
+					require.NoError(t, common.Unmarshal(w.Body.Bytes(), &payload))
+					require.Equal(t, want == http.StatusOK, payload.Success, w.Body.String())
+					if role != common.RoleRootUser && strings.HasSuffix(endpoint, "/self") {
+						if role != 0 {
+							ownID := 3
+							if role == common.RoleAdminUser {
+								ownID = 2
+							}
+							require.Contains(t, w.Body.String(), fmt.Sprintf("F1-own-user-%d", ownID))
+							otherID := 2
+							if ownID == 2 {
+								otherID = 3
+							}
+							require.NotContains(t, w.Body.String(), fmt.Sprintf("F1-own-user-%d", otherID))
+						}
+						require.NotContains(t, w.Body.String(), "F1-other-user-only")
+					}
+				})
+			}
+		}
+	})
 	for _, tc := range []struct {
 		name, method, path, body string
 		role, status             int
@@ -143,6 +244,52 @@ func TestCredentialRoutesAuthenticateAuthorizeAndRejectUnsupported(t *testing.T)
 	require.Equal(t, common.ChannelStatusEnabled, after.Status, "failed batch must not persist its preceding update")
 	require.NoError(t, db.Model(&model.Channel{}).Where("credential_ref = ?", platform.ID).Count(&copies).Error)
 	require.EqualValues(t, 1, copies, "rejected copy must not duplicate a credential binding")
+	t.Run("F1 revision and irreversible revocation", func(t *testing.T) {
+		for _, tc := range []struct {
+			name, method, suffix, body string
+			status                     int
+		}{
+			{"stale revision", "PUT", "", `{"key":"synthetic-rejected-secret","revision":99}`, 409},
+			{"revoke", "POST", "/status", `{"status":"revoked","revision":1}`, 200},
+			{"reenable revoked", "POST", "/status", `{"status":"active","revision":2}`, 503},
+			{"replace revoked", "PUT", "", `{"key":"synthetic-rejected-secret","revision":2}`, 503},
+			{"use revoked", "POST", "/test", `{}`, 503},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				req := httptest.NewRequest(tc.method, "/api/channel/credentials/"+platform.ID+tc.suffix, strings.NewReader(tc.body))
+				req.Header.Set("Authorization", "Bearer "+tokens[common.RoleRootUser])
+				req.Header.Set("Content-Type", "application/json")
+				w := httptest.NewRecorder()
+				engine.ServeHTTP(w, req)
+				require.Equal(t, tc.status, w.Code, w.Body.String())
+				require.NotContains(t, w.Body.String(), "synthetic-rejected-secret")
+				if tc.status == 409 {
+					require.Contains(t, w.Body.String(), "CREDENTIAL_REVISION_CONFLICT")
+				}
+			})
+		}
+		head, err := s.Metadata(context.Background(), credentials.Principal{TenantID: "default", UserID: "1", PlatformOperator: true}, platform.ID)
+		require.NoError(t, err)
+		require.Equal(t, "revoked", head.Status)
+		require.EqualValues(t, 2, head.Revision)
+		var events []credentials.AccessEvent
+		require.NoError(t, db.Find(&events).Error)
+		data, err := common.Marshal(events)
+		require.NoError(t, err)
+		require.NotContains(t, string(data), "synthetic-platform-secret")
+		require.NotContains(t, string(data), "synthetic-rejected-secret")
+	})
+	t.Run("F1 revoked dashboard session is 401", func(t *testing.T) {
+		bundle, err := service.CreateLoginSession(1, "synthetic", "127.0.0.1", "F1")
+		require.NoError(t, err)
+		require.NoError(t, service.RevokeByRefreshToken(bundle.RefreshToken, bundle.Session.SID, "F1 synthetic logout"))
+		req := httptest.NewRequest("GET", "/api/channel/credentials/"+platform.ID, nil)
+		req.Header.Set("Authorization", "Bearer "+bundle.AccessToken)
+		w := httptest.NewRecorder()
+		engine.ServeHTTP(w, req)
+		require.Equal(t, 401, w.Code, w.Body.String())
+		require.Contains(t, w.Body.String(), "AUTH_SESSION_REVOKED")
+	})
 }
 
 func TestChannelDefaultBaseURLsRequireReadPermission(t *testing.T) {
@@ -217,4 +364,33 @@ func assertChannelRoutePermission(t *testing.T, method string, path string, perm
 		}
 	}
 	t.Fatalf("route %s %s not found", method, path)
+}
+
+func TestF1DisabledSelectorsAndRetries(t *testing.T) {
+	setupRelayRouterTestDB(t)
+	db := model.DB
+	require.NoError(t, db.AutoMigrate(&model.Channel{}))
+	managed := model.Channel{Name: "F1-only", Status: common.ChannelStatusEnabled, Type: constant.ChannelTypeOpenAI}
+	require.NoError(t, db.Create(&managed).Error)
+	require.NoError(t, db.Model(&model.Channel{}).Where("id = ?", managed.Id).Updates(map[string]any{"models": "F1-only", "group": "F1-only"}).Error)
+	require.NoError(t, db.Create(&model.Ability{ChannelId: managed.Id, Group: "F1-only", Model: "F1-only", Enabled: true}).Error)
+	defer func() { common.MemoryCacheEnabled = false }()
+	for _, memory := range []bool{false, true} {
+		common.MemoryCacheEnabled = memory
+		_, err := model.SetChannelOverallStatus([]int{managed.Id}, common.ChannelStatusEnabled, "F1 synthetic")
+		require.NoError(t, err)
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		param := &service.RetryParam{Ctx: c, TokenGroup: "F1-only", ModelName: "F1-only"}
+		selected, _, err := service.CacheGetRandomSatisfiedChannel(param)
+		require.NoError(t, err)
+		require.NotNil(t, selected)
+		_, err = model.SetChannelOverallStatus([]int{managed.Id}, common.ChannelStatusManuallyDisabled, "F1 synthetic")
+		require.NoError(t, err)
+		require.NoError(t, model.InitChannelCache())
+		for retry := range 3 {
+			param.SetRetry(retry)
+			selected, _, _ = service.CacheGetRandomSatisfiedChannel(param)
+			require.Nil(t, selected, "disabled channel selected with cache=%v retry=%d", memory, retry)
+		}
+	}
 }
