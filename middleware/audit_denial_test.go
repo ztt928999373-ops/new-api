@@ -99,6 +99,9 @@ func TestDashboardDenialAuditAuthenticationAndRedaction(t *testing.T) {
 			require.NoError(t, model.DB.Where("action = ?", "auth.denied").Find(&rows).Error)
 			if scenario == "authorized" {
 				require.Empty(t, rows)
+				var success model.AuditLog
+				require.NoError(t, model.DB.Where("request_id = ?", w.Header().Get(common.RequestIdKey)).First(&success).Error)
+				require.True(t, success.Success)
 				return
 			}
 			require.Len(t, rows, 1)
@@ -308,4 +311,16 @@ func TestDashboardDenialAuditFailureAndDeadline(t *testing.T) {
 	r.ServeHTTP(w, httptest.NewRequest("GET", "/restricted", nil))
 	require.Equal(t, 401, w.Code)
 	require.EqualValues(t, 1, dashboardDenialBudget.failed.Load())
+}
+
+func TestDashboardDenialAuditPreservesDisconnectedOperationAudit(t *testing.T) {
+	setupDenialAuditTest(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest("POST", "/operation", nil).WithContext(ctx)
+	model.RecordAuditLog(c, model.AuditLog{Action: "synthetic.operation", Username: "synthetic", ActorRole: common.RoleRootUser, Success: true})
+	var count int64
+	require.NoError(t, model.DB.Model(&model.AuditLog{}).Where("action = ?", "synthetic.operation").Count(&count).Error)
+	require.EqualValues(t, 1, count)
 }

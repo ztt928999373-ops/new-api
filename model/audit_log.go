@@ -90,7 +90,9 @@ func RecordAuditLog(c *gin.Context, entry AuditLog) {
 			}
 		}
 	}
-	if err := RecordAuditLogContext(ctx, entry); err != nil {
+	// Preserve existing operation audit behavior after client disconnects.
+	// Only explicit bounded callers opt into a cancellation/deadline below.
+	if err := RecordAuditLogContext(context.WithoutCancel(ctx), entry); err != nil {
 		logger.LogError(ctx, common.LogText("audit log write failed (request_id=%s): %v", entry.RequestId, err))
 	}
 }
