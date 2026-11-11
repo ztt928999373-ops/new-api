@@ -122,6 +122,9 @@ func beginAdminAudit(c *gin.Context) *auditResponseWriter {
 // finishAdminAudit 在 c.Next() 之后对管理/高危写操作做兜底审计记录。
 // 若 handler 内已手动埋点（设置 ContextKeyAuditLogged），则跳过，避免重复。
 func finishAdminAudit(c *gin.Context, writer *auditResponseWriter) {
+	if c.GetBool(dashboardDenialHandledKey) {
+		return
+	}
 	if writer == nil {
 		return
 	}
@@ -305,6 +308,9 @@ func setAccessTokenAuditParam(c *gin.Context, key string, value any) {
 }
 
 func finishAccessTokenAudit(c *gin.Context) {
+	if c.GetBool(dashboardDenialHandledKey) {
+		return
+	}
 	value, exists := c.Get(accessTokenAuditContextKey)
 	if !exists {
 		return

@@ -1,0 +1,51 @@
+name: F1.1 denial audit regression
+on:
+  pull_request:
+    types: [opened, synchronize]
+    branches: [product/v1]
+permissions:
+  contents: read
+jobs:
+  denial-audit:
+    if: github.event.pull_request.draft == true && github.event.pull_request.head.ref == 'fix/v1-f11-denial-audit' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: synthetic-test-only
+          MYSQL_ROOT_HOST: '%'
+          MYSQL_DATABASE: credential_test
+        ports: ['23316:3306']
+        options: --health-cmd="mysqladmin ping -h localhost -psynthetic-test-only" --health-interval=10s --health-timeout=5s --health-retries=12
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: synthetic-test-only
+          POSTGRES_DB: credential_test
+        ports: ['25436:5432']
+        options: --health-cmd="pg_isready -U postgres -d credential_test" --health-interval=10s --health-timeout=5s --health-retries=12
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: go.mod
+      - name: Race, deadlines and three-database audit persistence
+        env:
+          CGO_ENABLED: '1'
+          GOWORK: 'off'
+        run: |
+          mkdir -p f11-logs
+          { git rev-parse HEAD; go version; } > f11-logs/environment.txt
+          SUANJIE_TEST_DATABASES=local-synthetic go test -json -race -count=1 ./middleware -run '^TestDashboardDenialAudit' > f11-logs/denial-race-matrix.jsonl
+          go test -json -count=1 ./middleware ./model ./router ./service/authz > f11-logs/regression.jsonl
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: f11-denial-audit
+          path: f11-logs/
+          retention-days: 14
