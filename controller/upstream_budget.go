@@ -92,6 +92,9 @@ func ReconcileUpstreamBudget(c *gin.Context) {
 	// Keep the authenticated route so clients get an explicit migration error.
 	c.JSON(http.StatusGone, gin.H{"success": false, "code": "SUPPLIER_BILL_REQUIRED", "replacement": "/api/channel/:id/upstream-budget/statements"})
 	params := map[string]any{"reason": "structured_supplier_bill_required"}
+	if id, err := strconv.Atoi(c.Param("id")); err == nil && id > 0 {
+		params["channel_id"] = id
+	}
 	info := &model.AuditRequestInfo{Method: c.Request.Method, Route: c.FullPath(), Path: c.FullPath(), Status: http.StatusGone, Success: false}
 	model.RecordOperationAuditLog(c.GetInt("id"), c.GetInt("role"), auditContentEN("upstream_budget.reconcile", params), c.ClientIP(), "upstream_budget.reconcile", params, auditOperatorInfo(c), info, c)
 	markAuditLogged(c)

@@ -974,6 +974,7 @@ func TestSupplierCostLegacyReconcileRoutes(t *testing.T) {
 					require.False(t, audit.Success)
 					auditData, err := common.Marshal(audit)
 					require.NoError(t, err)
+					require.Contains(t, string(auditData), fmt.Sprintf(`"channel_id":%d`, ch.Id))
 					for _, secret := range []string{tokens[100], bill.Evidence, "synthetic-legacy-unverified-proof"} {
 						require.NotContains(t, string(auditData), secret)
 					}
