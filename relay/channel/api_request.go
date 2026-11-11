@@ -13,6 +13,7 @@ import (
 
 	common2 "github.com/QuantumNous/new-api/common"
 	appconstant "github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/constant"
@@ -383,6 +384,11 @@ func DoFormRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBod
 // request context, and reports a rejected handshake as a *types.NewAPIError
 // carrying the upstream status code (types.NewError preserves it).
 func DoWssRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody io.Reader) (*websocket.Conn, error) {
+	// WebSocket sessions have no supported finite cost envelope in this pilot.
+	// Enforce this at the final egress boundary as well as credential binding.
+	if c.GetBool(service.UpstreamBudgetManagedKey) || c.GetBool(service.UpstreamBudgetProtectedKey) {
+		return nil, types.NewErrorWithStatusCode(errors.New(i18n.T(c, i18n.MsgUpstreamBudgetDenied)), types.ErrorCodeInvalidRequest, http.StatusServiceUnavailable, types.ErrOptionWithSkipRetry())
+	}
 	fullRequestURL, err := a.GetRequestURL(info)
 	if err != nil {
 		return nil, fmt.Errorf("get request url failed: %w", err)
@@ -487,7 +493,18 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 
 	common2.SetContextKey(c, appconstant.ContextKeyUpstreamRequestOrigin, req.URL.Scheme+"://"+req.URL.Host)
 	req = req.WithContext(c.Request.Context())
+	budgetAttempt, budgetErr := service.BeginUpstreamBudget(c, req, info.ChannelId, info.ChannelType)
+	if budgetErr != nil {
+		return nil, types.NewErrorWithStatusCode(errors.New(i18n.T(c, i18n.MsgUpstreamBudgetDenied)), types.ErrorCodeInvalidRequest, http.StatusServiceUnavailable, types.ErrOptionWithSkipRetry())
+	}
 	resp, err := relayClient.Do(req)
+	if budgetAttempt != nil {
+		if err != nil {
+			budgetAttempt.Finish()
+		} else {
+			budgetAttempt.BindResponse(resp)
+		}
+	}
 	if err != nil {
 		safeErr := common2.SafeOutboundError(err)
 		logger.LogError(c, fmt.Sprintf("event=upstream_request_failed channel_id=%d channel_type=%d reason=%s", info.ChannelId, info.ChannelType, safeErr.Error()))

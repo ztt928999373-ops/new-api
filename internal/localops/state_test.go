@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -46,6 +47,11 @@ func TestLocalInstallBackupRestore(t *testing.T) {
 	ch := model.Channel{Name: "synthetic-recovery-channel", Type: constant.ChannelTypeOpenAI, CredentialRef: active.ID, Status: common.ChannelStatusManuallyDisabled, Group: "openai-pilot", Models: "synthetic-model"}
 	require.NoError(t, db.Create(&ch).Error)
 	require.NoError(t, db.Create(&model.Ability{ChannelId: ch.Id, Group: ch.Group, Model: ch.Models, Enabled: false}).Error)
+	policy := model.UpstreamBudget{ChannelID: ch.Id, Enabled: true, LimitMicros: 100, AttemptCeilingMicros: 10, Model: "synthetic-model", MaxRequestBytes: 4096, MaxOutputTokens: 32, ValidUntil: time.Now().Unix() + 3600, CeilingConfirmed: true, CostBasisHash: strings.Repeat("a", 64)}
+	require.NoError(t, model.ConfigureUpstreamBudget(context.Background(), db, policy, 0))
+	policy.Revision = 1
+	_, err = model.ReserveUpstreamCost(context.Background(), db, policy)
+	require.NoError(t, err)
 	// Model an earlier supported snapshot missing an additive business table.
 	require.NoError(t, db.Migrator().DropTable(&model.LoginEncryptionKey{}))
 	closeDB()
@@ -90,6 +96,11 @@ func TestLocalInstallBackupRestore(t *testing.T) {
 	require.Empty(t, saved.Key)
 	require.Equal(t, active.ID, saved.CredentialRef)
 	require.Equal(t, common.ChannelStatusManuallyDisabled, saved.Status)
+	require.True(t, saved.UpstreamBudgetEnabled)
+	var restoredBudget model.UpstreamBudget
+	require.NoError(t, restoredDB.First(&restoredBudget, "channel_id = ?", ch.Id).Error)
+	require.False(t, restoredBudget.Enabled, "restoring an old snapshot must not reopen a payable budget")
+	require.EqualValues(t, 10, restoredBudget.HeldMicros, "restore never releases in-flight liability")
 	require.Error(t, Restore(target, databaseBackup, keyBackup))
 	// A fresh post-restore write and second backup are safe with the new KEK.
 	_, err = restoredStore.Create(context.Background(), actor, true, "openai", "api_key", "relay", []byte("synthetic-post-restore"))
