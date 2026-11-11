@@ -34,13 +34,17 @@ func ImportSupplierCost(c *gin.Context) {
 		c.JSON(409, gin.H{"success": false, "code": "SUPPLIER_BILL_INVALID_OR_UNAVAILABLE"})
 		return
 	}
-	// Raw evidence/account/bill IDs never enter the generic operation audit.
-	recordManageAudit(c, "upstream_budget.bill_review", map[string]any{"channel_id": id, "statement_id": row.ID, "state": row.State, "alert": row.Alert, "conflict": err != nil})
 	if err != nil {
 		c.JSON(409, gin.H{"success": false, "code": "SUPPLIER_BILL_CONFLICT"})
-		return
+	} else {
+		c.JSON(200, gin.H{"success": true, "data": row, "verification": "operator_attested_not_independently_verified"})
 	}
-	c.JSON(200, gin.H{"success": true, "data": row, "verification": "operator_attested_not_independently_verified"})
+	// Capture the final status, including rejected conflicts. Raw evidence,
+	// account and bill IDs never enter the generic operation audit.
+	params := map[string]any{"channel_id": id, "statement_id": row.ID, "state": row.State, "alert": row.Alert, "conflict": err != nil}
+	info := &model.AuditRequestInfo{Method: c.Request.Method, Route: c.FullPath(), Path: c.FullPath(), Status: c.Writer.Status(), Success: err == nil}
+	model.RecordOperationAuditLog(c.GetInt("id"), c.GetInt("role"), auditContentEN("upstream_budget.bill_review", params), c.ClientIP(), "upstream_budget.bill_review", params, auditOperatorInfo(c), info, c)
+	markAuditLogged(c)
 }
 
 func ListSupplierCosts(c *gin.Context) {

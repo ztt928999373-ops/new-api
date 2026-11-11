@@ -532,6 +532,19 @@ func TestUpstreamBudgetHTTPAttemptsAndPermissions(t *testing.T) {
 	for _, sensitive := range []string{bill.Account, bill.Bill, bill.Evidence, tokens[100]} {
 		require.NotContains(t, imported.Body.String()+viewed.Body.String()+string(auditData), sensitive)
 	}
+	bill.ActualMicros = 12
+	conflictingData, err := common.Marshal(bill)
+	require.NoError(t, err)
+	conflictRequest := httptest.NewRequest("POST", fmt.Sprintf("/api/channel/%d/upstream-budget/statements", ch.Id), strings.NewReader(string(conflictingData)))
+	conflictRequest.Header.Set("Authorization", "Bearer "+tokens[100])
+	conflictRequest.Header.Set("Content-Type", "application/json")
+	conflicted := httptest.NewRecorder()
+	api.ServeHTTP(conflicted, conflictRequest)
+	require.Equal(t, 409, conflicted.Code)
+	var conflictAudit model.AuditLog
+	require.NoError(t, db.Where("action = ?", "upstream_budget.bill_review").Order("id DESC").First(&conflictAudit).Error)
+	require.Equal(t, 409, conflictAudit.Status)
+	require.False(t, conflictAudit.Success, "a rejected bill cannot be audited as a successful operation")
 	// Even a forced enabled bit cannot bypass the independent frozen gate.
 	require.NoError(t, db.Model(&model.UpstreamBudget{}).Where("channel_id = ?", ch.Id).Update("enabled", true).Error)
 	_, err = send(body)
