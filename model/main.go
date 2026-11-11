@@ -356,6 +356,7 @@ func migrateDB() error {
 	err := DB.AutoMigrate(
 		&UpstreamBudget{},
 		&UpstreamCostReservation{},
+		&SupplierCostStatement{},
 		&Channel{},
 		&Token{},
 		&User{},

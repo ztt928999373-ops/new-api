@@ -87,25 +87,15 @@ func ConfigureUpstreamBudget(c *gin.Context) {
 }
 
 func ReconcileUpstreamBudget(c *gin.Context) {
-	id, err := strconv.Atoi(c.Param("id"))
-	if err != nil || id < 1 {
-		c.JSON(400, gin.H{"success": false, "code": "UPSTREAM_BUDGET_INVALID"})
-		return
+	// The legacy payload cannot establish a final structured supplier bill.
+	// Never fabricate a statement or mutate historical liabilities from it.
+	// Keep the authenticated route so clients get an explicit migration error.
+	c.JSON(http.StatusGone, gin.H{"success": false, "code": "SUPPLIER_BILL_REQUIRED", "replacement": "/api/channel/:id/upstream-budget/statements"})
+	params := map[string]any{"reason": "structured_supplier_bill_required"}
+	if id, err := strconv.Atoi(c.Param("id")); err == nil && id > 0 {
+		params["channel_id"] = id
 	}
-	var input struct {
-		ReservationID string `json:"reservation_id"`
-		ActualMicros  int64  `json:"actual_micros"`
-		Evidence      string `json:"evidence"`
-	}
-	if c.ShouldBindJSON(&input) != nil {
-		c.JSON(400, gin.H{"success": false, "code": "UPSTREAM_BUDGET_INVALID"})
-		return
-	}
-	var r model.UpstreamCostReservation
-	if model.DB.First(&r, "id = ? AND channel_id = ?", input.ReservationID, id).Error != nil || model.ReconcileUpstreamCost(c.Request.Context(), model.DB, r.ID, input.ActualMicros, input.Evidence) != nil {
-		c.JSON(409, gin.H{"success": false, "code": "UPSTREAM_BUDGET_RECONCILIATION_REJECTED"})
-		return
-	}
-	recordManageAudit(c, "upstream_budget.reconcile", map[string]any{"channel_id": id, "reservation_id": r.ID, "actual_micros": input.ActualMicros})
-	c.JSON(200, gin.H{"success": true})
+	info := &model.AuditRequestInfo{Method: c.Request.Method, Route: c.FullPath(), Path: c.FullPath(), Status: http.StatusGone, Success: false}
+	model.RecordOperationAuditLog(c.GetInt("id"), c.GetInt("role"), auditContentEN("upstream_budget.reconcile", params), c.ClientIP(), "upstream_budget.reconcile", params, auditOperatorInfo(c), info, c)
+	markAuditLogged(c)
 }

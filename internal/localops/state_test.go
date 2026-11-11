@@ -50,8 +50,12 @@ func TestLocalInstallBackupRestore(t *testing.T) {
 	policy := model.UpstreamBudget{ChannelID: ch.Id, Enabled: true, LimitMicros: 100, AttemptCeilingMicros: 10, Model: "synthetic-model", MaxRequestBytes: 4096, MaxOutputTokens: 32, ValidUntil: time.Now().Unix() + 3600, CeilingConfirmed: true, CostBasisHash: strings.Repeat("a", 64)}
 	require.NoError(t, model.ConfigureUpstreamBudget(context.Background(), db, policy, 0))
 	policy.Revision = 1
-	_, err = model.ReserveUpstreamCost(context.Background(), db, policy)
+	reservation, err := model.ReserveUpstreamCost(context.Background(), db, policy)
 	require.NoError(t, err)
+	estimate := int64(1)
+	bill, err := model.ImportSupplierCost(context.Background(), db, ch.Id, model.SupplierCostInput{Account: "synthetic-recovery-account", Bill: "synthetic-recovery-bill", Line: "one", Currency: "USD", ReservationID: reservation.ID, ActualMicros: 1, EstimatedMicros: &estimate, Evidence: "synthetic-recovery-evidence", Confirmed: true})
+	require.NoError(t, err)
+	require.Equal(t, "in_flight", bill.State)
 	// Model an earlier supported snapshot missing an additive business table.
 	require.NoError(t, db.Migrator().DropTable(&model.LoginEncryptionKey{}))
 	closeDB()
@@ -101,6 +105,10 @@ func TestLocalInstallBackupRestore(t *testing.T) {
 	require.NoError(t, restoredDB.First(&restoredBudget, "channel_id = ?", ch.Id).Error)
 	require.False(t, restoredBudget.Enabled, "restoring an old snapshot must not reopen a payable budget")
 	require.EqualValues(t, 10, restoredBudget.HeldMicros, "restore never releases in-flight liability")
+	require.True(t, restoredBudget.ReconciliationFrozen)
+	var restoredBill model.SupplierCostStatement
+	require.NoError(t, restoredDB.First(&restoredBill, "id = ?", bill.ID).Error)
+	require.Equal(t, "attempt_not_finished", restoredBill.Alert)
 	require.Error(t, Restore(target, databaseBackup, keyBackup))
 	// A fresh post-restore write and second backup are safe with the new KEK.
 	_, err = restoredStore.Create(context.Background(), actor, true, "openai", "api_key", "relay", []byte("synthetic-post-restore"))

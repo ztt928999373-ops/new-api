@@ -35,6 +35,7 @@ type UpstreamBudget struct {
 	ValidUntil           int64  `json:"valid_until"`
 	CeilingConfirmed     bool   `json:"ceiling_confirmed"`
 	CostBasisHash        string `gorm:"size:64" json:"cost_basis_hash"`
+	ReconciliationFrozen bool   `json:"reconciliation_frozen"`
 }
 
 type UpstreamCostReservation struct {
@@ -70,7 +71,11 @@ func ConfigureUpstreamBudget(ctx context.Context, db *gorm.DB, policy UpstreamBu
 		if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&UpstreamBudget{ChannelID: policy.ChannelID}).Error; err != nil {
 			return ErrUpstreamBudget
 		}
-		result := tx.Model(&UpstreamBudget{}).Where("channel_id = ? AND revision = ? AND held_micros <= ? - charged_micros", policy.ChannelID, expected, policy.LimitMicros).Updates(map[string]any{
+		query := tx.Model(&UpstreamBudget{}).Where("channel_id = ? AND revision = ? AND held_micros <= ? - charged_micros", policy.ChannelID, expected, policy.LimitMicros)
+		if policy.Enabled {
+			query = query.Where("(reconciliation_frozen = ? OR reconciliation_frozen IS NULL)", false)
+		}
+		result := query.Updates(map[string]any{
 			"enabled": policy.Enabled, "revision": expected + 1, "limit_micros": policy.LimitMicros,
 			"attempt_ceiling_micros": policy.AttemptCeilingMicros, "model": policy.Model,
 			"max_request_bytes": policy.MaxRequestBytes, "max_output_tokens": policy.MaxOutputTokens, "valid_until": policy.ValidUntil,
@@ -105,7 +110,7 @@ func ReserveUpstreamCost(ctx context.Context, db *gorm.DB, policy UpstreamBudget
 		r.RequestID = common.NewRequestId()
 	}
 	err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		result := tx.Model(&UpstreamBudget{}).Where("channel_id = ? AND enabled = ? AND revision = ? AND attempt_ceiling_micros = ? AND ceiling_confirmed = ? AND valid_until > ? AND held_micros <= limit_micros - charged_micros - ?", policy.ChannelID, true, policy.Revision, amount, true, time.Now().Unix(), amount).Update("held_micros", gorm.Expr("held_micros + ?", amount))
+		result := tx.Model(&UpstreamBudget{}).Where("channel_id = ? AND enabled = ? AND (reconciliation_frozen = ? OR reconciliation_frozen IS NULL) AND revision = ? AND attempt_ceiling_micros = ? AND ceiling_confirmed = ? AND valid_until > ? AND held_micros <= limit_micros - charged_micros - ?", policy.ChannelID, true, false, policy.Revision, amount, true, time.Now().Unix(), amount).Update("held_micros", gorm.Expr("held_micros + ?", amount))
 		if result.Error != nil || result.RowsAffected != 1 {
 			return ErrUpstreamBudget
 		}
