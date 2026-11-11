@@ -817,3 +817,174 @@ func TestSupplierCostDatabaseMatrix(t *testing.T) {
 		})
 	}
 }
+
+func TestSupplierCostLegacyReconcileRoutes(t *testing.T) {
+	for _, kind := range []string{"sqlite", "mysql", "postgres"} {
+		t.Run(kind, func(t *testing.T) {
+			db := setupUpstreamBudgetDB(t, kind)
+			require.NoError(t, db.AutoMigrate(&model.UpstreamBudget{}, &model.UpstreamCostReservation{}, &model.SupplierCostStatement{}, &model.User{}, &model.UserSession{}, &model.UserAccessToken{}, &model.AuditLog{}, &model.Option{}, &model.CasbinRule{}, &model.AuthzRole{}))
+			require.NoError(t, authz.Init(db))
+			master, secret := common.IsMasterNode, common.SessionSecret
+			common.IsMasterNode, common.SessionSecret = true, "synthetic-legacy-review-session"
+			t.Cleanup(func() { common.IsMasterNode, common.SessionSecret = master, secret })
+			tokens := map[int]string{}
+			for _, role := range []int{1, 10, 100} {
+				user := model.User{Username: fmt.Sprintf("legacy-review-%s-%d", kind, role), Role: role, Status: 1, AuthVersion: 1, Group: "default", AffCode: fmt.Sprintf("legacy-%s-%d", kind, role)}
+				require.NoError(t, db.Create(&user).Error)
+				login, err := service.CreateLoginSession(user.Id, "synthetic", "127.0.0.1", "synthetic")
+				require.NoError(t, err)
+				tokens[role] = login.AccessToken
+			}
+			engine := gin.New()
+			engine.Use(func(c *gin.Context) { c.Set(common.RequestIdKey, "synthetic-legacy-review"); c.Next() })
+			registerChannelRoutes(engine.Group("/api"))
+			for _, scenario := range []string{"no_bill", "missing_evidence", "in_flight", "over_ceiling", "already_frozen", "conflicting_bill", "new_then_old", "new_over_ceiling", "concurrent_new_and_old", "historical"} {
+				t.Run(scenario, func(t *testing.T) {
+					ch, policy := syntheticBudgetChannel(t, db)
+					ctx := context.Background()
+					attempt, err := model.ReserveUpstreamCost(ctx, db, policy)
+					require.NoError(t, err)
+					if scenario != "in_flight" {
+						require.NoError(t, model.ChargeUpstreamCeiling(ctx, db, attempt.ID))
+					}
+					base := fmt.Sprintf("/api/channel/%d/upstream-budget", ch.Id)
+					// Requests use the public management router and real signed sessions.
+					send := func(method, suffix string, input any, role int) *httptest.ResponseRecorder {
+						data, err := common.Marshal(input)
+						require.NoError(t, err)
+						request := httptest.NewRequest(method, base+suffix, strings.NewReader(string(data)))
+						request.Header.Set("Content-Type", "application/json")
+						if role != 0 {
+							request.Header.Set("Authorization", "Bearer "+tokens[role])
+						}
+						response := httptest.NewRecorder()
+						engine.ServeHTTP(response, request)
+						return response
+					}
+					estimate := int64(5)
+					bill := model.SupplierCostInput{Account: "synthetic-private-legacy-account", Bill: kind + "-" + scenario, Line: "one", Currency: "USD", ReservationID: attempt.ID, ActualMicros: 4, EstimatedMicros: &estimate, Evidence: "synthetic-private-legacy-evidence", Confirmed: true}
+					if scenario == "conflicting_bill" || scenario == "new_then_old" || scenario == "new_over_ceiling" {
+						// Keep a second obligation to prove that a conflict on one bill
+						// cannot be bypassed by settling another attempt via the old API.
+						var peer model.UpstreamCostReservation
+						if scenario == "conflicting_bill" {
+							peer, err = model.ReserveUpstreamCost(ctx, db, policy)
+							require.NoError(t, err)
+							require.NoError(t, model.ChargeUpstreamCeiling(ctx, db, peer.ID))
+						}
+						if scenario == "new_over_ceiling" {
+							bill.ActualMicros = 12
+						}
+						require.Equal(t, 200, send("POST", "/statements", bill, 100).Code)
+						require.Equal(t, 200, send("POST", "/statements", bill, 100).Code, "bill replay is idempotent")
+						if scenario == "conflicting_bill" {
+							bill.ActualMicros = 5
+							require.Equal(t, 409, send("POST", "/statements", bill, 100).Code)
+							attempt = peer
+						}
+					}
+					if scenario == "already_frozen" {
+						require.NoError(t, db.Model(&model.UpstreamBudget{}).Where("channel_id = ?", ch.Id).Updates(map[string]any{"enabled": false, "reconciliation_frozen": true}).Error)
+					}
+					if scenario == "historical" {
+						// Seed a pre-F2.1 settlement as historical data, not a new API write.
+						require.NoError(t, model.ReconcileUpstreamCost(ctx, db, attempt.ID, 4, bill.Evidence))
+					}
+					old := map[string]any{"reservation_id": attempt.ID, "actual_micros": 0, "evidence": "synthetic-legacy-unverified-proof"}
+					if scenario == "missing_evidence" {
+						delete(old, "evidence")
+					}
+					if scenario == "over_ceiling" {
+						old["actual_micros"] = 12
+					}
+					if scenario == "historical" {
+						old["actual_micros"], old["evidence"] = 4, bill.Evidence
+					}
+					for _, role := range []int{0, 1, 10} {
+						response := send("POST", "/reconcile", old, role)
+						expected := 403
+						if role == 0 {
+							expected = 401
+						}
+						require.Equal(t, expected, response.Code)
+					}
+					if scenario == "concurrent_new_and_old" {
+						type result struct {
+							legacy bool
+							status int
+						}
+						results := make(chan result, 4)
+						var wg sync.WaitGroup
+						for index := range 4 {
+							wg.Go(func() {
+								if index%2 == 0 {
+									results <- result{true, send("POST", "/reconcile", old, 100).Code}
+								} else {
+									results <- result{false, send("POST", "/statements", bill, 100).Code}
+								}
+							})
+						}
+						wg.Wait()
+						close(results)
+						for result := range results {
+							if result.legacy {
+								require.Equal(t, 410, result.status)
+							} else {
+								require.Equal(t, 200, result.status)
+							}
+						}
+					}
+					var before, after model.UpstreamBudget
+					var beforeAttempt, afterAttempt model.UpstreamCostReservation
+					var beforeCount, afterCount int64
+					require.NoError(t, db.First(&before, "channel_id = ?", ch.Id).Error)
+					require.NoError(t, db.First(&beforeAttempt, "id = ?", attempt.ID).Error)
+					require.NoError(t, db.Model(&model.SupplierCostStatement{}).Where("channel_id = ?", ch.Id).Count(&beforeCount).Error)
+					if scenario == "new_then_old" || scenario == "concurrent_new_and_old" {
+						require.EqualValues(t, 4, before.ChargedMicros)
+						require.Zero(t, before.HeldMicros)
+						require.EqualValues(t, 1, beforeCount, "canonical bill is booked exactly once")
+					}
+					if scenario == "new_over_ceiling" {
+						require.EqualValues(t, 12, before.ChargedMicros)
+						require.True(t, before.ReconciliationFrozen)
+						require.False(t, before.Enabled)
+					}
+					response := send("POST", "/reconcile", old, 100)
+					require.NoError(t, db.First(&after, "channel_id = ?", ch.Id).Error)
+					require.NoError(t, db.First(&afterAttempt, "id = ?", attempt.ID).Error)
+					require.NoError(t, db.Model(&model.SupplierCostStatement{}).Where("channel_id = ?", ch.Id).Count(&afterCount).Error)
+					t.Logf("legacy route status=%d held=%d->%d allocated=%d->%d bill_rows=%d->%d review_frozen=%v->%v", response.Code, before.HeldMicros, after.HeldMicros, before.ChargedMicros, after.ChargedMicros, beforeCount, afterCount, before.ReconciliationFrozen, after.ReconciliationFrozen)
+					require.Equal(t, 410, response.Code, response.Body.String())
+					require.Contains(t, response.Body.String(), "SUPPLIER_BILL_REQUIRED")
+					require.Equal(t, before, after)
+					require.Equal(t, beforeAttempt, afterAttempt, "history and obligations are immutable through the old API")
+					require.Equal(t, beforeCount, afterCount)
+					if before.ReconciliationFrozen {
+						configuration, err := common.Marshal(policy)
+						require.NoError(t, err)
+						var update map[string]any
+						require.NoError(t, common.Unmarshal(configuration, &update))
+						update["expected_revision"], update["reconciliation_frozen"], update["cost_basis"] = before.Revision, false, "synthetic-reviewed-cost-basis"
+						require.Equal(t, 409, send("PUT", "", update, 100).Code, "configuration cannot remove a review freeze")
+					}
+					var audit model.AuditLog
+					require.NoError(t, db.Where("action = ?", "upstream_budget.reconcile").Order("id DESC").First(&audit).Error)
+					require.Equal(t, 410, audit.Status)
+					require.False(t, audit.Success)
+					auditData, err := common.Marshal(audit)
+					require.NoError(t, err)
+					for _, secret := range []string{tokens[100], bill.Evidence, "synthetic-legacy-unverified-proof"} {
+						require.NotContains(t, string(auditData), secret)
+					}
+					view := send("GET", "", nil, 100)
+					require.Equal(t, 200, view.Code)
+					require.Contains(t, view.Body.String(), attempt.ID)
+					if scenario == "historical" {
+						require.Contains(t, view.Body.String(), `"state":"reconciled"`)
+					}
+				})
+			}
+		})
+	}
+}
