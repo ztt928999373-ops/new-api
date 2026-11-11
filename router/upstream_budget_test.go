@@ -17,6 +17,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/credentialcrypto"
 	"github.com/QuantumNous/new-api/relay/channel"
@@ -37,6 +38,7 @@ import (
 
 func setupUpstreamBudgetDB(t *testing.T, kind string) *gorm.DB {
 	t.Helper()
+	require.NoError(t, i18n.Init())
 	setupRelayRouterTestDB(t) // initialize host column quoting without real state
 	var dialect gorm.Dialector = sqlite.Open(filepath.Join(t.TempDir(), "budget.sqlite"))
 	typeID := common.DatabaseTypeSQLite
@@ -123,6 +125,11 @@ func TestUpstreamBudgetAuthenticatedRetryStopsBeforeSecondSend(t *testing.T) {
 		calls.Add(1)
 		require.Equal(t, "Bearer synthetic-budget-supplier", req.Header.Get("Authorization"))
 		return &http.Response{StatusCode: 500, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"error":{"message":"synthetic failure"}}`))}, nil
+	})
+	// Refunds run in the existing worker pool. Drain even when an assertion
+	// fails, before cleanup restores database and billing globals.
+	t.Cleanup(func() {
+		require.Eventually(t, func() bool { return gopool.WorkerCount() == 0 }, 5*time.Second, time.Millisecond)
 	})
 	engine := gin.New()
 	SetRelayRouter(engine)
