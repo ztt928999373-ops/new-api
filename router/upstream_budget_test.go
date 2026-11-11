@@ -212,6 +212,9 @@ func syntheticBudgetChannel(t *testing.T, db *gorm.DB) (model.Channel, model.Ups
 	ch := model.Channel{Type: constant.ChannelTypeOpenAI, CredentialRef: "synthetic-reference", Name: "synthetic-budget", Status: common.ChannelStatusManuallyDisabled}
 	require.NoError(t, db.Create(&ch).Error)
 	t.Cleanup(func() {
+		if db.Migrator().HasTable(&model.SupplierCostStatement{}) {
+			db.Where("channel_id = ?", ch.Id).Delete(&model.SupplierCostStatement{})
+		}
 		db.Where("channel_id = ?", ch.Id).Delete(&model.UpstreamCostReservation{})
 		db.Where("channel_id = ?", ch.Id).Delete(&model.UpstreamBudget{})
 		db.Delete(&ch)
@@ -348,7 +351,7 @@ func TestUpstreamBudgetDatabaseMatrix(t *testing.T) {
 
 func TestUpstreamBudgetHTTPAttemptsAndPermissions(t *testing.T) {
 	db := setupUpstreamBudgetDB(t, "sqlite")
-	require.NoError(t, db.AutoMigrate(&model.UpstreamBudget{}, &model.UpstreamCostReservation{}, &model.User{}, &model.UserSession{}, &model.UserAccessToken{}, &model.Option{}, &model.AuditLog{}, &model.CasbinRule{}, &model.AuthzRole{}))
+	require.NoError(t, db.AutoMigrate(&model.UpstreamBudget{}, &model.UpstreamCostReservation{}, &model.SupplierCostStatement{}, &model.Log{}, &model.User{}, &model.UserSession{}, &model.UserAccessToken{}, &model.Option{}, &model.AuditLog{}, &model.CasbinRule{}, &model.AuthzRole{}))
 	previousMaster, previousSecret := common.IsMasterNode, common.SessionSecret
 	common.IsMasterNode = true
 	common.SessionSecret = "synthetic-budget-session-secret"
@@ -366,11 +369,9 @@ func TestUpstreamBudgetHTTPAttemptsAndPermissions(t *testing.T) {
 	api := gin.New()
 	registerChannelRoutes(api.Group("/api"))
 	for _, role := range []int{0, 1, 10, 100} {
-		for _, method := range []string{"GET", "PUT", "POST"} {
-			path := fmt.Sprintf("/api/channel/%d/upstream-budget", ch.Id)
-			if method == "POST" {
-				path += "/reconcile"
-			}
+		for _, operation := range []struct{ method, suffix string }{{"GET", ""}, {"PUT", ""}, {"POST", "/reconcile"}, {"GET", "/statements"}, {"POST", "/statements"}} {
+			method := operation.method
+			path := fmt.Sprintf("/api/channel/%d/upstream-budget%s", ch.Id, operation.suffix)
 			req := httptest.NewRequest(method, path, strings.NewReader(`{}`))
 			req.Header.Set("Content-Type", "application/json")
 			if role > 0 {
@@ -486,6 +487,56 @@ func TestUpstreamBudgetHTTPAttemptsAndPermissions(t *testing.T) {
 	state = model.UpstreamBudget{}
 	require.NoError(t, db.First(&state, "channel_id = ?", ch.Id).Error)
 	require.EqualValues(t, 100, state.ChargedMicros)
+	// A final operator-attested bill differs from both wallet quota and the
+	// reserved ceiling. It creates a persistent alert, never invented revenue.
+	var paidAttempt model.UpstreamCostReservation
+	require.NoError(t, db.Where("channel_id = ?", ch.Id).First(&paidAttempt).Error)
+	estimate := int64(8)
+	bill := model.SupplierCostInput{Account: "synthetic-private-account", Bill: "synthetic-private-invoice", Line: "one", Currency: "USD", ReservationID: paidAttempt.ID, ActualMicros: 11, EstimatedMicros: &estimate, Evidence: "synthetic-private-bill-proof", Confirmed: true}
+	data, err = common.Marshal(bill)
+	require.NoError(t, err)
+	var missingAmount map[string]any
+	require.NoError(t, common.Unmarshal(data, &missingAmount))
+	delete(missingAmount, "actual_micros")
+	missingData, err := common.Marshal(missingAmount)
+	require.NoError(t, err)
+	missingRequest := httptest.NewRequest("POST", fmt.Sprintf("/api/channel/%d/upstream-budget/statements", ch.Id), strings.NewReader(string(missingData)))
+	missingRequest.Header.Set("Authorization", "Bearer "+tokens[100])
+	missingRequest.Header.Set("Content-Type", "application/json")
+	missingResponse := httptest.NewRecorder()
+	api.ServeHTTP(missingResponse, missingRequest)
+	require.Equal(t, 400, missingResponse.Code, "missing actual cost is not a free bill")
+	importRequest := httptest.NewRequest("POST", fmt.Sprintf("/api/channel/%d/upstream-budget/statements", ch.Id), strings.NewReader(string(data)))
+	importRequest.Header.Set("Authorization", "Bearer "+tokens[100])
+	importRequest.Header.Set("Content-Type", "application/json")
+	imported := httptest.NewRecorder()
+	api.ServeHTTP(imported, importRequest)
+	require.Equal(t, 200, imported.Code, imported.Body.String())
+	require.Contains(t, imported.Body.String(), "above_reserved_ceiling")
+	require.NoError(t, db.Create(&model.Log{RequestId: paidAttempt.RequestID, ChannelId: ch.Id, Type: model.LogTypeConsume, Quota: 123}).Error)
+	view := httptest.NewRequest("GET", fmt.Sprintf("/api/channel/%d/upstream-budget/statements", ch.Id), nil)
+	view.Header.Set("Authorization", "Bearer "+tokens[100])
+	viewed := httptest.NewRecorder()
+	api.ServeHTTP(viewed, view)
+	require.Equal(t, 200, viewed.Code, viewed.Body.String())
+	var financial map[string]any
+	require.NoError(t, common.Unmarshal(viewed.Body.Bytes(), &financial))
+	require.Nil(t, financial["platform_revenue_usd_micros"])
+	require.Nil(t, financial["gross_profit_usd_micros"])
+	require.Equal(t, "quota", financial["user_charge_unit"])
+	require.Len(t, financial["user_charge_references"], 1)
+	var audit model.AuditLog
+	require.NoError(t, db.Where("action = ?", "upstream_budget.bill_review").First(&audit).Error)
+	auditData, err := common.Marshal(audit)
+	require.NoError(t, err)
+	for _, sensitive := range []string{bill.Account, bill.Bill, bill.Evidence, tokens[100]} {
+		require.NotContains(t, imported.Body.String()+viewed.Body.String()+string(auditData), sensitive)
+	}
+	// Even a forced enabled bit cannot bypass the independent frozen gate.
+	require.NoError(t, db.Model(&model.UpstreamBudget{}).Where("channel_id = ?", ch.Id).Update("enabled", true).Error)
+	_, err = send(body)
+	require.Error(t, err)
+	require.EqualValues(t, 10, calls.Load())
 }
 
 func TestUpstreamBudgetWebSocketRoutes(t *testing.T) {
@@ -533,6 +584,7 @@ func TestUpstreamBudgetWebSocketRoutes(t *testing.T) {
 		{"managed", true, true, true},
 		{"protected_binding_detached", false, true, true},
 		{"frozen_binding_detached", false, true, false},
+		{"cost_review_frozen_binding_detached", false, true, true},
 		{"unconfigured_legacy_control", false, false, false},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
@@ -544,7 +596,7 @@ func TestUpstreamBudgetWebSocketRoutes(t *testing.T) {
 				ref, key, settings = credentialID, "", nil
 			}
 			require.NoError(t, db.Model(&ch).Updates(map[string]any{"credential_ref": ref, "key": key, "setting": string(settings), "upstream_budget_enabled": scenario.protected}).Error)
-			require.NoError(t, db.Model(&model.UpstreamBudget{}).Where("channel_id = ?", ch.Id).Update("enabled", scenario.enabled).Error)
+			require.NoError(t, db.Model(&model.UpstreamBudget{}).Where("channel_id = ?", ch.Id).Updates(map[string]any{"enabled": scenario.enabled, "reconciliation_frozen": scenario.name == "cost_review_frozen_binding_detached"}).Error)
 			for _, protocol := range []string{"realtime?model=synthetic-model", "responses"} {
 				t.Run(protocol, func(t *testing.T) {
 					before := upstreamDials.Load()
@@ -614,4 +666,141 @@ func TestUpstreamBudgetCancellationAndUnsupportedProtocols(t *testing.T) {
 	var count int64
 	require.NoError(t, db.Model(&model.UpstreamCostReservation{}).Count(&count).Error)
 	require.Zero(t, count)
+}
+
+func TestSupplierCostDatabaseMatrix(t *testing.T) {
+	for _, kind := range []string{"sqlite", "mysql", "postgres"} {
+		t.Run(kind, func(t *testing.T) {
+			db := setupUpstreamBudgetDB(t, kind)
+			require.NoError(t, db.AutoMigrate(&model.UpstreamBudget{}, &model.UpstreamCostReservation{}, &model.SupplierCostStatement{}))
+			ch, policy := syntheticBudgetChannel(t, db)
+			// Representative F2 schema: the new gate did not exist. Repeated
+			// startup preserves the old policy and nullable false admission.
+			require.NoError(t, db.Migrator().DropColumn(&model.UpstreamBudget{}, "reconciliation_frozen"))
+			for range 2 {
+				require.NoError(t, db.AutoMigrate(&model.UpstreamBudget{}, &model.UpstreamCostReservation{}, &model.SupplierCostStatement{}))
+			}
+			ctx := context.Background()
+			r, err := model.ReserveUpstreamCost(ctx, db, policy)
+			require.NoError(t, err)
+			require.NoError(t, model.ChargeUpstreamCeiling(ctx, db, r.ID))
+			estimate := int64(5)
+			input := model.SupplierCostInput{Account: "synthetic-account", Bill: "synthetic-invoice", Line: kind + "-concurrent", Currency: "USD", ReservationID: r.ID, ActualMicros: 4, EstimatedMicros: &estimate, Evidence: "synthetic-bill-evidence", Confirmed: true}
+			var wg sync.WaitGroup
+			failures := make(chan error, 8)
+			for range 8 {
+				wg.Go(func() {
+					_, e := model.ImportSupplierCost(ctx, db, ch.Id, input)
+					if e != nil {
+						failures <- e
+					}
+				})
+			}
+			wg.Wait()
+			close(failures)
+			for e := range failures {
+				require.NoError(t, e)
+			}
+			var count int64
+			require.NoError(t, db.Model(&model.SupplierCostStatement{}).Where("channel_id = ?", ch.Id).Count(&count).Error)
+			require.EqualValues(t, 1, count)
+			var budget model.UpstreamBudget
+			require.NoError(t, db.First(&budget, "channel_id = ?", ch.Id).Error)
+			require.EqualValues(t, 4, budget.ChargedMicros)
+			require.Zero(t, budget.HeldMicros)
+			row, err := model.ImportSupplierCost(ctx, db, ch.Id, input)
+			require.NoError(t, err)
+			require.Equal(t, "settled", row.State)
+			require.EqualValues(t, -1, *row.DeltaMicros)
+			input.ActualMicros = 3
+			_, err = model.ImportSupplierCost(ctx, db, ch.Id, input)
+			require.ErrorIs(t, err, model.ErrSupplierCostConflict)
+			require.NoError(t, db.First(&budget, "channel_id = ?", ch.Id).Error)
+			require.True(t, budget.ReconciliationFrozen)
+			require.False(t, budget.Enabled)
+			require.EqualValues(t, 4, budget.ChargedMicros, "conflicting bill never overwrites booked cost")
+			require.Error(t, model.ConfigureUpstreamBudget(ctx, db, policy, 1), "configuration cannot thaw a cost review")
+			_, err = model.ReserveUpstreamCost(ctx, db, policy)
+			require.Error(t, err)
+			for _, scenario := range []string{"in_flight", "unmatched", "above_estimate", "above_ceiling", "missing_estimate", "rollback", "duplicate_attempt", "zero_actual"} {
+				t.Run(scenario, func(t *testing.T) {
+					channel, p := syntheticBudgetChannel(t, db)
+					attempt, err := model.ReserveUpstreamCost(ctx, db, p)
+					require.NoError(t, err)
+					if scenario != "in_flight" {
+						require.NoError(t, model.ChargeUpstreamCeiling(ctx, db, attempt.ID))
+					}
+					bill := input
+					bill.Line, bill.ReservationID, bill.ActualMicros = kind+"-"+scenario, attempt.ID, 4
+					switch scenario {
+					case "unmatched":
+						bill.ReservationID = strings.Repeat("e", 32)
+					case "above_estimate":
+						bill.ActualMicros = 8
+					case "above_ceiling":
+						bill.ActualMicros = 12
+					case "missing_estimate":
+						bill.EstimatedMicros = nil
+					case "zero_actual":
+						bill.ActualMicros = 0
+					case "rollback":
+						require.NoError(t, db.Callback().Update().Before("gorm:update").Register("synthetic-bill-write-failure", func(tx *gorm.DB) {
+							if tx.Statement.Table == "supplier_cost_statements" {
+								tx.AddError(errors.New("synthetic-bill-write-failure"))
+							}
+						}))
+					case "duplicate_attempt":
+						original := bill
+						original.Line += "-original"
+						_, err := model.ImportSupplierCost(ctx, db, channel.Id, original)
+						require.NoError(t, err)
+					}
+					result, err := model.ImportSupplierCost(ctx, db, channel.Id, bill)
+					if scenario == "rollback" {
+						require.NoError(t, db.Callback().Update().Remove("synthetic-bill-write-failure"))
+						require.Error(t, err)
+						var saved model.UpstreamCostReservation
+						require.NoError(t, db.First(&saved, "id = ?", attempt.ID).Error)
+						require.Equal(t, "ceiling_charged", saved.State)
+						return
+					}
+					require.NoError(t, err)
+					var frozen model.UpstreamBudget
+					require.NoError(t, db.First(&frozen, "channel_id = ?", channel.Id).Error)
+					if scenario == "zero_actual" {
+						require.Empty(t, result.Alert)
+						require.Zero(t, frozen.ChargedMicros)
+						require.Zero(t, frozen.HeldMicros)
+						require.True(t, frozen.Enabled)
+						return
+					}
+					require.NotEmpty(t, result.Alert)
+					require.True(t, frozen.ReconciliationFrozen)
+					require.False(t, frozen.Enabled)
+					if scenario == "in_flight" {
+						require.EqualValues(t, 10, frozen.HeldMicros, "a bill must not release a running attempt")
+						require.NoError(t, model.ChargeUpstreamCeiling(ctx, db, attempt.ID))
+						retry, err := model.ImportSupplierCost(ctx, db, channel.Id, bill)
+						require.NoError(t, err)
+						require.Equal(t, "settled", retry.State)
+					}
+				})
+			}
+			for _, invalid := range []string{"currency", "negative", "overflow", "unconfirmed"} {
+				bad := input
+				switch invalid {
+				case "currency":
+					bad.Currency = "CNY"
+				case "negative":
+					bad.ActualMicros = -1
+				case "overflow":
+					bad.ActualMicros = model.MaxUpstreamBudgetMicros + 1
+				case "unconfirmed":
+					bad.Confirmed = false
+				}
+				_, err := model.ImportSupplierCost(ctx, db, ch.Id, bad)
+				require.Error(t, err)
+			}
+		})
+	}
 }

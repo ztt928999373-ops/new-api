@@ -42,7 +42,7 @@ func rejectUnsupportedManagedChannelOperation(c *gin.Context) {
 		return
 	}
 	route := strings.TrimPrefix(full, "/api/channel")
-	if route == "/:id/upstream-budget" || route == "/:id/upstream-budget/reconcile" {
+	if route == "/:id/upstream-budget" || route == "/:id/upstream-budget/reconcile" || route == "/:id/upstream-budget/statements" {
 		c.Next()
 		return
 	}
@@ -131,6 +131,8 @@ var channelPermissionRoutes = []permissionRoute{
 	{method: http.MethodGet, path: "/:id/upstream-budget", permission: authz.ChannelSensitiveWrite, handler: controller.GetUpstreamBudget},
 	{method: http.MethodPut, path: "/:id/upstream-budget", permission: authz.ChannelSensitiveWrite, handler: controller.ConfigureUpstreamBudget},
 	{method: http.MethodPost, path: "/:id/upstream-budget/reconcile", permission: authz.ChannelSensitiveWrite, handler: controller.ReconcileUpstreamBudget},
+	{method: http.MethodPost, path: "/:id/upstream-budget/statements", permission: authz.ChannelSensitiveWrite, handler: controller.ImportSupplierCost},
+	{method: http.MethodGet, path: "/:id/upstream-budget/statements", permission: authz.ChannelSensitiveWrite, handler: controller.ListSupplierCosts},
 	{method: http.MethodGet, path: "/credentials/channel/:id", permission: authz.ChannelRead, handler: controller.GetChannelCredential},
 	{method: http.MethodPost, path: "/openai-integration", permission: authz.ChannelSensitiveWrite, handler: controller.PrepareOpenAIIntegration},
 	{method: http.MethodPost, path: "/bailian-integration", permission: authz.ChannelSensitiveWrite, handler: controller.PrepareBailianIntegration},
