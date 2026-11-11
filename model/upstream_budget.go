@@ -135,7 +135,7 @@ func ChargeUpstreamCeiling(ctx context.Context, db *gorm.DB, id string) error {
 		if update.RowsAffected == 0 {
 			return nil
 		}
-		update = tx.Model(&UpstreamBudget{}).Where("channel_id = ? AND held_micros >= ?", r.ChannelID, r.CeilingMicros).Updates(map[string]any{"held_micros": gorm.Expr("held_micros - ?", r.CeilingMicros), "charged_micros": gorm.Expr("charged_micros + ?", r.CeilingMicros)})
+		update = tx.Model(&UpstreamBudget{}).Where("channel_id = ? AND held_micros >= ? AND charged_micros <= ?", r.ChannelID, r.CeilingMicros, int64(math.MaxInt64)-r.CeilingMicros).Updates(map[string]any{"held_micros": gorm.Expr("held_micros - ?", r.CeilingMicros), "charged_micros": gorm.Expr("charged_micros + ?", r.CeilingMicros)})
 		if update.Error != nil || update.RowsAffected != 1 {
 			return ErrUpstreamBudget
 		}

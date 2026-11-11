@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -264,6 +265,16 @@ func TestUpstreamBudgetDatabaseMatrix(t *testing.T) {
 			var marker model.Channel
 			require.NoError(t, db.First(&marker, ch.Id).Error)
 			require.True(t, marker.UpstreamBudgetEnabled, "breach freezes admission, never opts out")
+			// Multiple above-ceiling invoices can exceed the configured budget.
+			// Even then an outstanding attempt must never wrap its final charge.
+			require.NoError(t, db.Model(&state).Update("charged_micros", int64(math.MaxInt64)).Error)
+			require.Error(t, model.ChargeUpstreamCeiling(ctx, db, reserved[3].ID))
+			var outstanding model.UpstreamCostReservation
+			require.NoError(t, db.First(&outstanding, "id = ?", reserved[3].ID).Error)
+			require.Equal(t, "held", outstanding.State, "overflow rolls back the ledger transition")
+			require.NoError(t, db.First(&state, "channel_id = ?", ch.Id).Error)
+			require.EqualValues(t, math.MaxInt64, state.ChargedMicros)
+			require.EqualValues(t, 70, state.HeldMicros)
 		})
 	}
 }
