@@ -36,6 +36,9 @@ func (d denySupplierTransport) RoundTrip(*http.Request) (*http.Response, error) 
 
 func TestCredentialRoutesAuthenticateAuthorizeAndRejectUnsupported(t *testing.T) {
 	// Keep the real revocation path, but make any accidental provider request fail locally.
+	if service.GetHttpClient() == nil {
+		service.InitHttpClient()
+	}
 	if client := service.GetHttpClient(); client != nil {
 		original := client.Transport
 		client.Transport = denySupplierTransport{t}
