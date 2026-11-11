@@ -13,6 +13,7 @@ import (
 
 	common2 "github.com/QuantumNous/new-api/common"
 	appconstant "github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/constant"
@@ -487,7 +488,18 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 
 	common2.SetContextKey(c, appconstant.ContextKeyUpstreamRequestOrigin, req.URL.Scheme+"://"+req.URL.Host)
 	req = req.WithContext(c.Request.Context())
+	budgetAttempt, budgetErr := service.BeginUpstreamBudget(c, req, info.ChannelId, info.ChannelType)
+	if budgetErr != nil {
+		return nil, types.NewErrorWithStatusCode(errors.New(i18n.T(c, i18n.MsgUpstreamBudgetDenied)), types.ErrorCodeInvalidRequest, http.StatusServiceUnavailable, types.ErrOptionWithSkipRetry())
+	}
 	resp, err := relayClient.Do(req)
+	if budgetAttempt != nil {
+		if err != nil {
+			budgetAttempt.Finish()
+		} else {
+			budgetAttempt.BindResponse(resp)
+		}
+	}
 	if err != nil {
 		safeErr := common2.SafeOutboundError(err)
 		logger.LogError(c, fmt.Sprintf("event=upstream_request_failed channel_id=%d channel_type=%d reason=%s", info.ChannelId, info.ChannelType, safeErr.Error()))

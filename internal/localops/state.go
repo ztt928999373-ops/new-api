@@ -430,7 +430,18 @@ func Restore(state, databaseBackup, keyBackup string) error {
 	if _, err = restored.RotateKEK(context.Background()); err != nil {
 		return ErrOperation
 	}
-	if migrate(state, m) != nil || verify(state, m) != nil {
+	if migrate(state, m) != nil {
+		return ErrOperation
+	}
+	// A restored snapshot cannot know supplier charges incurred after it was
+	// taken. Keep channel opt-in markers but freeze admission until reconciled.
+	db, closeDB, err := openDatabase(filepath.Join(state, databaseName))
+	if err != nil {
+		return ErrOperation
+	}
+	err = db.Model(&model.UpstreamBudget{}).Where("enabled = ?", true).Update("enabled", false).Error
+	closeDB()
+	if err != nil || verify(state, m) != nil {
 		return ErrOperation
 	}
 	m.DatabaseSHA256 = ""

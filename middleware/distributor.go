@@ -562,6 +562,7 @@ func getTaskOriginModelName(c *gin.Context) string {
 }
 
 func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, modelName string) *types.NewAPIError {
+	c.Set(service.UpstreamBudgetManagedKey, channel != nil && channel.CredentialRef != "")
 	// A retry may switch from a managed channel to a legacy channel. Release
 	// the previous lease even when the next channel has no credential binding.
 	service.ReleaseChannelCredentialRequest(c)

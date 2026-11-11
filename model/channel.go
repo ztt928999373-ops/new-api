@@ -59,6 +59,8 @@ type Channel struct {
 
 	// cache info
 	Keys []string `json:"-" gorm:"-"`
+
+	UpstreamBudgetEnabled bool `json:"-"`
 }
 
 const ChannelStatusReasonAllKeysDisabled = "All keys are disabled"
