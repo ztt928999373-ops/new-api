@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -26,7 +27,21 @@ import (
 	gormlogger "gorm.io/gorm/logger"
 )
 
+type denySupplierTransport struct{ t *testing.T }
+
+func (d denySupplierTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	d.t.Error("unexpected supplier request: outbound transport is blocked")
+	return nil, errors.New("synthetic outbound denied")
+}
+
 func TestCredentialRoutesAuthenticateAuthorizeAndRejectUnsupported(t *testing.T) {
+	// Keep the real revocation path, but make any accidental provider request fail locally.
+	if client := service.GetHttpClient(); client != nil {
+		original := client.Transport
+		client.Transport = denySupplierTransport{t}
+		t.Cleanup(func() { client.Transport = original })
+	}
+
 	oldType := common.MainDatabaseType()
 	common.SetMainDatabaseType(common.DatabaseTypeSQLite)
 	t.Cleanup(func() { common.SetMainDatabaseType(oldType) })
@@ -75,6 +90,11 @@ func TestCredentialRoutesAuthenticateAuthorizeAndRejectUnsupported(t *testing.T)
 		require.NoError(t, db.AutoMigrate(&model.Model{}, &model.Vendor{}, &model.Log{}, &model.QuotaData{}))
 		require.NoError(t, db.Create(&model.Log{UserId: 1, CreatedAt: common.GetTimestamp(), Content: "F1-other-user-only", Username: "F1-other-user-only"}).Error)
 		require.NoError(t, db.Create(&model.QuotaData{UserID: 1, CreatedAt: common.GetTimestamp(), Username: "F1-other-user-only"}).Error)
+		for _, id := range []int{2, 3} {
+			marker := fmt.Sprintf("F1-own-user-%d", id)
+			require.NoError(t, db.Create(&model.Log{UserId: id, CreatedAt: common.GetTimestamp(), Content: marker, Username: marker}).Error)
+			require.NoError(t, db.Create(&model.QuotaData{UserID: id, CreatedAt: common.GetTimestamp(), Username: marker}).Error)
+		}
 		api := gin.New()
 		SetApiRouter(api)
 		for _, tc := range []struct {
@@ -108,7 +128,11 @@ func TestCredentialRoutesAuthenticateAuthorizeAndRejectUnsupported(t *testing.T)
 		for _, endpoint := range []string{"/api/channel/", "/api/channel/credentials/" + platform.ID, "/api/models/", "/api/log/", "/api/data/", "/api/log/self", "/api/data/self"} {
 			for _, role := range []int{0, common.RoleCommonUser, common.RoleAdminUser, common.RoleRootUser} {
 				t.Run(fmt.Sprintf("%s/role=%d", endpoint, role), func(t *testing.T) {
-					req := httptest.NewRequest(http.MethodGet, endpoint, nil)
+					requestPath := endpoint
+					if strings.HasPrefix(endpoint, "/api/data/") || strings.HasPrefix(endpoint, "/api/log/") {
+						requestPath += fmt.Sprintf("?start_timestamp=%d&end_timestamp=%d", common.GetTimestamp()-3600, common.GetTimestamp()+3600)
+					}
+					req := httptest.NewRequest(http.MethodGet, requestPath, nil)
 					if role != 0 {
 						req.Header.Set("Authorization", "Bearer "+tokens[role])
 					}
@@ -127,6 +151,18 @@ func TestCredentialRoutesAuthenticateAuthorizeAndRejectUnsupported(t *testing.T)
 					require.NoError(t, common.Unmarshal(w.Body.Bytes(), &payload))
 					require.Equal(t, want == http.StatusOK, payload.Success, w.Body.String())
 					if role != common.RoleRootUser && strings.HasSuffix(endpoint, "/self") {
+						if role != 0 {
+							ownID := 3
+							if role == common.RoleAdminUser {
+								ownID = 2
+							}
+							require.Contains(t, w.Body.String(), fmt.Sprintf("F1-own-user-%d", ownID))
+							otherID := 2
+							if ownID == 2 {
+								otherID = 3
+							}
+							require.NotContains(t, w.Body.String(), fmt.Sprintf("F1-own-user-%d", otherID))
+						}
 						require.NotContains(t, w.Body.String(), "F1-other-user-only")
 					}
 				})

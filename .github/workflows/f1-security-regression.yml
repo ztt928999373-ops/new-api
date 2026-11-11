@@ -1,13 +1,13 @@
 name: F1 synthetic security regression
 on:
   pull_request:
-    types: [opened, synchronize]
+    types: [opened, synchronize, reopened, ready_for_review]
     branches: [product/v1]
 permissions:
   contents: read
 jobs:
   security:
-    if: github.event.pull_request.draft == true && github.event.pull_request.head.ref == 'test/v1-f1-security' && github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event.pull_request.head.ref == 'test/v1-f1-security' && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     env:
