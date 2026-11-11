@@ -543,8 +543,14 @@ func TestAccessTokenAuditsResultsAndExcludesBrowserSessions(t *testing.T) {
 		assert.Equal(t, tc.success, access.Success)
 		assert.Equal(t, tc.status, access.Status)
 		assert.Equal(t, user.Id, access.UserId)
-		assert.Equal(t, "192.0.2.8", access.Ip)
-		assert.Equal(t, "audit-test-client", access.UserAgent)
+		if tc.status == http.StatusForbidden {
+			assert.Equal(t, "auth.denied", access.Action)
+			assert.Empty(t, access.Ip)
+			assert.Empty(t, access.UserAgent, "denial audit excludes attacker-controlled headers")
+		} else {
+			assert.Equal(t, "192.0.2.8", access.Ip)
+			assert.Equal(t, "audit-test-client", access.UserAgent)
+		}
 		assert.NotContains(t, access.Route, "sensitive-id")
 	}
 	var operationCount int64
@@ -670,7 +676,7 @@ func TestAuditRoleVisibilityAndPermissions(t *testing.T) {
 				}
 			}
 			require.NoError(t, common.Unmarshal(response.Body.Bytes(), &result))
-			assert.Equal(t, 2, result.Data.Total)
+			assert.Equal(t, 3, result.Data.Total, "two seeded visible rows plus the denied admin session event")
 			require.Len(t, result.Data.Items, 1)
 			assert.Equal(t, 10, result.Data.Items[0].ActorRole)
 			assert.NotContains(t, response.Body.String(), "root-only")
@@ -688,7 +694,7 @@ func TestAuditRoleVisibilityAndPermissions(t *testing.T) {
 	assert.Contains(t, rootSelf.Body.String(), `"actor_role":100`)
 	assert.NotContains(t, rootSelf.Body.String(), "admin_info")
 	rootAll := auditRequest(router, "GET", "/api/audit?category=security", rootToken)
-	assert.Contains(t, rootAll.Body.String(), `"total":7`)
+	assert.Contains(t, rootAll.Body.String(), `"total":8`)
 	assert.Contains(t, rootAll.Body.String(), "root-only")
 	require.NoError(t, authz.SetUserPermissions(admin.Id, authz.PermissionsMap{authz.ResourceAudit: {authz.ActionRead: false}}))
 	for _, credential := range []string{pat, jwt} {
