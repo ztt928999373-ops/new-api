@@ -11,11 +11,15 @@ import (
 )
 
 func TestMockHTTPCostSource(t *testing.T) {
-	for _, scenario := range []string{"valid", "redirect", "oversized", "currency", "precision", "exponent", "project", "paging", "cancelled", "unauthorized", "duplicate_key", "missing_paging", "missing_time"} {
+	for _, scenario := range []string{"valid", "redirect", "oversized", "currency", "precision", "exponent", "project", "paging", "cancelled", "timeout", "unauthorized", "duplicate_key", "missing_paging", "missing_time"} {
 		t.Run(scenario, func(t *testing.T) {
 			calls := 0
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				calls++
+				if scenario == "timeout" {
+					<-r.Context().Done()
+					return
+				}
 				require.Equal(t, "GET", r.Method)
 				require.Equal(t, "/v1/organization/costs", r.URL.Path)
 				require.Equal(t, "Bearer synthetic-readonly-costs", r.Header.Get("Authorization"))
@@ -79,4 +83,28 @@ func TestMockHTTPCostSource(t *testing.T) {
 		_, err := NewMockHTTPCostSource(target, "org", "project", 100, 200)
 		require.Error(t, err)
 	}
+}
+
+func TestMockHTTPCompleteSnapshot(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		require.Equal(t, "1d", r.URL.Query().Get("bucket_width"))
+		if r.URL.Query().Get("page") == "" {
+			_, _ = w.Write([]byte(`{"object":"page","has_more":true,"next_page":"second","data":[{"start_time":100,"end_time":150,"results":[{"object":"organization.costs.result","project_id":"project","amount":{"currency":"usd","value":0.000007}}]}]}`))
+		} else {
+			require.Equal(t, "second", r.URL.Query().Get("page"))
+			_, _ = w.Write([]byte(`{"object":"page","has_more":false,"next_page":null,"data":[{"start_time":150,"end_time":200,"results":[{"object":"organization.costs.result","project_id":"project","amount":{"currency":"usd","value":0.000003}}]}]}`))
+		}
+	}))
+	defer server.Close()
+	source, err := NewMockHTTPCostSource(server.URL, "org", "project", 100, 200)
+	require.NoError(t, err)
+	snapshot, err := CollectCostSnapshot(context.Background(), source, "org", "project", 100, 200, time.Unix(300, 0), nil)
+	require.NoError(t, err)
+	require.True(t, snapshot.Complete)
+	require.Equal(t, 2, calls)
+	require.Len(t, snapshot.Buckets, 2)
+	require.EqualValues(t, 7, snapshot.Buckets[0].USDmicros)
+	require.EqualValues(t, 3, snapshot.Buckets[1].USDmicros)
 }
