@@ -7,13 +7,12 @@ import (
 	"encoding/hex"
 	"io"
 	"os"
+	"strconv"
 
 	"github.com/QuantumNous/new-api/common"
-	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/credentialcrypto"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 type BackupReceipt struct {
@@ -46,8 +45,8 @@ func (s *Store) MigrateDisabledOpenAI(ctx context.Context, channelID int, backup
 	}
 	var ref string
 	err := s.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var ch model.Channel
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&ch, channelID).Error; err != nil {
+		ch, err := model.LockChannelForCredentialMigration(tx, channelID)
+		if err != nil {
 			return err
 		}
 		if ch.CredentialRef != "" {
@@ -58,7 +57,7 @@ func (s *Store) MigrateDisabledOpenAI(ctx context.Context, channelID int, backup
 			ref = ch.CredentialRef
 			return nil
 		}
-		if ch.Type != constant.ChannelTypeOpenAI || ch.Status != common.ChannelStatusManuallyDisabled || ch.Key == "" || ch.Other != "" || ch.OtherSettings != "" || (ch.Setting != nil && *ch.Setting != "") || (ch.HeaderOverride != nil && *ch.HeaderOverride != "") || (ch.ParamOverride != nil && *ch.ParamOverride != "") {
+		if !OpenAIManagedConfiguration(ch) || ch.Status != common.ChannelStatusManuallyDisabled || ValidateOpenAIKeyBundle(ch, ch.Key) != nil {
 			return credentialcrypto.ErrUnavailable
 		}
 		local := *s
@@ -79,12 +78,16 @@ func (s *Store) MigrateDisabledOpenAI(ctx context.Context, channelID int, backup
 		if string(plain) != ch.Key {
 			return credentialcrypto.ErrUnavailable
 		}
-		result := tx.Model(&model.Channel{}).Where("id = ? AND (credential_ref = ? OR credential_ref IS NULL)", channelID, "").Updates(map[string]any{"key": "", "credential_ref": h.ID})
+		// The row lock and offline ops lock fence supported legacy writers.
+		result := tx.Model(&model.Channel{}).Where("id = ? AND status = ? AND (credential_ref = ? OR credential_ref IS NULL)", channelID, common.ChannelStatusManuallyDisabled, "").Updates(map[string]any{"key": "", "credential_ref": h.ID})
 		if result.Error != nil {
 			return result.Error
 		}
 		if result.RowsAffected != 1 {
 			return credentialcrypto.ErrUnavailable
+		}
+		if err := tx.Create(&AccessEvent{CredentialID: h.ID, Version: 1, ActorID: "migration:channel:" + strconv.Itoa(channelID), Outcome: "channel_migrated"}).Error; err != nil {
+			return err
 		}
 		ref = h.ID
 		return nil

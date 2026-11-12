@@ -25,6 +25,8 @@ func Dispatch(args []string) (handled bool, release func(), err error) {
 	databaseBackup := flags.String("database-backup", "", "")
 	keyBackup := flags.String("key-backup", "", "")
 	port := flags.Int("port", 3000, "")
+	channelID := flags.Int("channel-id", 0, "")
+	restoreCheck := flags.String("restore-check", "", "")
 	if flags.Parse(args[2:]) != nil || flags.NArg() != 0 {
 		return true, nil, ErrOperation
 	}
@@ -46,6 +48,8 @@ func Dispatch(args []string) (handled bool, release func(), err error) {
 		return true, nil, Backup(absolute, *databaseBackup, *keyBackup)
 	case "restore":
 		return true, nil, Restore(absolute, *databaseBackup, *keyBackup)
+	case "migrate-channel":
+		return true, nil, MigrateChannel(absolute, *channelID, *databaseBackup, *keyBackup, *restoreCheck)
 	case "serve":
 		if *port < 1 || *port > 65535 {
 			return true, nil, ErrOperation

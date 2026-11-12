@@ -64,7 +64,10 @@ func acquireChannelForRequest(ctx context.Context, ch *model.Channel, userID int
 	if ch.CredentialRef == "" {
 		return ch, nil, nil
 	}
-	if (ch.Type != constant.ChannelTypeOpenAI && ch.Type != constant.ChannelTypeAli) || ch.Other != "" || ch.OtherSettings != "" || (ch.Setting != nil && *ch.Setting != "") || (ch.HeaderOverride != nil && *ch.HeaderOverride != "") || (ch.ParamOverride != nil && *ch.ParamOverride != "") {
+	if ch.Type == constant.ChannelTypeOpenAI && !credentials.OpenAIManagedConfiguration(*ch) {
+		return nil, nil, credentialcrypto.ErrUnavailable
+	}
+	if (ch.Type != constant.ChannelTypeOpenAI && ch.Type != constant.ChannelTypeAli) || (ch.Type == constant.ChannelTypeAli && (ch.Other != "" || ch.OtherSettings != "" || (ch.Setting != nil && *ch.Setting != "") || (ch.HeaderOverride != nil && *ch.HeaderOverride != "") || (ch.ParamOverride != nil && *ch.ParamOverride != ""))) {
 		return nil, nil, credentialcrypto.ErrUnavailable
 	}
 	r := channelCredentialResolver.Load()
@@ -103,8 +106,9 @@ func acquireChannelForRequest(ctx context.Context, ch *model.Channel, userID int
 }
 
 type channelRequestLease struct {
-	lease  *credentials.Lease
-	parent context.Context
+	lease     *credentials.Lease
+	parent    context.Context
+	reference string
 }
 
 const channelRequestLeaseKey = "supplier_credential_request_lease"
@@ -125,7 +129,7 @@ func BindChannelCredentialRequest(c *gin.Context, ch *model.Channel, userID int)
 		if ch.Type == constant.ChannelTypeAli {
 			c.Set("bailian_pilot_no_retry", true)
 		}
-		c.Set(channelRequestLeaseKey, channelRequestLease{lease: lease, parent: parent})
+		c.Set(channelRequestLeaseKey, channelRequestLease{lease: lease, parent: parent, reference: ch.CredentialRef})
 		c.Request = c.Request.WithContext(lease.Context())
 	}
 	return copy, nil

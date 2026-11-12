@@ -225,3 +225,44 @@ func TestStateLockChild(t *testing.T) {
 	fmt.Println("locked")
 	select {}
 }
+
+func TestColdChannelMigration(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	require.NoError(t, Initialize(source, "test"))
+	db, closeDB, err := openDatabase(filepath.Join(source, databaseName))
+	require.NoError(t, err)
+	ch := model.Channel{Type: constant.ChannelTypeOpenAI, Key: "synthetic-cold-one\nsynthetic-cold-two", Name: "synthetic-cold", Status: common.ChannelStatusManuallyDisabled, ChannelInfo: model.ChannelInfo{IsMultiKey: true, MultiKeySize: 2}}
+	require.NoError(t, db.Create(&ch).Error)
+	closeDB()
+	for round := range 2 {
+		dbDir, keyDir := filepath.Join(root, fmt.Sprintf("database-%d", round)), filepath.Join(root, fmt.Sprintf("keys-%d", round))
+		require.NoError(t, credentialcrypto.InitializeLocalDirectory(dbDir))
+		require.NoError(t, credentialcrypto.InitializeLocalDirectory(keyDir))
+		databaseBackup, keyBackup := filepath.Join(dbDir, "snapshot.db"), filepath.Join(keyDir, "ring")
+		restoreCheck := filepath.Join(root, fmt.Sprintf("restore-%d", round))
+		release, err := acquire(source)
+		require.NoError(t, err)
+		require.Error(t, MigrateChannel(source, ch.Id, databaseBackup, keyBackup, restoreCheck), "running state is never migrated or copied")
+		release()
+		require.NoError(t, MigrateChannel(source, ch.Id, databaseBackup, keyBackup, restoreCheck))
+		require.NoError(t, Check(source))
+		require.NoError(t, Check(restoreCheck))
+		db, closeDB, err := openDatabase(filepath.Join(source, databaseName))
+		require.NoError(t, err)
+		var migrated model.Channel
+		require.NoError(t, db.First(&migrated, ch.Id).Error)
+		require.Empty(t, migrated.Key)
+		require.NotEmpty(t, migrated.CredentialRef)
+		require.Equal(t, common.ChannelStatusManuallyDisabled, migrated.Status)
+		var count int64
+		require.NoError(t, db.Model(&credentials.Head{}).Count(&count).Error)
+		require.EqualValues(t, 1, count, "repeated migration does not duplicate credentials")
+		p, err := credentialcrypto.NewLocalFileKeyProvider(filepath.Join(source, ringName))
+		require.NoError(t, err)
+		store := &credentials.Store{DB: db, Environment: "test", ProviderID: "local-test", Provider: p}
+		r := &credentials.Resolver{Environment: "test", Repository: store, Providers: map[string]credentialcrypto.KeyProvider{"local-test": p}, Audit: store}
+		require.NoError(t, r.WithCredential(context.Background(), credentials.Principal{TenantID: "default", UserID: "synthetic-check", PlatformOperator: true}, migrated.CredentialRef, 1, "relay", func(secret []byte) error { require.Equal(t, ch.Key, string(secret)); return nil }))
+		closeDB()
+	}
+}
