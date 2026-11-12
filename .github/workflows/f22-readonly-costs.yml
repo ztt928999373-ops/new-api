@@ -67,6 +67,3 @@ jobs:
           name: f22-cost-acceptance
           path: ${{ runner.temp }}/f22-logs/
           retention-days: 14
-
-
-
