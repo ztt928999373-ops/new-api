@@ -23,6 +23,16 @@ func MigrateChannel(state string, channelID int, databaseBackup, keyBackup, rest
 		return err
 	}
 	defer release()
+	db, closeDB, err := openDatabase(filepath.Join(state, databaseName))
+	if err != nil {
+		return err
+	}
+	defer closeDB()
+	var ch model.Channel
+	if db.First(&ch, channelID).Error != nil || ch.Status != common.ChannelStatusManuallyDisabled ||
+		!credentials.OpenAIManagedConfiguration(ch) || (ch.CredentialRef == "" && credentials.ValidateOpenAIKeyBundle(ch, ch.Key) != nil) {
+		return ErrOperation
+	}
 	if err := backupLocked(state, databaseBackup, keyBackup); err != nil {
 		return err
 	}
@@ -36,15 +46,6 @@ func MigrateChannel(state string, channelID int, databaseBackup, keyBackup, rest
 	p, err := credentialcrypto.NewLocalFileKeyProvider(filepath.Join(state, ringName))
 	if err != nil {
 		return err
-	}
-	db, closeDB, err := openDatabase(filepath.Join(state, databaseName))
-	if err != nil {
-		return err
-	}
-	defer closeDB()
-	var ch model.Channel
-	if db.First(&ch, channelID).Error != nil || ch.Status != common.ChannelStatusManuallyDisabled {
-		return ErrOperation
 	}
 	digest, err := fileHash(databaseBackup)
 	if err != nil {

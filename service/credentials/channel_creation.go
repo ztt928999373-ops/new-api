@@ -3,6 +3,8 @@ package credentials
 
 import (
 	"context"
+	"net"
+	"net/url"
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
@@ -24,7 +26,7 @@ func ValidateOpenAIKeyBundle(ch model.Channel, secret string) error {
 		return credentialcrypto.ErrUnavailable
 	}
 	for _, key := range keys {
-		if key == "" || len(key) > 512 || strings.ContainsAny(key, "\r\t ") {
+		if key == "" || len(key) > 512 || strings.ContainsAny(key, "\r\t \"\\[]{}") {
 			return credentialcrypto.ErrUnavailable
 		}
 	}
@@ -36,6 +38,18 @@ func ValidateOpenAIKeyBundle(ch model.Channel, secret string) error {
 func OpenAIManagedConfiguration(ch model.Channel) bool {
 	if ch.Type != constant.ChannelTypeOpenAI || ch.Other != "" || common.TLSInsecureSkipVerify || common.DebugEnabled {
 		return false
+	}
+	if ch.BaseURL != nil && *ch.BaseURL != "" {
+		target, err := url.Parse(*ch.BaseURL)
+		if err != nil || target.Hostname() == "" || target.User != nil || target.RawQuery != "" || target.Fragment != "" {
+			return false
+		}
+		if target.Scheme != "https" {
+			ip := net.ParseIP(target.Hostname())
+			if target.Scheme != "http" || ip == nil || !ip.IsLoopback() {
+				return false
+			}
+		}
 	}
 	// Accept the current form's inert defaults, not arbitrary JSON configuration.
 	for _, raw := range []string{ch.OtherSettings, valueOrEmpty(ch.Setting)} {

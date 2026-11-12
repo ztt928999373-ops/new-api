@@ -183,7 +183,7 @@ func TestCredentialRoutesAuthenticateAuthorizeAndRejectUnsupported(t *testing.T)
 		{"root metadata allowed", http.MethodGet, "/api/channel/credentials/" + platform.ID, "", common.RoleRootUser, 200},
 		{"root cannot read another BYOK", http.MethodGet, "/api/channel/credentials/" + byok.ID, "", common.RoleRootUser, 503},
 		{"managed copy rejected", http.MethodPost, fmt.Sprintf("/api/channel/copy/%d", managed.Id), "", common.RoleRootUser, 503},
-		{"legacy copy remains allowed", http.MethodPost, fmt.Sprintf("/api/channel/copy/%d", legacy.Id), "", common.RoleRootUser, 200},
+		{"legacy plaintext copy rejected", http.MethodPost, fmt.Sprintf("/api/channel/copy/%d", legacy.Id), "", common.RoleRootUser, 503},
 		{"managed balance rejected", http.MethodGet, fmt.Sprintf("/api/channel/update_balance/%d", managed.Id), "", common.RoleRootUser, 503},
 		{"managed metadata", http.MethodGet, fmt.Sprintf("/api/channel/credentials/channel/%d", managed.Id), "", common.RoleRootUser, 200},
 		{"legacy metadata", http.MethodGet, fmt.Sprintf("/api/channel/credentials/channel/%d", legacy.Id), "", common.RoleRootUser, 200},

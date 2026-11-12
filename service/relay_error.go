@@ -86,6 +86,12 @@ func ProcessChannelError(c *gin.Context, channelError types.ChannelError, err *t
 			}
 			failure.Metadata = nil
 			err.RelayError = failure
+			if code := strings.ReplaceAll(string(err.GetErrorCode()), key, "[redacted]"); code != string(err.GetErrorCode()) {
+				// The upstream-controlled code is also retained privately by the
+				// error value and may enter admin_info independently of its body.
+				failure.Code = code
+				*err = *types.WithOpenAIError(failure, err.StatusCode)
+			}
 		}
 	}
 	upstreamURLs := common.UpstreamAddresses(c)

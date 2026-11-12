@@ -169,7 +169,7 @@ func TestCopyChannelRejectsInvalidLegacyProxySettings(t *testing.T) {
 	require.NoError(t, err)
 	setting := string(settingBytes)
 	origin := &model.Channel{
-		Type:    constant.ChannelTypeOpenAI,
+		Type:    constant.ChannelTypeAnthropic,
 		Name:    "legacy proxy channel",
 		Key:     "test-key",
 		Models:  "gpt-test",
