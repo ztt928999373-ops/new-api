@@ -40,12 +40,16 @@ const calendarLocales = {
 } as const
 
 type DatePickerProps = {
+  id?: string
+  'aria-label'?: string
   selected: Date | undefined
   onSelect: (date: Date | undefined) => void
   placeholder?: string
 }
 
 export function DatePicker({
+  id,
+  'aria-label': ariaLabel,
   selected,
   onSelect,
   placeholder,
@@ -59,6 +63,8 @@ export function DatePicker({
       <PopoverTrigger
         render={
           <Button
+            id={id}
+            aria-label={ariaLabel}
             variant='outline'
             data-empty={!selected}
             className='data-[empty=true]:text-muted-foreground w-[240px] justify-start text-start font-normal'

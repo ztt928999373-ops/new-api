@@ -26,6 +26,7 @@ import {
   waitFor,
   within,
 } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { AxiosError, type AxiosResponse } from 'axios'
 import i18next from 'i18next'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
@@ -149,6 +150,20 @@ async function chooseChannel(id = '1') {
   fireEvent.change(screen.getByLabelText('Channel'), { target: { value: id } })
 }
 
+async function chooseStatementDate(label: string, month: string, day: RegExp) {
+  await userEvent.click(screen.getByRole('button', { name: label }))
+  await userEvent.selectOptions(
+    screen.getByRole('combobox', { name: 'Choose the Year' }),
+    '2026'
+  )
+  await userEvent.selectOptions(
+    screen.getByRole('combobox', { name: 'Choose the Month' }),
+    month
+  )
+  await userEvent.click(screen.getByRole('button', { name: day }))
+  await userEvent.keyboard('{Escape}')
+}
+
 it('shows exact internal and unverified accounting sources without key disclosure or mutation controls', async () => {
   showPage()
   await chooseChannel()
@@ -186,12 +201,8 @@ it('switches channels and sends time/state/alert filters to the correct GET endp
   fireEvent.change(screen.getByLabelText('Statement alerts'), {
     target: { value: 'true' },
   })
-  fireEvent.change(screen.getByLabelText('Recorded from'), {
-    target: { value: '2026-01-01' },
-  })
-  fireEvent.change(screen.getByLabelText('Recorded through'), {
-    target: { value: '2026-01-02' },
-  })
+  await chooseStatementDate('Recorded from', '0', /January 1st, 2026/)
+  await chooseStatementDate('Recorded through', '0', /January 2nd, 2026/)
   await waitFor(() =>
     expect(api.get).toHaveBeenCalledWith(
       '/api/channel/1/upstream-budget/statements',
@@ -213,9 +224,7 @@ it('switches channels and sends time/state/alert filters to the correct GET endp
       expect.any(Object)
     )
   )
-  fireEvent.change(screen.getByLabelText('Recorded from'), {
-    target: { value: '2026-02-01' },
-  })
+  await chooseStatementDate('Recorded from', '1', /February 1st, 2026/)
   expect(await screen.findByText('Invalid statement date range')).toBeVisible()
   expect(
     screen.queryByRole('table', { name: 'Structured supplier statements' })

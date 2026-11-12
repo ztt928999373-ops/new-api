@@ -7494,10 +7494,10 @@
     "Above reserved ceiling": "超出预留费用上限",
     "Estimate missing": "缺少费用估算",
     "Above operator estimate": "高于操作员估算",
-    "Supplier statement filters": "Supplier statement filters",
+    "Supplier statement filters": "供应商账单筛选",
     "YYYY-MM-DD HH:mm:ss": "YYYY-MM-DD HH:mm:ss",
-    "Log ID": "Log ID",
-    "Log type": "Log type"
+    "Log ID": "日志编号",
+    "Log type": "日志类型"
   },
   "Secure credential": "安全凭据",
   "Prepare secure OpenAI channel": "准备安全 OpenAI 渠道",

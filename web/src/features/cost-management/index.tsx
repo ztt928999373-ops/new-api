@@ -22,13 +22,13 @@ import { isAxiosError } from 'axios'
 import { useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 
+import { DatePicker } from '@/components/date-picker'
 import { EmptyState } from '@/components/empty-state'
 import { ErrorState } from '@/components/error-state'
 import { SectionPageLayout } from '@/components/layout'
 import { LoadingState } from '@/components/loading-state'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select'
 import { toIntlLocale } from '@/i18n/languages'
@@ -280,12 +280,16 @@ export function CostManagement() {
                     <div className='flex flex-wrap items-end gap-3'>
                       <div className='space-y-1'>
                         <Label htmlFor='cost-start'>{t('Recorded from')}</Label>
-                        <Input
+                        <DatePicker
                           id='cost-start'
-                          type='date'
-                          value={startDate}
-                          onChange={(event) => {
-                            setStartDate(event.target.value)
+                          aria-label={t('Recorded from')}
+                          selected={
+                            startDate ? dayjs(startDate).toDate() : undefined
+                          }
+                          onSelect={(date) => {
+                            setStartDate(
+                              date ? dayjs(date).format('YYYY-MM-DD') : ''
+                            )
                             setPage(1)
                           }}
                         />
@@ -294,12 +298,16 @@ export function CostManagement() {
                         <Label htmlFor='cost-end'>
                           {t('Recorded through')}
                         </Label>
-                        <Input
+                        <DatePicker
                           id='cost-end'
-                          type='date'
-                          value={endDate}
-                          onChange={(event) => {
-                            setEndDate(event.target.value)
+                          aria-label={t('Recorded through')}
+                          selected={
+                            endDate ? dayjs(endDate).toDate() : undefined
+                          }
+                          onSelect={(date) => {
+                            setEndDate(
+                              date ? dayjs(date).format('YYYY-MM-DD') : ''
+                            )
                             setPage(1)
                           }}
                         />
