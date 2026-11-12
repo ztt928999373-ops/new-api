@@ -1,0 +1,67 @@
+name: V1 security and cost regression
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches: [product/v1]
+  push:
+    branches: [product/v1]
+permissions:
+  contents: read
+concurrency:
+  group: v1-security-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  security:
+    name: V1 security regression (3 databases)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GOWORK: 'off'
+      CGO_ENABLED: '1'
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: synthetic-test-only
+          MYSQL_ROOT_HOST: '%'
+          MYSQL_DATABASE: credential_test
+        ports: ['23316:3306']
+        options: --health-cmd="mysqladmin ping -h localhost -psynthetic-test-only" --health-interval=10s --health-timeout=5s --health-retries=12
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: synthetic-test-only
+          POSTGRES_DB: credential_test
+        ports: ['25436:5432']
+        options: --health-cmd="pg_isready -U postgres -d credential_test" --health-interval=10s --health-timeout=5s --health-retries=12
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: go.mod
+      - name: Security, login audit and financial invariants
+        env:
+          SUANJIE_TEST_MYSQL_CONTAINER: ${{ job.services.mysql.id }}
+          SUANJIE_TEST_POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+          SUANJIE_TEST_DATABASES: local-synthetic
+        run: |
+          mkdir -p "$RUNNER_TEMP/v1-security" web/dist
+          touch web/dist/index.html
+          { git rev-parse HEAD; go version; } > "$RUNNER_TEMP/v1-security/environment.txt"
+          go vet ./...
+          go test -json -race -count=1 ./router -run '^TestPasswordLoginFailureAudit' > "$RUNNER_TEMP/v1-security/login-audit.jsonl"
+          go test -json -race -count=1 ./middleware -run '^TestDashboardDenialAudit' > "$RUNNER_TEMP/v1-security/denial-audit.jsonl"
+          go test -json -race -count=1 ./model -run '^TestOverallChannelStatusIndependentOfCredentials$' > "$RUNNER_TEMP/v1-security/channel-status.jsonl"
+          go test -json -race -count=1 ./service/credentials > "$RUNNER_TEMP/v1-security/credentials.jsonl"
+          go test -json -race -count=1 ./router -run '^(TestUpstreamBudget|TestSupplierCost|TestAggregateCostPublication|TestMockCost|TestMergedMockCost)' > "$RUNNER_TEMP/v1-security/costs-routing.jsonl"
+          go test -json -race -count=1 ./service -run '^(TestReadOnlyCostSnapshot|TestMockHTTP)' > "$RUNNER_TEMP/v1-security/http-snapshot.jsonl"
+          go test -json -count=1 ./internal/localops > "$RUNNER_TEMP/v1-security/localops.jsonl"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v1-security-regression
+          path: ${{ runner.temp }}/v1-security/
+          retention-days: 14
