@@ -4,6 +4,7 @@ package localops
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"os/exec"
@@ -56,7 +57,10 @@ func TestLocalInstallBackupRestore(t *testing.T) {
 	bill, err := model.ImportSupplierCost(context.Background(), db, ch.Id, model.SupplierCostInput{Account: "synthetic-recovery-account", Bill: "synthetic-recovery-bill", Line: "one", Currency: "USD", ReservationID: reservation.ID, ActualMicros: 1, EstimatedMicros: &estimate, Evidence: "synthetic-recovery-evidence", Confirmed: true})
 	require.NoError(t, err)
 	require.Equal(t, "in_flight", bill.State)
-	version := model.AggregateCostVersion{ID: strings.Repeat("b", 64), Scope: strings.Repeat("c", 64), Revision: 1, Digest: strings.Repeat("d", 64), Payload: "synthetic-aggregate-observation", State: "initial_mock_observation"}
+	payload, err := common.Marshal([]map[string]any{{"Organization": "synthetic-org", "Project": "synthetic-project", "Start": 100, "End": 200, "USDmicros": 7}})
+	require.NoError(t, err)
+	digest := sha256.Sum256(payload)
+	version := model.AggregateCostVersion{ID: strings.Repeat("b", 64), Scope: strings.Repeat("c", 64), Revision: 1, Digest: fmt.Sprintf("%x", digest), Payload: string(payload), State: "initial_mock_observation"}
 	require.NoError(t, db.Create(&model.AggregateCostHead{Scope: version.Scope, Revision: 1, Digest: version.Digest}).Error)
 	require.NoError(t, db.Create(&version).Error)
 	// Model an earlier supported snapshot missing an additive business table.
