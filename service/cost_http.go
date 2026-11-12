@@ -10,10 +10,12 @@ import (
 	"net/netip"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/shopspring/decimal"
+	"github.com/tidwall/gjson"
 )
 
 // MockHTTPCostSource cannot target a supplier. Only literal loopback HTTP is
@@ -64,13 +66,16 @@ func (s *MockHTTPCostSource) ReadCosts(ctx context.Context, cursor string) (Cost
 	if err != nil || len(data) > 1<<20 {
 		return CostPage{}, bad
 	}
+	if !gjson.ValidBytes(data) || !uniqueCostResponseKeys(gjson.ParseBytes(data), 0) {
+		return CostPage{}, bad
+	}
 	var body struct {
 		Object  string `json:"object"`
-		HasMore bool   `json:"has_more"`
+		HasMore *bool  `json:"has_more"`
 		Next    string `json:"next_page"`
 		Data    []struct {
-			Start   int64 `json:"start_time"`
-			End     int64 `json:"end_time"`
+			Start   *int64 `json:"start_time"`
+			End     *int64 `json:"end_time"`
 			Results []struct {
 				Object  string `json:"object"`
 				Project string `json:"project_id"`
@@ -81,12 +86,12 @@ func (s *MockHTTPCostSource) ReadCosts(ctx context.Context, cursor string) (Cost
 			} `json:"results"`
 		} `json:"data"`
 	}
-	if common.Unmarshal(data, &body) != nil || body.Object != "page" || len(body.Data) > 1000 || len(body.Next) > 1024 || body.HasMore != (body.Next != "") {
+	if common.Unmarshal(data, &body) != nil || body.Object != "page" || body.HasMore == nil || len(body.Data) > 1000 || len(body.Next) > 1024 || *body.HasMore != (body.Next != "") {
 		return CostPage{}, bad
 	}
 	page := CostPage{Next: body.Next}
 	for _, bucket := range body.Data {
-		if len(bucket.Results) != 1 || bucket.Start < s.start || bucket.End > s.end || bucket.End <= bucket.Start {
+		if len(bucket.Results) != 1 || bucket.Start == nil || bucket.End == nil || *bucket.Start < s.start || *bucket.End > s.end || *bucket.End <= *bucket.Start {
 			return CostPage{}, bad
 		}
 		result := bucket.Results[0]
@@ -108,7 +113,32 @@ func (s *MockHTTPCostSource) ReadCosts(ctx context.Context, cursor string) (Cost
 		if !micros.Equal(micros.Truncate(0)) || micros.GreaterThan(decimal.NewFromInt(9_000_000_000_000_000)) {
 			return CostPage{}, bad
 		}
-		page.Buckets = append(page.Buckets, CostBucket{Organization: s.organization, Project: s.project, Start: bucket.Start, End: bucket.End, USDmicros: micros.IntPart()})
+		page.Buckets = append(page.Buckets, CostBucket{Organization: s.organization, Project: s.project, Start: *bucket.Start, End: *bucket.End, USDmicros: micros.IntPart()})
 	}
 	return page, nil
+}
+
+// Reject ambiguous keys before the codec can overwrite them. Matching is
+// case-insensitive, like Go's struct decoding. Nesting is deliberately bounded.
+func uniqueCostResponseKeys(value gjson.Result, depth int) bool {
+	if depth > 32 {
+		return false
+	}
+	valid := true
+	seen := map[string]bool{}
+	value.ForEach(func(key, child gjson.Result) bool {
+		if value.IsObject() {
+			name := strings.ToLower(key.String())
+			if seen[name] {
+				valid = false
+				return false
+			}
+			seen[name] = true
+		}
+		if child.IsObject() || child.IsArray() {
+			valid = uniqueCostResponseKeys(child, depth+1)
+		}
+		return valid
+	})
+	return valid
 }

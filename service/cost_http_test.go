@@ -11,7 +11,7 @@ import (
 )
 
 func TestMockHTTPCostSource(t *testing.T) {
-	for _, scenario := range []string{"valid", "redirect", "oversized", "currency", "precision", "exponent", "project", "paging", "cancelled", "unauthorized"} {
+	for _, scenario := range []string{"valid", "redirect", "oversized", "currency", "precision", "exponent", "project", "paging", "cancelled", "unauthorized", "duplicate_key", "missing_paging", "missing_time"} {
 		t.Run(scenario, func(t *testing.T) {
 			calls := 0
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -34,6 +34,12 @@ func TestMockHTTPCostSource(t *testing.T) {
 				}
 				body := `{"object":"page","has_more":false,"next_page":"","data":[{"start_time":100,"end_time":200,"results":[{"object":"organization.costs.result","project_id":"project","amount":{"currency":"usd","value":0.000007}}]}]}`
 				switch scenario {
+				case "duplicate_key":
+					body = strings.Replace(body, `"value":0.000007`, `"Value":9,"value":0.000007`, 1)
+				case "missing_paging":
+					body = strings.Replace(body, `"has_more":false,`, "", 1)
+				case "missing_time":
+					body = strings.Replace(body, `"start_time":100,`, "", 1)
 				case "currency":
 					body = strings.Replace(body, "usd", "cny", 1)
 				case "precision":
