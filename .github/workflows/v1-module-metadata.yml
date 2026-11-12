@@ -1,0 +1,43 @@
+name: V1 module metadata consistency
+on:
+  pull_request:
+    branches: [product/v1]
+    paths: ['**/go.mod', '**/go.sum', '.github/workflows/v1-module-metadata.yml']
+permissions:
+  contents: read
+concurrency:
+  group: v1-module-metadata-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  metadata:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        module: ['.', relaykit, tokenkit]
+    env:
+      GOWORK: 'off'
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: ${{ matrix.module }}/go.mod
+      - name: Verify tidy metadata without changing tracked files
+        working-directory: ${{ matrix.module }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/module-metadata" "$GITHUB_WORKSPACE/web/dist"
+          touch "$GITHUB_WORKSPACE/web/dist/index.html"
+          { git rev-parse HEAD; go version; } > "$RUNNER_TEMP/module-metadata/environment.txt"
+          go mod tidy -diff > "$RUNNER_TEMP/module-metadata/tidy.diff" 2> "$RUNNER_TEMP/module-metadata/tidy.stderr"
+      - name: Preserve exact proposed metadata diff
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: module-metadata-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/module-metadata/
+          retention-days: 14
