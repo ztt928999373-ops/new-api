@@ -13,29 +13,22 @@ function fixture(overrides = {}) {
   return {github, context, core, comments, notices};
 }
 
-test('review request is deduplicated by exact SHA and repeated on new SHA', async () => {
-  const f = fixture();
-  await manage(f); await manage(f);
-  assert.equal(f.comments.length, 1);
-  assert.match(f.comments[0].body, /@codex review/);
-  f.context.payload.pull_request.head.sha = 'def';
-  await manage(f);
-  assert.equal(f.comments.length, 2);
-});
-
-test('Draft, wrong base, closed PR and superseded event never request review', async () => {
-  for (const changes of [{draft: true}, {base: {ref: 'main'}}, {state: 'closed'}]) {
-    const f = fixture(changes); await manage(f); assert.equal(f.comments.length, 0);
+test('all PR events are notification-only and never write GitHub', async () => {
+  for (const eventName of ['pull_request_target', 'pull_request_review']) {
+    const f = fixture(); f.context.eventName = eventName;
+    f.github.rest.issues = new Proxy({}, {get() {throw Error('No GitHub writes allowed');}});
+    await manage(f); assert.equal(f.comments.length, 0);
   }
-  const f = fixture();
-  f.github.rest.pulls.get = async () => ({data: {...f.context.payload.pull_request, head: {sha: 'new'}}});
-  await manage(f); assert.equal(f.comments.length, 0);
 });
 
-test('review notifications never trigger another review request', async () => {
-  const f = fixture(); f.context.eventName = 'pull_request_review';
-  f.context.payload.review = {state: 'commented'};
-  await manage(f); assert.equal(f.comments.length, 0);
+test('stale review is attributed to its own SHA, never the current head', async () => {
+  const f = fixture(); let summary = '';
+  f.context.eventName = 'pull_request_review';
+  f.context.payload.review = {state: 'approved', commit_id: 'older'};
+  f.core.summary.addRaw = s => {summary = s; return f.core.summary;};
+  await manage(f);
+  assert.match(summary, /审核 SHA：older/);
+  assert.match(summary, /历史提交审核，不适用于当前 head/);
 });
 
 test('missing configuration skips delivery; Telegram rejects and HTTP failures fail visibly', async () => {
@@ -67,4 +60,35 @@ test('report distinguishes absent, skipped and failed checks from success and ig
   assert.match(report, /1 success \/ 0 failure \/ 1 pending-or-other/);
   assert.match(report, /待关注 PR：1\/1/);
   assert.match(report, /当前 SHA 审核记录：0/);
+});
+
+
+test('outstanding change requests remain risks after comment or new head; new approval clears decision', async () => {
+  for (const [lastState, sha, expected] of [['COMMENTED', 'abc', 1], ['APPROVED', 'abc', 0], ['APPROVED', 'old', 1]]) {
+    const f = fixture(); delete f.context.payload.pull_request; let report = '';
+    f.core.summary.addRaw = s => {report = s; return f.core.summary;};
+    f.github.rest.repos = {getBranch: async () => ({data: {commit: {sha: 'base'}}})};
+    Object.assign(f.github.rest.pulls, {list: 'prs', listReviews: 'reviews'});
+    f.github.rest.checks = {listForRef: 'checks'};
+    f.github.paginate = async method => method === 'prs' ? [{number: 23, head: {sha: 'abc'}, html_url: 'url'}] : method === 'checks' ? [{id: 1, name: 'CI', status: 'completed', conclusion: 'success'}] : [
+      {id: 1, user: {login: 'reviewer'}, commit_id: 'old', state: 'CHANGES_REQUESTED'},
+      {id: 2, user: {login: 'reviewer'}, commit_id: sha, state: lastState},
+    ];
+    await manage(f); assert.match(report, new RegExp(`待关注 PR：${expected}/1`));
+  }
+});
+
+test('workflow bootstrap skips absent trusted script without requiring any PR code', async () => {
+  const fs = require('node:fs');
+  const source = fs.readFileSync('.github/workflows/v1-ai-manager.yml', 'utf8').split('          script: |\n')[1].split('\n').map(l => l.slice(12)).join('\n');
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  const f = fixture(); let loaded = false;
+  const loader = name => {
+    if (name === 'node:fs') return {existsSync: () => false};
+    if (name === 'node:path') return require('node:path');
+    loaded = true; throw Error('PR code must never be loaded');
+  };
+  await new AsyncFunction('require', 'process', 'github', 'context', 'core', source)(loader, {env: {GITHUB_WORKSPACE: '/synthetic/trusted-base'}}, f.github, f.context, f.core);
+  assert.equal(loaded, false);
+  assert.match(f.notices[0], /safely skipped/);
 });

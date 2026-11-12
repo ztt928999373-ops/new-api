@@ -25,19 +25,13 @@ async function manage({github, context, core}) {
       core.notice('Superseded PR event; no review or notification.');
       return;
     }
-    if (context.eventName === 'pull_request_target' && latest.state === 'open' && !latest.draft) {
-      const marker = `<!-- suanjie-codex-review:${latest.head.sha} -->`;
-      const comments = await github.paginate(github.rest.issues.listComments, {...repo, issue_number: pr.number, per_page: 100});
-      if (!comments.some(c => c.user?.type === 'Bot' && c.body?.includes(marker))) {
-        await github.rest.issues.createComment({...repo, issue_number: pr.number,
-          body: `@codex review\n\n${marker}\n请审核此提交的缺陷、安全与资金不变量；遵循 AGENTS.md 及按路径适用的规则。仅提交审查意见，禁止自动修改、合并、部署或启用支付。审核请求不代表审核通过。`});
-      }
-    }
     const review = context.payload.review;
-    const status = review ? `审核状态：${review.state}` : `PR 事件：${context.payload.action}${latest.draft ? '（Draft，未请求自动审核）' : ''}`;
+    const reviewedSHA = review?.commit_id || 'unknown';
+    const reviewScope = review && reviewedSHA !== latest.head.sha ? '历史提交审核，不适用于当前 head' : '当前提交审核';
+    const status = review ? `审核状态：${review.state}（${reviewScope}）\n审核 SHA：${reviewedSHA}` : `PR 事件：${context.payload.action}${latest.draft ? '（Draft）' : ''}`;
     const notification = await notify(`算介虚拟技术主管\nPR #${pr.number}\n${status}\n提交：${latest.head.sha}\n${pr.html_url}\n最终审核与合并由项目所有者决定。`);
     core.notice(`Telegram: ${notification}`);
-    await core.summary.addHeading('算介自动化状态').addRaw(`PR #${pr.number} · ${latest.head.sha}\n\n${status}\n\nTelegram: ${notification}\n\nCodex 请求不等于审核通过；最终审核与合并由所有者决定。`).write();
+    await core.summary.addHeading('算介自动化状态').addRaw(`PR #${pr.number} · ${latest.head.sha}\n\n${status}\n\nTelegram: ${notification}\n\n审核由 Codex 原生 Automatic Code Review 管理；本机器人仅通知。最终审核与合并由所有者决定。`).write();
     return;
   }
   const prs = await github.paginate(github.rest.pulls.list, {...repo, state: 'open', base: MAIN, per_page: 100});
@@ -57,9 +51,16 @@ async function manage({github, context, core}) {
     const failed = checks.filter(r => ['failure', 'timed_out', 'action_required', 'startup_failure'].includes(r.conclusion)).length;
     const unknown = checks.length - passed - failed;
     const reviews = await github.paginate(github.rest.pulls.listReviews, {...repo, pull_number: p.number, per_page: 100});
+    // A later COMMENTED review does not withdraw an earlier blocking decision.
+    const decisions = new Map();
+    for (const r of [...reviews].sort((a, b) => a.id - b.id)) {
+      if (['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(r.state)) decisions.set(r.user?.login || `unknown-${r.id}`, r);
+    }
     const currentReviews = reviews.filter(r => r.commit_id === p.head.sha && r.state !== 'DISMISSED');
-    if (failed || unknown || !checks.length || !currentReviews.length) risks++;
-    lines.push(`## PR #${p.number}${p.draft ? ' [Draft]' : ''}`, `- URL: ${p.html_url}`, `- SHA: ${p.head.sha}`, `- Checks: ${passed} success / ${failed} failure / ${unknown} pending-or-other${!checks.length ? ' / NO CHECKS' : ''}`, `- 当前 SHA 审核记录：${currentReviews.length}（记录数量不代表批准）`, ...checks.map(r => `  - ${r.name}: ${r.status}/${r.conclusion || 'pending'} — ${r.html_url}`), '');
+    const blocking = [...decisions.values()].filter(r => r.state === 'CHANGES_REQUESTED');
+    const approved = [...decisions.values()].filter(r => r.state === 'APPROVED' && r.commit_id === p.head.sha);
+    if (failed || unknown || !checks.length || !approved.length || blocking.length) risks++;
+    lines.push(`## PR #${p.number}${p.draft ? ' [Draft]' : ''}`, `- URL: ${p.html_url}`, `- SHA: ${p.head.sha}`, `- Checks: ${passed} success / ${failed} failure / ${unknown} pending-or-other${!checks.length ? ' / NO CHECKS' : ''}`, `- 当前 SHA 审核记录：${currentReviews.length}（记录数量不代表批准）；当前有效批准：${approved.length}；未撤回请求修改：${blocking.length}`, ...checks.map(r => `  - ${r.name}: ${r.status}/${r.conclusion || 'pending'} — ${r.html_url}`), '');
   }
   lines.push(`待关注 PR：${risks}/${prs.length}`, '', '商业化风险：代码具备注册/钱包/支付入口不等于可商用；真实配置、回调、对账、退款和三数据库资金不变量仍需独立验收。', '不自动合并、不部署、不更改注册或支付开关。');
   await core.summary.addRaw(lines.join('\n')).write();

@@ -25,7 +25,6 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
-      issues: write # @codex review request only; never approve/merge
       checks: read
     steps:
       - name: Checkout trusted product base only
@@ -34,15 +33,23 @@ jobs:
           ref: ${{ github.event.pull_request.base.sha || 'product/v1' }}
           persist-credentials: false
           sparse-checkout: .github/automation
-      - name: Request review, notify, or generate report
+      - name: Notify or generate report (native Codex reviews only)
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea9 # v7
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         with:
           script: |
-            const {manage} = require('./.github/automation/manager.cjs');
+            const fs = require('node:fs');
+            const path = require('node:path');
+            const managerPath = path.join(process.env.GITHUB_WORKSPACE, '.github/automation/manager.cjs');
+            if (!fs.existsSync(managerPath)) {
+              core.notice('AI manager not installed at trusted base SHA; safely skipped. No PR head fallback.');
+              await core.summary.addHeading('AI Manager: not installed').addRaw('Trusted base has no manager script. Notifications/report were NOT run. Merge requires owner review; never load PR head as fallback.').write();
+              return;
+            }
             try {
+              const {manage} = require(managerPath);
               await manage({github, context, core});
             } catch {
               // Do not expose a token-bearing Telegram URL or API response body.
