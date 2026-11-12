@@ -190,6 +190,7 @@ func GetChannelDefaultBaseURLs(c *gin.Context) {
 
 func GetAllChannels(c *gin.Context) {
 	pageInfo := common.GetPageQuery(c)
+	costSelector := c.Query("view") == "cost_selector"
 	channelData := make([]*model.Channel, 0)
 	idSort, _ := strconv.ParseBool(c.Query("id_sort"))
 	sortOptions := model.NewChannelSortOptions(c.Query("sort_by"), c.Query("sort_order"), idSort)
@@ -254,6 +255,21 @@ func GetAllChannels(c *gin.Context) {
 			common.ApiErrorT(c, "Failed to fetch channels. Please try again later")
 			return
 		}
+	}
+
+	if costSelector {
+		type option struct {
+			ID   int    `json:"id"`
+			Name string `json:"name"`
+		}
+		items := make([]option, 0, len(channelData))
+		for _, channel := range channelData {
+			items = append(items, option{ID: channel.Id, Name: channel.Name})
+		}
+		// The cost console must not receive legacy header/parameter overrides,
+		// credential-shaped settings, base URLs or any complete channel config.
+		common.ApiSuccess(c, gin.H{"items": items, "total": total, "page": pageInfo.GetPage(), "page_size": pageInfo.GetPageSize()})
+		return
 	}
 
 	for _, datum := range channelData {

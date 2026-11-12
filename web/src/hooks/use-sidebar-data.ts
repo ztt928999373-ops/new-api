@@ -138,6 +138,11 @@ export function useSidebarData(): SidebarData {
             icon: Radio,
           },
           {
+            title: t('Cost management'),
+            url: '/cost-management',
+            icon: CreditCard,
+          },
+          {
             title: t('Models'),
             url: '/models/metadata',
             icon: Box,

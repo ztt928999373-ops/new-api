@@ -57,11 +57,45 @@ func ListSupplierCosts(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
 	defer cancel()
 	query := model.DB.WithContext(ctx).Where("channel_id = ?", id)
+	if state := c.Query("state"); state != "" {
+		switch state {
+		case "pending", "in_flight", "unmatched", "settled":
+			query = query.Where("state = ?", state)
+		default:
+			c.JSON(400, gin.H{"success": false, "code": "SUPPLIER_BILL_INVALID"})
+			return
+		}
+	}
+	var start, end int64
+	for _, boundary := range []struct {
+		name  string
+		value *int64
+	}{{"start", &start}, {"end", &end}} {
+		if raw := c.Query(boundary.name); raw != "" {
+			value, err := strconv.ParseInt(raw, 10, 64)
+			if err != nil || value < 0 || value > 253402300799 {
+				c.JSON(400, gin.H{"success": false, "code": "SUPPLIER_BILL_INVALID"})
+				return
+			}
+			*boundary.value = value
+		}
+	}
+	if c.Query("end") != "" && c.Query("start") != "" && start >= end {
+		c.JSON(400, gin.H{"success": false, "code": "SUPPLIER_BILL_INVALID"})
+		return
+	}
+	if c.Query("start") != "" {
+		query = query.Where("created_at >= ?", start)
+	}
+	if c.Query("end") != "" {
+		query = query.Where("created_at < ?", end)
+	}
 	if c.Query("alerts_only") == "true" {
 		query = query.Where("alert <> ?", "")
 	}
 	var rows []model.SupplierCostStatement
-	if query.Order("created_at DESC").Order("id DESC").Offset((page-1)*50).Limit(50).Find(&rows).Error != nil {
+	var total int64
+	if query.Model(&model.SupplierCostStatement{}).Count(&total).Error != nil || query.Order("created_at DESC").Order("id DESC").Offset((page-1)*50).Limit(50).Find(&rows).Error != nil {
 		c.JSON(503, gin.H{"success": false, "code": "SUPPLIER_BILL_UNAVAILABLE"})
 		return
 	}
@@ -88,7 +122,7 @@ func ListSupplierCosts(c *gin.Context) {
 			charges, chargeStatus = charges[:500], "truncated_references_not_totals"
 		}
 	}
-	c.JSON(200, gin.H{"success": true, "data": rows, "page": page, "user_charge_references": charges, "user_charge_unit": "quota", "user_charge_status": chargeStatus,
+	c.JSON(200, gin.H{"success": true, "data": rows, "page": page, "page_size": 50, "total": total, "time_basis": "statement_recorded_at_not_supplier_usage_period", "user_charge_references": charges, "user_charge_unit": "quota", "user_charge_status": chargeStatus,
 		"platform_revenue_usd_micros": nil, "gross_profit_usd_micros": nil,
 		"revenue_status": "unknown_without_revenue_allocation", "verification": "operator_attested_not_independently_verified", "supplier_account_hard_limit": "not_connected"})
 }

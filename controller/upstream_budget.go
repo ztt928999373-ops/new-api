@@ -1,14 +1,18 @@
 package controller
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
 func GetUpstreamBudget(c *gin.Context) {
@@ -18,8 +22,15 @@ func GetUpstreamBudget(c *gin.Context) {
 		return
 	}
 	var p model.UpstreamBudget
-	if model.DB.First(&p, "channel_id = ?", id).Error != nil {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+	defer cancel()
+	err = model.DB.WithContext(ctx).First(&p, "channel_id = ?", id).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
 		c.JSON(404, gin.H{"success": false, "code": "UPSTREAM_BUDGET_NOT_CONFIGURED"})
+		return
+	}
+	if err != nil {
+		c.JSON(503, gin.H{"success": false, "code": "UPSTREAM_BUDGET_UNAVAILABLE"})
 		return
 	}
 	var reservations []model.UpstreamCostReservation
@@ -31,7 +42,7 @@ func GetUpstreamBudget(c *gin.Context) {
 			return
 		}
 	}
-	query := model.DB.Model(&model.UpstreamCostReservation{}).Where("channel_id = ?", id)
+	query := model.DB.WithContext(ctx).Model(&model.UpstreamCostReservation{}).Where("channel_id = ?", id)
 	if state := c.Query("state"); state != "" {
 		switch state {
 		case "held", "ceiling_charged", "reconciled", "reconciled_over_ceiling":
