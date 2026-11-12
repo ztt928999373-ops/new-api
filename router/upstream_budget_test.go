@@ -991,3 +991,81 @@ func TestSupplierCostLegacyReconcileRoutes(t *testing.T) {
 		})
 	}
 }
+
+func TestAggregateCostPublicationDatabaseMatrix(t *testing.T) {
+	for _, kind := range []string{"sqlite", "mysql", "postgres"} {
+		t.Run(kind, func(t *testing.T) {
+			db := setupUpstreamBudgetDB(t, kind)
+			// Upgrade the released schema twice, without deleting old financial rows.
+			require.NoError(t, db.AutoMigrate(&model.UpstreamBudget{}, &model.UpstreamCostReservation{}))
+			channel, policy := syntheticBudgetChannel(t, db)
+			reservation, err := model.ReserveUpstreamCost(context.Background(), db, policy)
+			require.NoError(t, err)
+			for range 2 {
+				require.NoError(t, db.AutoMigrate(&model.AggregateCostHead{}, &model.AggregateCostVersion{}))
+			}
+			end := time.Now().Unix() - 10
+			start := end - 100
+			snapshot := service.CostSnapshot{Complete: true, Buckets: []service.CostBucket{{Organization: "synthetic-org", Project: "synthetic-" + kind, Start: start, End: end, USDmicros: 7}}}
+			publish := func(expected int64, s service.CostSnapshot) (model.AggregateCostVersion, error) {
+				return service.PublishMockCostSnapshot(context.Background(), db, "synthetic-org", "synthetic-"+kind, start, end, expected, s)
+			}
+			first, err := publish(0, snapshot)
+			require.NoError(t, err)
+			replay, err := publish(0, snapshot)
+			require.NoError(t, err)
+			require.Equal(t, first.ID, replay.ID)
+			changed := snapshot
+			changed.Buckets = append([]service.CostBucket(nil), snapshot.Buckets...)
+			changed.Buckets[0].USDmicros = 8
+			var wg sync.WaitGroup
+			successes := make(chan model.AggregateCostVersion, 8)
+			for range 8 {
+				wg.Go(func() {
+					r, e := publish(1, changed)
+					if e == nil {
+						successes <- r
+					}
+				})
+			}
+			wg.Wait()
+			close(successes)
+			for row := range successes {
+				require.EqualValues(t, 2, row.Revision)
+			}
+			var count int64
+			require.NoError(t, db.Model(&model.AggregateCostVersion{}).Where("scope = ?", first.Scope).Count(&count).Error)
+			require.EqualValues(t, 2, count)
+			var old model.AggregateCostVersion
+			require.NoError(t, db.First(&old, "id = ?", first.ID).Error)
+			require.Equal(t, first.Payload, old.Payload)
+			third := changed
+			third.Buckets = append([]service.CostBucket(nil), changed.Buckets...)
+			third.Buckets[0].USDmicros = 9
+			_, err = publish(1, third)
+			require.Error(t, err, "stale writers cannot overwrite current version")
+			require.NoError(t, db.Callback().Create().Before("gorm:create").Register("synthetic-version-failure", func(tx *gorm.DB) {
+				if tx.Statement.Table == "aggregate_cost_versions" {
+					tx.AddError(errors.New("synthetic failure"))
+				}
+			}))
+			_, err = publish(2, third)
+			require.Error(t, err)
+			require.NoError(t, db.Callback().Create().Remove("synthetic-version-failure"))
+			var head model.AggregateCostHead
+			require.NoError(t, db.First(&head, "scope = ?", first.Scope).Error)
+			require.EqualValues(t, 2, head.Revision)
+			invalid := snapshot
+			invalid.Buckets = append(invalid.Buckets, snapshot.Buckets[0])
+			_, err = publish(2, invalid)
+			require.Error(t, err, "forged Complete cannot bypass revalidation")
+			var after model.UpstreamBudget
+			require.NoError(t, db.First(&after, "channel_id = ?", channel.Id).Error)
+			require.EqualValues(t, 10, after.HeldMicros)
+			require.Zero(t, after.ChargedMicros)
+			var held model.UpstreamCostReservation
+			require.NoError(t, db.First(&held, "id = ?", reservation.ID).Error)
+			require.Equal(t, "held", held.State)
+		})
+	}
+}

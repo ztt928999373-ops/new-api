@@ -56,6 +56,9 @@ func TestLocalInstallBackupRestore(t *testing.T) {
 	bill, err := model.ImportSupplierCost(context.Background(), db, ch.Id, model.SupplierCostInput{Account: "synthetic-recovery-account", Bill: "synthetic-recovery-bill", Line: "one", Currency: "USD", ReservationID: reservation.ID, ActualMicros: 1, EstimatedMicros: &estimate, Evidence: "synthetic-recovery-evidence", Confirmed: true})
 	require.NoError(t, err)
 	require.Equal(t, "in_flight", bill.State)
+	version := model.AggregateCostVersion{ID: strings.Repeat("b", 64), Scope: strings.Repeat("c", 64), Revision: 1, Digest: strings.Repeat("d", 64), Payload: "synthetic-aggregate-observation", State: "initial_mock_observation"}
+	require.NoError(t, db.Create(&model.AggregateCostHead{Scope: version.Scope, Revision: 1, Digest: version.Digest}).Error)
+	require.NoError(t, db.Create(&version).Error)
 	// Model an earlier supported snapshot missing an additive business table.
 	require.NoError(t, db.Migrator().DropTable(&model.LoginEncryptionKey{}))
 	closeDB()
@@ -109,6 +112,9 @@ func TestLocalInstallBackupRestore(t *testing.T) {
 	var restoredBill model.SupplierCostStatement
 	require.NoError(t, restoredDB.First(&restoredBill, "id = ?", bill.ID).Error)
 	require.Equal(t, "attempt_not_finished", restoredBill.Alert)
+	var restoredVersion model.AggregateCostVersion
+	require.NoError(t, restoredDB.First(&restoredVersion, "id = ?", version.ID).Error)
+	require.Equal(t, version.Payload, restoredVersion.Payload)
 	require.Error(t, Restore(target, databaseBackup, keyBackup))
 	// A fresh post-restore write and second backup are safe with the new KEK.
 	_, err = restoredStore.Create(context.Background(), actor, true, "openai", "api_key", "relay", []byte("synthetic-post-restore"))
