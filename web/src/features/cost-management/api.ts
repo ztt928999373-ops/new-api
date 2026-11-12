@@ -95,7 +95,7 @@ export type CostFilters = {
 
 export async function readCostChannels(page: number, signal?: AbortSignal) {
   const response = await api.get('/api/channel/', {
-    params: { p: page, page_size: 50 },
+    params: { p: page, page_size: 50, view: 'cost_selector' },
     signal,
     disableDuplicate: true,
   })

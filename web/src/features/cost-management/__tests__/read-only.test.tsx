@@ -175,6 +175,12 @@ it('shows exact internal and unverified accounting sources without key disclosur
   const table = screen.getByRole('table', {
     name: 'Structured supplier statements',
   })
+  expect(api.get).toHaveBeenCalledWith(
+    '/api/channel/',
+    expect.objectContaining({
+      params: { p: 1, page_size: 50, view: 'cost_selector' },
+    })
+  )
   expect(within(table).getByText('USD 1.234567')).toBeVisible()
   expect(within(table).getByText('USD 0.234567')).toBeVisible()
   expect(within(table).getByText('Conflicting bill evidence')).toBeVisible()

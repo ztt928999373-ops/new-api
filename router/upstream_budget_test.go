@@ -108,6 +108,8 @@ func TestSupplierCostReadOnlyFiltersDatabaseMatrix(t *testing.T) {
 				tokens[role] = login.AccessToken
 			}
 			ch := model.Channel{Type: 1, Name: "synthetic-readonly-cost", Status: 2}
+			legacyHeader := `{"Authorization":"synthetic-selector-header-secret"}`
+			ch.Key, ch.HeaderOverride = "synthetic-selector-key-secret", &legacyHeader
 			require.NoError(t, db.Create(&ch).Error)
 			t.Cleanup(func() { db.Delete(&ch) })
 			policy := model.UpstreamBudget{ChannelID: ch.Id, LimitMicros: 9000000, HeldMicros: 200000, ChargedMicros: 400000, Enabled: false, ReconciliationFrozen: true}
@@ -123,6 +125,26 @@ func TestSupplierCostReadOnlyFiltersDatabaseMatrix(t *testing.T) {
 			}
 			api := gin.New()
 			registerChannelRoutes(api.Group("/api"))
+			selectorRequest := httptest.NewRequest("GET", "/api/channel/?view=cost_selector&id_sort=true", nil)
+			selectorRequest.Header.Set("Authorization", "Bearer "+tokens[100])
+			selector := httptest.NewRecorder()
+			api.ServeHTTP(selector, selectorRequest)
+			require.Equal(t, 200, selector.Code, selector.Body.String())
+			require.NotContains(t, selector.Body.String(), "synthetic-selector-header-secret")
+			require.NotContains(t, selector.Body.String(), "synthetic-selector-key-secret")
+			require.NotContains(t, selector.Body.String(), "header_override")
+			var options struct {
+				Data struct {
+					Items []map[string]any `json:"items"`
+				} `json:"data"`
+			}
+			require.NoError(t, common.Unmarshal(selector.Body.Bytes(), &options))
+			require.NotEmpty(t, options.Data.Items)
+			for _, option := range options.Data.Items {
+				require.Len(t, option, 2)
+				require.Contains(t, option, "id")
+				require.Contains(t, option, "name")
+			}
 			base := fmt.Sprintf("/api/channel/%d/upstream-budget", ch.Id)
 			get := func(role int, suffix string) *httptest.ResponseRecorder {
 				r := httptest.NewRequest("GET", base+suffix, nil)
