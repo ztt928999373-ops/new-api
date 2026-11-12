@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -828,8 +829,9 @@ func TestSupplierCostLegacyReconcileRoutes(t *testing.T) {
 			common.IsMasterNode, common.SessionSecret = true, "synthetic-legacy-review-session"
 			t.Cleanup(func() { common.IsMasterNode, common.SessionSecret = master, secret })
 			tokens := map[int]string{}
+			fixtureID := rand.Text()[:8]
 			for _, role := range []int{1, 10, 100} {
-				user := model.User{Username: fmt.Sprintf("legacy-review-%s-%d", kind, role), Role: role, Status: 1, AuthVersion: 1, Group: "default", AffCode: fmt.Sprintf("legacy-%s-%d", kind, role)}
+				user := model.User{Username: fmt.Sprintf("legacy-review-%s-%d-%s", kind, role, fixtureID), Role: role, Status: 1, AuthVersion: 1, Group: "default", AffCode: fmt.Sprintf("legacy-%s-%d-%s", kind, role, fixtureID)}
 				require.NoError(t, db.Create(&user).Error)
 				login, err := service.CreateLoginSession(user.Id, "synthetic", "127.0.0.1", "synthetic")
 				require.NoError(t, err)
