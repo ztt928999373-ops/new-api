@@ -1,5 +1,6 @@
 name: V1 AI review and technical supervisor
 on:
+  workflow_call:
   pull_request_target:
     branches: [product/v1]
     types: [opened, synchronize, reopened, ready_for_review, closed]

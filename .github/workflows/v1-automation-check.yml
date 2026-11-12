@@ -17,3 +17,10 @@ jobs:
         with:
           persist-credentials: false
       - run: node --test .github/automation/manager.test.cjs
+  trusted-base-bootstrap:
+    # Exercise the real workflow against the immutable old base, without secrets.
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: read
+    uses: ./.github/workflows/v1-ai-manager.yml
