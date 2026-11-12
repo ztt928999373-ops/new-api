@@ -71,7 +71,7 @@ export function parseTaskResult() { return {}; }
 	t.Cleanup(func() { jsplugin.DefaultRegistry.Unregister(key) })
 
 	taskPluginBody := `{"mode":"single","channel":{"type":61,"name":"plugin-channel","key":"sk","models":"doc","group":"default","base_url":"https://example.com","setting":"{\"task_plugin_key\":\"channel-bind\"}"}}`
-	openaiBody := `{"mode":"single","channel":{"type":1,"name":"openai-channel","key":"sk","models":"gpt","group":"default"}}`
+	otherBody := `{"mode":"single","channel":{"type":14,"name":"other-channel","key":"sk","models":"claude","group":"default"}}`
 
 	adminDenied := postAddChannel(t, 2, common.RoleAdminUser, taskPluginBody)
 	assert.Contains(t, adminDenied.Body.String(), "task plugin channels require the task_plugin.bind permission")
@@ -81,7 +81,7 @@ export function parseTaskResult() { return {}; }
 	assert.Contains(t, rootAllowed.Body.String(), `"success":true`)
 	assert.NotContains(t, rootAllowed.Body.String(), "task_plugin.bind")
 
-	adminOtherType := postAddChannel(t, 2, common.RoleAdminUser, openaiBody)
+	adminOtherType := postAddChannel(t, 2, common.RoleAdminUser, otherBody)
 	assert.Contains(t, adminOtherType.Body.String(), `"success":true`)
 	assert.NotContains(t, adminOtherType.Body.String(), "task_plugin.bind")
 }

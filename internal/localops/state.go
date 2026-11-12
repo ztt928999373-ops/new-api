@@ -341,6 +341,15 @@ func copyNew(source, target string) error {
 // Database and ring artifacts must use separate private directories. A manifest
 // is written last; partial backups are unusable and never overwrite prior ones.
 func Backup(state, databaseBackup, keyBackup string) error {
+	release, err := acquire(state)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return backupLocked(state, databaseBackup, keyBackup)
+}
+
+func backupLocked(state, databaseBackup, keyBackup string) error {
 	if !filepath.IsAbs(databaseBackup) || !filepath.IsAbs(keyBackup) || filepath.Dir(databaseBackup) == filepath.Dir(keyBackup) {
 		return ErrOperation
 	}
@@ -352,11 +361,6 @@ func Backup(state, databaseBackup, keyBackup string) error {
 	if err != nil || os.SameFile(databaseParent, keyParent) {
 		return ErrOperation
 	}
-	release, err := acquire(state)
-	if err != nil {
-		return err
-	}
-	defer release()
 	m, err := readManifest(filepath.Join(state, readyName))
 	if err != nil {
 		return err

@@ -172,11 +172,8 @@ func (s *Store) Replace(ctx context.Context, actor Principal, id string, revisio
 			return Head{}, credentialcrypto.ErrUnavailable
 		}
 		for _, channel := range channels {
-			if channel.ChannelInfo.IsMultiKey {
-				candidate := model.Channel{Key: string(secret)}
-				if len(candidate.GetKeys()) != channel.ChannelInfo.MultiKeySize {
-					return Head{}, credentialcrypto.ErrUnavailable
-				}
+			if ValidateOpenAIKeyBundle(channel, string(secret)) != nil {
+				return Head{}, credentialcrypto.ErrUnavailable
 			}
 		}
 	}

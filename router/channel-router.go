@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/controller"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
@@ -66,6 +67,11 @@ func rejectUnsupportedManagedChannelOperation(c *gin.Context) {
 		return
 	}
 	query := model.DB.Model(&model.Channel{}).Where("credential_ref IS NOT NULL AND credential_ref <> ?", "")
+	if !(route == "/" && c.Request.Method == http.MethodPut) {
+		// Legacy secret readers, cloners and slot mutators must not recreate a
+		// plaintext OpenAI channel around the secure creation/migration boundary.
+		query = model.DB.Model(&model.Channel{}).Where("((credential_ref IS NOT NULL AND credential_ref <> ?) OR type = ?)", "", constant.ChannelTypeOpenAI)
+	}
 	if id := c.Param("id"); id != "" {
 		n, err := strconv.Atoi(id)
 		if err != nil || n <= 0 {

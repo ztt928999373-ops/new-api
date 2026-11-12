@@ -32,6 +32,8 @@ type Lease struct {
 
 func (l *Lease) Context() context.Context { return l.ctx }
 
+func (l *Lease) Version() uint64 { return l.version }
+
 func (l *Lease) Release() {
 	if l == nil {
 		return

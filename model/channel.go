@@ -466,6 +466,14 @@ func GetChannelById(id int, selectAll bool) (*Channel, error) {
 	return channel, nil
 }
 
+// LockChannelForCredentialMigration fences legacy edits while moving the secret
+// to the credential repository. SQLite relies on its transaction write fence.
+func LockChannelForCredentialMigration(tx *gorm.DB, id int) (Channel, error) {
+	var ch Channel
+	err := lockForUpdate(tx).First(&ch, id).Error
+	return ch, err
+}
+
 func BatchInsertChannels(channels []Channel) error {
 	for _, channel := range channels {
 		if channel.CredentialRef != "" {
@@ -878,6 +886,77 @@ func UpdateChannelStatus(channelId int, usingKey string, status int, reason stri
 		}
 	}
 	return changed
+}
+
+// DisableManagedChannelSlot accepts only non-secret request metadata. It cannot
+// enable a channel, and stale failures from an older credential version cannot
+// disable its replacement. Upstream error text is deliberately not persisted.
+func DisableManagedChannelSlot(id int, reference string, version uint64, slot int) error {
+	if reference == "" || version == 0 || slot < 0 {
+		return errors.New("invalid credential slot")
+	}
+	channelStatusLock.Lock()
+	defer channelStatusLock.Unlock()
+	lock := GetChannelPollingLock(id)
+	lock.Lock()
+	defer lock.Unlock()
+	err := DB.Transaction(func(tx *gorm.DB) error {
+		var head struct {
+			CurrentVersion uint64
+			Status         string
+		}
+		if err := lockForUpdate(tx.Table("supplier_credentials")).Where("id = ?", reference).Take(&head).Error; err != nil {
+			return err
+		}
+		if head.CurrentVersion != version || head.Status != "active" {
+			return errors.New("stale credential failure")
+		}
+		var ch Channel
+		if err := lockForUpdate(tx).First(&ch, id).Error; err != nil {
+			return err
+		}
+		if ch.CredentialRef != reference || ch.Status != common.ChannelStatusEnabled {
+			return errors.New("channel no longer available")
+		}
+		if ch.ChannelInfo.IsMultiKey {
+			if slot >= ch.ChannelInfo.MultiKeySize {
+				return errors.New("invalid credential slot")
+			}
+			if ch.ChannelInfo.MultiKeyStatusList == nil {
+				ch.ChannelInfo.MultiKeyStatusList = map[int]int{}
+			}
+			ch.ChannelInfo.MultiKeyStatusList[slot] = common.ChannelStatusAutoDisabled
+			if ch.ChannelInfo.MultiKeyDisabledReason == nil {
+				ch.ChannelInfo.MultiKeyDisabledReason = map[int]string{}
+			}
+			if ch.ChannelInfo.MultiKeyDisabledTime == nil {
+				ch.ChannelInfo.MultiKeyDisabledTime = map[int]int64{}
+			}
+			ch.ChannelInfo.MultiKeyDisabledReason[slot] = "managed upstream failure"
+			ch.ChannelInfo.MultiKeyDisabledTime[slot] = common.GetTimestamp()
+			available := false
+			for i := range ch.ChannelInfo.MultiKeySize {
+				status, exists := ch.ChannelInfo.MultiKeyStatusList[i]
+				available = available || !exists || status == common.ChannelStatusEnabled
+			}
+			if !available {
+				ch.Status = common.ChannelStatusAutoDisabled
+			}
+		} else {
+			if slot != 0 {
+				return errors.New("invalid credential slot")
+			}
+			ch.Status = common.ChannelStatusAutoDisabled
+		}
+		if err := tx.Model(&Channel{}).Where("id = ?", id).Updates(map[string]any{"status": ch.Status, "channel_info": ch.ChannelInfo}).Error; err != nil {
+			return err
+		}
+		return tx.Model(&Ability{}).Where("channel_id = ?", id).Update("enabled", ch.Status == common.ChannelStatusEnabled).Error
+	})
+	if err != nil {
+		return err
+	}
+	return initChannelCacheLocked()
 }
 
 func EnableChannelByTag(tag string) error {

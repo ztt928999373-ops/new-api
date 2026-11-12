@@ -56,6 +56,11 @@ jobs:
           go test -json -race -count=1 ./middleware -run '^TestDashboardDenialAudit' > "$RUNNER_TEMP/v1-security/denial-audit.jsonl"
           go test -json -race -count=1 ./model -run '^TestOverallChannelStatusIndependentOfCredentials$' > "$RUNNER_TEMP/v1-security/channel-status.jsonl"
           go test -json -race -count=1 ./service/credentials > "$RUNNER_TEMP/v1-security/credentials.jsonl"
+          go test -json -race -count=1 ./router -run '^TestChannelKeySecurity' > "$RUNNER_TEMP/v1-security/channel-key-security.jsonl"
+          for database in sqlite mysql postgres; do
+            SYNTHETIC_MANAGED_DATABASE="$database" go test -json -race -count=1 ./service -run '^TestManagedRequestPollingCacheAndRevocation$' > "$RUNNER_TEMP/v1-security/managed-$database.jsonl"
+          done
+          go test -json -race -count=1 ./service -run '^TestEncryptedChannelMigration' > "$RUNNER_TEMP/v1-security/channel-migration.jsonl"
           go test -json -race -count=1 ./router -run '^(TestUpstreamBudget|TestSupplierCost|TestAggregateCostPublication|TestMockCost|TestMergedMockCost)' > "$RUNNER_TEMP/v1-security/costs-routing.jsonl"
           go test -json -race -count=1 ./service -run '^(TestReadOnlyCostSnapshot|TestMockHTTP)' > "$RUNNER_TEMP/v1-security/http-snapshot.jsonl"
           go test -json -count=1 ./internal/localops > "$RUNNER_TEMP/v1-security/localops.jsonl"

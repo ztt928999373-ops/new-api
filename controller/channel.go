@@ -509,7 +509,7 @@ func GetChannelKey(c *gin.Context) {
 		return
 	}
 
-	if channel.CredentialRef != "" {
+	if channel.CredentialRef != "" || channel.Type == constant.ChannelTypeOpenAI {
 		credentialFailure(c)
 		return
 	}
@@ -764,6 +764,11 @@ func AddChannel(c *gin.Context) {
 	}
 
 	addChannelRequest.Channel.CreatedTime = common.GetTimestamp()
+	if addChannelRequest.Channel.Type == constant.ChannelTypeOpenAI && addChannelRequest.BatchAddSetKeyPrefix2Name {
+		// A secret prefix is still secret material, even in a channel name.
+		credentialFailure(c)
+		return
+	}
 	keys := make([]string, 0)
 	switch addChannelRequest.Mode {
 	case "multi_to_single":
@@ -824,9 +829,22 @@ func AddChannel(c *gin.Context) {
 		}
 		channels = append(channels, *localChannel)
 	}
-	err = model.BatchInsertChannels(channels)
+	if addChannelRequest.Channel.Type == constant.ChannelTypeOpenAI {
+		store := service.ConfiguredCredentialStore()
+		if store == nil || c.GetInt("id") <= 0 || !authz.Can(c.GetInt("id"), c.GetInt("role"), authz.ChannelSensitiveWrite) {
+			credentialFailure(c)
+			return
+		}
+		err = store.CreateOpenAIChannels(c.Request.Context(), platformCredentialActor(c), channels)
+	} else {
+		err = model.BatchInsertChannels(channels)
+	}
 	if err != nil {
-		common.ApiError(c, err)
+		if addChannelRequest.Channel.Type == constant.ChannelTypeOpenAI {
+			credentialFailure(c)
+		} else {
+			common.ApiError(c, err)
+		}
 		return
 	}
 	createAudit := map[string]any{
@@ -1115,6 +1133,13 @@ func UpdateChannel(c *gin.Context) {
 		return
 	}
 	originProxy := originChannel.GetSetting().Proxy
+	if (originChannel.Type == constant.ChannelTypeOpenAI || channel.Type == constant.ChannelTypeOpenAI) &&
+		(channel.Key != "" || originChannel.Type != channel.Type) {
+		// Legacy plaintext is migrated only by the cold, explicit ops command.
+		// Managed rotations use the existing revision-fenced credential endpoint.
+		credentialFailure(c)
+		return
+	}
 	proxyChanged := false
 	_, settingProvided := requestData["setting"]
 	if settingProvided {
@@ -1577,6 +1602,10 @@ func CopyChannel(c *gin.Context) {
 	if err != nil {
 		common.SysError(common.LogText("failed to get channel by id: %s", err.Error()))
 		common.ApiErrorT(c, "Failed to fetch channel. Please try again later")
+		return
+	}
+	if origin.Type == constant.ChannelTypeOpenAI {
+		credentialFailure(c)
 		return
 	}
 	if (origin.Type == constant.ChannelTypeTaskPlugin || len(origin.GetSetting().TaskPluginBindings()) > 0) &&

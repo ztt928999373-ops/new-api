@@ -1,6 +1,7 @@
 package service
 
 import (
+	"strings"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -67,13 +68,43 @@ func ProcessChannelError(c *gin.Context, channelError types.ChannelError, err *t
 	if err == nil {
 		return
 	}
+	// A compatible upstream can echo its Authorization value in error fields.
+	// Remove the actual request key before logging, persistence and client output.
+	value, _ := c.Get(channelRequestLeaseKey)
+	if _, managed := value.(channelRequestLease); managed && channelError.UsingKey != "" {
+		key := channelError.UsingKey
+		err.SetMessage(strings.ReplaceAll(err.Error(), key, "[redacted]"))
+		if failure, ok := err.RelayError.(types.OpenAIError); ok {
+			failure.Message = strings.ReplaceAll(failure.Message, key, "[redacted]")
+			failure.Type = strings.ReplaceAll(failure.Type, key, "[redacted]")
+			failure.Param = strings.ReplaceAll(failure.Param, key, "[redacted]")
+			if code, ok := failure.Code.(string); ok {
+				failure.Code = strings.ReplaceAll(code, key, "[redacted]")
+			}
+			if code, ok := failure.Code.(types.ErrorCode); ok {
+				failure.Code = types.ErrorCode(strings.ReplaceAll(string(code), key, "[redacted]"))
+			}
+			failure.Metadata = nil
+			err.RelayError = failure
+			if code := strings.ReplaceAll(string(err.GetErrorCode()), key, "[redacted]"); code != string(err.GetErrorCode()) {
+				// The upstream-controlled code is also retained privately by the
+				// error value and may enter admin_info independently of its body.
+				failure.Code = code
+				*err = *types.WithOpenAIError(failure, err.StatusCode)
+			}
+		}
+	}
 	upstreamURLs := common.UpstreamAddresses(c)
 	logger.LogError(c, common.LogText("channel error (channel #%d, status code: %d): %s", channelError.ChannelId, err.StatusCode, common.LocalLogPreview(err.MaskSensitiveErrorWithStatusCode(upstreamURLs...))))
 	if ShouldDisableChannel(err) && channelError.AutoBan {
-		reason := err.MaskSensitiveErrorWithStatusCode(upstreamURLs...)
-		gopool.Go(func() {
-			DisableChannel(channelError, reason)
-		})
+		value, _ := c.Get(channelRequestLeaseKey)
+		if state, ok := value.(channelRequestLease); ok {
+			id, reference, version, slot := channelError.ChannelId, state.reference, state.lease.Version(), common.GetContextKeyInt(c, constant.ContextKeyChannelMultiKeyIndex)
+			gopool.Go(func() { _ = model.DisableManagedChannelSlot(id, reference, version, slot) })
+		} else {
+			reason := err.MaskSensitiveErrorWithStatusCode(upstreamURLs...)
+			gopool.Go(func() { DisableChannel(channelError, reason) })
+		}
 	}
 
 	if constant.ErrorLogEnabled && types.IsRecordErrorLog(err) {
