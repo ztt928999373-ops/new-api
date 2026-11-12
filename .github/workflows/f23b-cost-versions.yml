@@ -1,0 +1,69 @@
+name: F2.2 baseline and F2.3b aggregate versions
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [product/v1]
+permissions:
+  contents: read
+jobs:
+  budget:
+    if: github.event.pull_request.head.ref == 'feat/v1-f23b-cost-versions' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GOWORK: 'off'
+      CGO_ENABLED: '1'
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: synthetic-test-only
+          MYSQL_ROOT_HOST: '%'
+          MYSQL_DATABASE: credential_test
+        ports: ['23316:3306']
+        options: --health-cmd="mysqladmin ping -h localhost -psynthetic-test-only" --health-interval=10s --health-timeout=5s --health-retries=12
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: synthetic-test-only
+          POSTGRES_DB: credential_test
+        ports: ['25436:5432']
+        options: --health-cmd="pg_isready -U postgres -d credential_test" --health-interval=10s --health-timeout=5s --health-retries=12
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: 2ff1af9e318a9cd2647d8a8f985d3a0fd8cb78c3
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: go.mod
+      - name: Verify merged F1 code and security regression
+        run: |
+          mkdir -p "$RUNNER_TEMP/f23b-logs" web/dist
+          touch web/dist/index.html
+          git rev-parse HEAD > "$RUNNER_TEMP/f23b-logs/f1-sha.txt"
+          go vet ./...
+          go test -json -count=1 ./... > "$RUNNER_TEMP/f23b-logs/f1-full.jsonl"
+          SUANJIE_TEST_DATABASES=local-synthetic go test -json -race -count=1 ./middleware -run '^TestDashboardDenialAudit' > "$RUNNER_TEMP/f23b-logs/f11-three-db-race.jsonl"
+          SUANJIE_TEST_DATABASES=local-synthetic go test -json -race -count=1 ./model -run '^TestOverallChannelStatusIndependentOfCredentials$' > "$RUNNER_TEMP/f23b-logs/f1-status-race.jsonl"
+          SUANJIE_TEST_DATABASES=local-synthetic go test -json -race -count=1 ./router -run '^(TestUpstreamBudget|TestSupplierCost|TestAggregateCostPublication)' > "$RUNNER_TEMP/f23b-logs/merged-f2-race.jsonl"
+          go test -json -count=1 ./internal/localops > "$RUNNER_TEMP/f23b-logs/merged-recovery.jsonl"
+          SUANJIE_TEST_DATABASES=local-synthetic go test -json -race -count=1 ./service/credentials > "$RUNNER_TEMP/f23b-logs/f1-credential-race.jsonl"
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Verify budget migration, concurrency and Mock upstream
+        run: |
+          git rev-parse HEAD > "$RUNNER_TEMP/f23b-logs/f2-sha.txt"
+          go test -json -race -count=1 ./service -run '^TestReadOnlyCostSnapshot' > "$RUNNER_TEMP/f23b-logs/readonly-costs.jsonl"
+          go version > "$RUNNER_TEMP/f23b-logs/go-version.txt"
+          SUANJIE_TEST_DATABASES=local-synthetic go test -json -race -count=1 ./router -run '^(TestUpstreamBudget|TestSupplierCost|TestAggregateCostPublication)' > "$RUNNER_TEMP/f23b-logs/f2-budget-race-three-db.jsonl"
+          SUANJIE_TEST_DATABASES=local-synthetic go test -json -race -count=1 ./middleware ./model ./service/credentials -run '^(TestDashboardDenialAudit.*|TestOverallChannelStatusIndependentOfCredentials|TestStoreDatabaseMatrix|TestResolverOwnerPlatformRevocationAndAuditFailure)$' > "$RUNNER_TEMP/f23b-logs/f2-head-security-race.jsonl"
+          go test -json -count=1 ./internal/localops > "$RUNNER_TEMP/f23b-logs/f2-cold-recovery.jsonl"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: f23b-cost-acceptance
+          path: ${{ runner.temp }}/f23b-logs/
+          retention-days: 14
