@@ -34,7 +34,7 @@
 ## 修复边界与剩余风险
 
 - #23 保持自动化修复，不混入五组运行时依赖升级。漏洞扫描继续阻断：不得关闭、continue-on-error 或无依据忽略。
-- 独立依赖修复 Draft PR：Go1.26.10→1.26.11；relaykit Go1.25.1 已无当前受支持安全补丁覆盖全部新告警，独立扫描/构建也升级至1.26.11；brotli1.2.7、compress1.20.2、x/net0.60.0、x/text0.41.0、x/image0.45.0。这些是本批告警的最低组合，不声称最新版本。
+- 独立依赖修复 Draft PR：Go1.26.10→1.26.11；relaykit Go1.25.1 已无当前受支持安全补丁覆盖全部新告警，独立扫描/构建也升级至1.26.11；brotli1.2.7、compress1.20.2、x/net0.60.0、x/image0.45.0。x/text 的独立告警最低修复为0.41.0，但x/net0.60.0的模块约束要求实际选择x/text0.42.0，配套x/crypto0.57.0、x/sys0.48.0。实际候选补丁见独立 Draft PR #24，不声称这些是最新版本。
 - compress 影响 ClickHouse 路径，x/text 可经数据库驱动使用；依赖修复必须保留完整 root/relaykit/tokenkit 独立构建测试、三数据库实际回归；ClickHouse 单独配置路径未验证时明确列为限制。
 - relaykit 的“标准库可达”例子很多来自 fmt/Stringer/错误处理的保守静态调用图；库本身没有独立 HTTP 服务器。无需删除扫描或猜测无风险，使用受支持的补丁工具链后重扫。
 - tokenkit 成功使用 Go1.26 系列工具链；root/relaykit 同一 GO ID 重复计数不代表两个独立漏洞。
