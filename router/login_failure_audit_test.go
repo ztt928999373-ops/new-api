@@ -64,6 +64,7 @@ func TestPasswordLoginFailureAuditDatabaseMatrix(t *testing.T) {
 		t.Run(kind, func(t *testing.T) {
 			_, user := setupPasswordFailureAudit(t, kind)
 			db, logDB := model.DB, model.LOG_DB
+			var credentialFailureBody string
 			for _, scenario := range []string{"wrong", "unknown", "disabled", "malformed", "empty", "missing_envelope", "invalid_envelope", "login_disabled", "database_failure", "success"} {
 				t.Run(scenario, func(t *testing.T) {
 					common.PasswordLoginEnabled, common.PasswordLoginEncryptionEnabled = true, false
@@ -115,6 +116,12 @@ func TestPasswordLoginFailureAuditDatabaseMatrix(t *testing.T) {
 					}
 					require.NoError(t, common.Unmarshal(w.Body.Bytes(), &response))
 					require.Equal(t, scenario == "success", response.Success)
+					if scenario == "wrong" {
+						credentialFailureBody = w.Body.String()
+					}
+					if scenario == "unknown" || scenario == "disabled" {
+						require.Equal(t, credentialFailureBody, w.Body.String(), "do not reveal account existence or disabled state")
+					}
 					id := w.Header().Get(common.RequestIdKey)
 					var rows []model.AuditLog
 					require.NoError(t, logDB.Where("request_id = ?", id).Find(&rows).Error)
