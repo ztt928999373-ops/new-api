@@ -13,8 +13,6 @@ jobs:
     env:
       GOWORK: 'off'
       CGO_ENABLED: '1'
-      SUANJIE_TEST_MYSQL_CONTAINER: ${{ job.services.mysql.id }}
-      SUANJIE_TEST_POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
     services:
       mysql:
         image: mysql:8.4
@@ -51,6 +49,9 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Verify merged F1 code and security regression
+        env:
+          SUANJIE_TEST_MYSQL_CONTAINER: ${{ job.services.mysql.id }}
+          SUANJIE_TEST_POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
         run: |
           mkdir -p "$RUNNER_TEMP/f23c-logs" web/dist
           touch web/dist/index.html
@@ -70,6 +71,9 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
       - name: Verify budget migration, concurrency and Mock upstream
+        env:
+          SUANJIE_TEST_MYSQL_CONTAINER: ${{ job.services.mysql.id }}
+          SUANJIE_TEST_POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
         run: |
           git rev-parse HEAD > "$RUNNER_TEMP/f23c-logs/f2-sha.txt"
           go test -json -race -count=1 ./service -run '^(TestReadOnlyCostSnapshot|TestMockHTTP)' > "$RUNNER_TEMP/f23c-logs/readonly-costs.jsonl"
