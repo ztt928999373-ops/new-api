@@ -52,7 +52,11 @@ func OpenAIManagedConfiguration(ch model.Channel) bool {
 		}
 	}
 	// Accept the current form's inert defaults, not arbitrary JSON configuration.
-	for _, raw := range []string{ch.OtherSettings, valueOrEmpty(ch.Setting)} {
+	configurations := []string{ch.OtherSettings}
+	if ch.Setting != nil {
+		configurations = append(configurations, *ch.Setting)
+	}
+	for _, raw := range configurations {
 		if raw == "" {
 			continue
 		}
@@ -86,13 +90,6 @@ func OpenAIManagedConfiguration(ch model.Channel) bool {
 	}
 	return (ch.HeaderOverride == nil || *ch.HeaderOverride == "") &&
 		(ch.ParamOverride == nil || *ch.ParamOverride == "") && !common.TLSInsecureSkipVerify && !common.DebugEnabled
-}
-
-func valueOrEmpty(value *string) string {
-	if value == nil {
-		return ""
-	}
-	return *value
 }
 
 // CreateOpenAIChannels commits encrypted bundles, channel rows and abilities

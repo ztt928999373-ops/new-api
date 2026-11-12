@@ -1046,8 +1046,10 @@ func TestSecurityEnrollmentPasskeyProofProtectsChannelKeyRead(t *testing.T) {
 	require.NoError(t, model.PublishUserAuthCache(user.Id))
 	require.NoError(t, model.DB.AutoMigrate(&model.Channel{}))
 	for _, channel := range []model.Channel{
-		{Id: 123, Name: "first", Key: "first-channel-secret", Type: 1, Status: 1},
-		{Id: 456, Name: "second", Key: "second-channel-secret", Type: 1, Status: 1},
+		// Preserve the legacy non-OpenAI disclosure contract and its passkey
+		// context/replay checks; OpenAI disclosure now always fails closed.
+		{Id: 123, Name: "first", Key: "first-channel-secret", Type: 14, Status: 1},
+		{Id: 456, Name: "second", Key: "second-channel-secret", Type: 14, Status: 1},
 	} {
 		require.NoError(t, model.DB.Create(&channel).Error)
 	}
