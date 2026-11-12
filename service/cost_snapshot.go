@@ -40,13 +40,56 @@ type CostSnapshot struct {
 func CollectCostSnapshot(ctx context.Context, source ReadOnlyCostSource, organization, project string, start, end int64, now time.Time, previous []CostBucket) (CostSnapshot, error) {
 	result := CostSnapshot{}
 	if source == nil || organization == "" || project == "" || start < 0 || end <= start || end > now.Unix() || end-start > 31*86400 {
+		result.Alert = "invalid_scope"
 		return result, errors.New("invalid cost scope")
+	}
+	// Validate history before indexing it: overwriting a repeated Start would
+	// hide a duplicate or conflicting financial observation.
+	old := map[int64]CostBucket{}
+	if len(previous) > 1000 {
+		result.Alert = "previous_bounds"
+		return result, nil
+	}
+	for _, b := range previous {
+		if err := ctx.Err(); err != nil {
+			result.Alert = "cancelled"
+			return result, err
+		}
+		if b.Organization != organization || b.Project != project || b.Start < start || b.End > end || b.End <= b.Start || b.USDmicros < 0 || b.USDmicros > 9_000_000_000_000_000 {
+			result.Alert = "previous_invalid"
+			return result, nil
+		}
+		if prior, exists := old[b.Start]; exists {
+			result.Alert = "previous_duplicate"
+			if prior != b {
+				result.Alert = "previous_conflict"
+			}
+			return result, nil
+		}
+		old[b.Start] = b
+	}
+	if len(previous) > 0 {
+		position, count := start, 0
+		for position < end {
+			b, ok := old[position]
+			if !ok {
+				result.Alert = "previous_missing"
+				return result, nil
+			}
+			position = b.End
+			count++
+		}
+		if count != len(old) {
+			result.Alert = "previous_overlap"
+			return result, nil
+		}
 	}
 	seen := map[string]bool{}
 	buckets := map[int64]CostBucket{}
 	cursor := ""
 	for range 100 {
 		if err := ctx.Err(); err != nil {
+			result.Alert = "cancelled"
 			return result, err
 		}
 		if seen[cursor] {
@@ -55,6 +98,10 @@ func CollectCostSnapshot(ctx context.Context, source ReadOnlyCostSource, organiz
 		}
 		seen[cursor] = true
 		page, err := source.ReadCosts(ctx, cursor)
+		if cancellation := ctx.Err(); cancellation != nil {
+			result.Alert = "cancelled"
+			return result, cancellation
+		}
 		if err != nil {
 			result.Alert = "source_unavailable"
 			return result, errors.New("cost source unavailable")
@@ -73,7 +120,8 @@ func CollectCostSnapshot(ctx context.Context, source ReadOnlyCostSource, organiz
 					result.Alert = "duplicate_conflict"
 					return result, nil
 				}
-				continue
+				result.Alert = "duplicate_bucket"
+				return result, nil
 			}
 			if len(buckets) >= 1000 {
 				result.Alert = "source_bounds"
@@ -97,10 +145,6 @@ func CollectCostSnapshot(ctx context.Context, source ReadOnlyCostSource, organiz
 				return result, nil
 			}
 			if len(previous) > 0 {
-				old := map[int64]CostBucket{}
-				for _, b := range previous {
-					old[b.Start] = b
-				}
 				if len(old) != len(buckets) {
 					result.Alert = "revision"
 					return result, nil
@@ -115,6 +159,10 @@ func CollectCostSnapshot(ctx context.Context, source ReadOnlyCostSource, organiz
 			if now.Unix()-end > 48*3600 {
 				result.Alert = "stale_snapshot"
 				return result, nil
+			}
+			if err := ctx.Err(); err != nil {
+				result.Alert = "cancelled"
+				return result, err
 			}
 			result.Complete = true
 			return result, nil

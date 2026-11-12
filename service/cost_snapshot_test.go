@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"github.com/stretchr/testify/require"
 	"testing"
 	"time"
@@ -68,12 +69,101 @@ func TestReadOnlyCostSnapshot(t *testing.T) {
 				require.NoError(t, err)
 			}
 			require.False(t, result.ProviderHardLimitVerified)
-			if scenario == "complete" || scenario == "duplicate" {
+			if scenario == "complete" {
 				require.True(t, result.Complete)
 				require.Len(t, result.Buckets, 1)
 			} else {
 				require.False(t, result.Complete)
 			}
+		})
+	}
+}
+
+type cancellingCostSource struct {
+	page   CostPage
+	cancel context.CancelFunc
+}
+
+func (s cancellingCostSource) ReadCosts(context.Context, string) (CostPage, error) {
+	s.cancel()
+	return s.page, nil
+}
+
+func TestReadOnlyCostSnapshotBoundaries(t *testing.T) {
+	b := CostBucket{Organization: "org", Project: "project", Start: 100, End: 200, USDmicros: 1}
+	for _, name := range []string{"cross_page_duplicate", "previous_duplicate", "previous_conflict", "previous_scope", "previous_overlap", "previous_gap", "previous_negative", "overlap", "page_limit", "cancel_after_read", "valid_previous"} {
+		t.Run(name, func(t *testing.T) {
+			mock := mockCostSource{pages: map[string]CostPage{"": {Buckets: []CostBucket{b}}}}
+			var source ReadOnlyCostSource
+			var previous []CostBucket
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			expected := ""
+			switch name {
+			case "cross_page_duplicate":
+				mock.pages[""] = CostPage{Buckets: []CostBucket{b}, Next: "two"}
+				mock.pages["two"] = CostPage{Buckets: []CostBucket{b}}
+				expected = "duplicate_bucket"
+			case "previous_duplicate":
+				previous = []CostBucket{b, b}
+				expected = "previous_duplicate"
+			case "previous_conflict":
+				other := b
+				other.USDmicros = 2
+				previous = []CostBucket{other, b}
+				expected = "previous_conflict"
+			case "previous_scope":
+				other := b
+				other.Project = "other"
+				previous = []CostBucket{other}
+				expected = "previous_invalid"
+			case "previous_overlap":
+				other := b
+				other.Start = 150
+				previous = []CostBucket{b, other}
+				expected = "previous_overlap"
+			case "previous_gap":
+				other := b
+				other.Start = 110
+				previous = []CostBucket{other}
+				expected = "previous_missing"
+			case "previous_negative":
+				other := b
+				other.USDmicros = -1
+				previous = []CostBucket{other}
+				expected = "previous_invalid"
+			case "overlap":
+				other := b
+				other.Start = 150
+				mock.pages[""] = CostPage{Buckets: []CostBucket{b, other}}
+				expected = "overlapping_bucket"
+			case "page_limit":
+				for i := range 100 {
+					cursor := ""
+					if i > 0 {
+						cursor = fmt.Sprint(i)
+					}
+					mock.pages[cursor] = CostPage{Next: fmt.Sprint(i + 1)}
+				}
+				expected = "pagination_limit"
+			case "cancel_after_read":
+				source = cancellingCostSource{CostPage{Buckets: []CostBucket{b}}, cancel}
+				expected = "cancelled"
+			case "valid_previous":
+				previous = []CostBucket{b}
+			}
+			if source == nil {
+				source = mock
+			}
+			result, err := CollectCostSnapshot(ctx, source, "org", "project", 100, 200, time.Unix(300, 0), previous)
+			if expected == "cancelled" {
+				require.ErrorIs(t, err, context.Canceled)
+			} else {
+				require.NoError(t, err)
+			}
+			require.Equal(t, expected, result.Alert)
+			require.Equal(t, expected == "", result.Complete)
+			require.False(t, result.ProviderHardLimitVerified)
 		})
 	}
 }

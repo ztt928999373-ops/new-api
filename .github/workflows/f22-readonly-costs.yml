@@ -56,7 +56,7 @@ jobs:
       - name: Verify budget migration, concurrency and Mock upstream
         run: |
           git rev-parse HEAD > "$RUNNER_TEMP/f22-logs/f2-sha.txt"
-          go test -json -race -count=1 ./service -run '^TestReadOnlyCostSnapshot$' > "$RUNNER_TEMP/f22-logs/readonly-costs.jsonl"
+          go test -json -race -count=1 ./service -run '^TestReadOnlyCostSnapshot' > "$RUNNER_TEMP/f22-logs/readonly-costs.jsonl"
           go version > "$RUNNER_TEMP/f22-logs/go-version.txt"
           SUANJIE_TEST_DATABASES=local-synthetic go test -json -race -count=1 ./router -run '^(TestUpstreamBudget|TestSupplierCost)' > "$RUNNER_TEMP/f22-logs/f2-budget-race-three-db.jsonl"
           SUANJIE_TEST_DATABASES=local-synthetic go test -json -race -count=1 ./middleware ./model ./service/credentials -run '^(TestDashboardDenialAudit.*|TestOverallChannelStatusIndependentOfCredentials|TestStoreDatabaseMatrix|TestResolverOwnerPlatformRevocationAndAuditFailure)$' > "$RUNNER_TEMP/f22-logs/f2-head-security-race.jsonl"
@@ -67,5 +67,6 @@ jobs:
           name: f22-cost-acceptance
           path: ${{ runner.temp }}/f22-logs/
           retention-days: 14
+
 
 
