@@ -92,3 +92,23 @@ test('workflow bootstrap skips absent trusted script without requiring any PR co
   assert.equal(loaded, false);
   assert.match(f.notices[0], /safely skipped/);
 });
+
+test('installed manager load/transport errors fail with fixed message and redact token-bearing errors', async () => {
+  const fs = require('node:fs');
+  const source = fs.readFileSync('.github/workflows/v1-ai-manager.yml', 'utf8').split('          script: |\n')[1].split('\n').map(l => l.slice(12)).join('\n');
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  for (const phase of ['load', 'transport']) {
+    const f = fixture(); let failure = '';
+    f.core.setFailed = message => {failure = message;};
+    const loader = name => {
+      if (name === 'node:fs') return {existsSync: () => true};
+      if (name === 'node:path') return require('node:path');
+      if (phase === 'load') throw Error('missing dependency: synthetic-secret');
+      return {manage: async () => {throw Error('https://api.telegram.org/botsynthetic-secret/sendMessage');}};
+    };
+    await new AsyncFunction('require', 'process', 'github', 'context', 'core', source)(loader, {env: {GITHUB_WORKSPACE: '/synthetic/trusted-base'}}, f.github, f.context, f.core);
+    assert.equal(failure, 'AI manager failed; check permissions, integration and secret configuration.');
+    assert.doesNotMatch(failure, /synthetic-secret/);
+    assert.equal(f.notices.length, 0);
+  }
+});
