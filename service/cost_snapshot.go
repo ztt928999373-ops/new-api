@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"slices"
 	"time"
 )
 
@@ -69,18 +70,25 @@ func CollectCostSnapshot(ctx context.Context, source ReadOnlyCostSource, organiz
 		old[b.Start] = b
 	}
 	if len(previous) > 0 {
-		position, count := start, 0
-		for position < end {
-			b, ok := old[position]
-			if !ok {
+		starts := make([]int64, 0, len(old))
+		for key := range old {
+			starts = append(starts, key)
+		}
+		slices.Sort(starts)
+		position := start
+		for _, key := range starts {
+			if key < position {
+				result.Alert = "previous_overlap"
+				return result, nil
+			}
+			if key > position {
 				result.Alert = "previous_missing"
 				return result, nil
 			}
-			position = b.End
-			count++
+			position = old[key].End
 		}
-		if count != len(old) {
-			result.Alert = "previous_overlap"
+		if position != end {
+			result.Alert = "previous_missing"
 			return result, nil
 		}
 	}
@@ -130,18 +138,27 @@ func CollectCostSnapshot(ctx context.Context, source ReadOnlyCostSource, organiz
 			buckets[b.Start] = b
 		}
 		if page.Next == "" {
+			starts := make([]int64, 0, len(buckets))
+			for key := range buckets {
+				starts = append(starts, key)
+			}
+			slices.Sort(starts)
 			position := start
-			for position < end {
-				b, ok := buckets[position]
-				if !ok {
+			for _, key := range starts {
+				if key < position {
+					result.Alert = "overlapping_bucket"
+					return result, nil
+				}
+				if key > position {
 					result.Alert = "missing_bucket"
 					return result, nil
 				}
+				b := buckets[key]
 				result.Buckets = append(result.Buckets, b)
 				position = b.End
 			}
-			if len(result.Buckets) != len(buckets) {
-				result.Alert = "overlapping_bucket"
+			if position != end {
+				result.Alert = "missing_bucket"
 				return result, nil
 			}
 			if len(previous) > 0 {

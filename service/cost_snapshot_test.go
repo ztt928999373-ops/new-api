@@ -91,7 +91,7 @@ func (s cancellingCostSource) ReadCosts(context.Context, string) (CostPage, erro
 
 func TestReadOnlyCostSnapshotBoundaries(t *testing.T) {
 	b := CostBucket{Organization: "org", Project: "project", Start: 100, End: 200, USDmicros: 1}
-	for _, name := range []string{"cross_page_duplicate", "previous_duplicate", "previous_conflict", "previous_scope", "previous_overlap", "previous_gap", "previous_negative", "overlap", "page_limit", "cancel_after_read", "valid_previous"} {
+	for _, name := range []string{"cross_page_duplicate", "previous_duplicate", "previous_conflict", "previous_scope", "previous_overlap", "previous_crossing_overlap", "previous_gap", "previous_negative", "overlap", "crossing_overlap", "page_limit", "cancel_after_read", "valid_previous"} {
 		t.Run(name, func(t *testing.T) {
 			mock := mockCostSource{pages: map[string]CostPage{"": {Buckets: []CostBucket{b}}}}
 			var source ReadOnlyCostSource
@@ -122,6 +122,16 @@ func TestReadOnlyCostSnapshotBoundaries(t *testing.T) {
 				other.Start = 150
 				previous = []CostBucket{b, other}
 				expected = "previous_overlap"
+			case "previous_crossing_overlap", "crossing_overlap":
+				first, second := b, b
+				first.End, second.Start = 160, 150
+				if name == "previous_crossing_overlap" {
+					previous = []CostBucket{first, second}
+					expected = "previous_overlap"
+				} else {
+					mock.pages[""] = CostPage{Buckets: []CostBucket{first, second}}
+					expected = "overlapping_bucket"
+				}
 			case "previous_gap":
 				other := b
 				other.Start = 110
