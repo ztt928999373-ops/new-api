@@ -15,6 +15,7 @@ import (
 	"github.com/bytedance/gopkg/util/gopool"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
+	gormlogger "gorm.io/gorm/logger"
 )
 
 const UserNameMaxLength = 20
@@ -1065,7 +1066,9 @@ func (user *User) ValidateAndFill() (err error) {
 		return ErrUserEmptyCredentials
 	}
 	// find by username or email
-	err = DB.Where("username = ? OR email = ?", username, username).First(user).Error
+	// Authentication lookup errors must not interpolate the supplied identity
+	// into ORM SQL logs. The controller emits only a fixed, sanitized failure.
+	err = DB.Session(&gorm.Session{Logger: DB.Logger.LogMode(gormlogger.Silent)}).Where("username = ? OR email = ?", username, username).First(user).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return ErrInvalidCredentials

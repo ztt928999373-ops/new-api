@@ -51,13 +51,16 @@ func GetPasswordEncryptionKey(c *gin.Context) {
 }
 
 func Login(c *gin.Context) {
+	c.Set(middleware.LoginFailureReasonKey, "system_failure")
 	if !common.PasswordLoginEnabled {
+		c.Set(middleware.LoginFailureReasonKey, "login_disabled")
 		common.ApiErrorT(c, "Password login has been disabled by administrator")
 		return
 	}
 	var loginRequest LoginRequest
 	err := common.DecodeJson(c.Request.Body, &loginRequest)
 	if err != nil {
+		c.Set(middleware.LoginFailureReasonKey, "invalid_parameters")
 		common.ApiErrorT(c, "Invalid parameters")
 		return
 	}
@@ -65,16 +68,19 @@ func Login(c *gin.Context) {
 	password := loginRequest.Password
 	if common.PasswordLoginEncryptionEnabled {
 		if loginRequest.PasswordEncrypted == "" || loginRequest.EncryptionKeyID == "" {
+			c.Set(middleware.LoginFailureReasonKey, "invalid_parameters")
 			common.ApiErrorT(c, "Invalid parameters")
 			return
 		}
 		password, err = common.DecryptPassword(loginRequest.PasswordEncrypted, loginRequest.EncryptionKeyID)
 		if err != nil {
+			c.Set(middleware.LoginFailureReasonKey, "invalid_credentials")
 			common.ApiErrorT(c, "Username or password is incorrect, or user has been banned")
 			return
 		}
 	}
 	if username == "" || password == "" {
+		c.Set(middleware.LoginFailureReasonKey, "invalid_parameters")
 		common.ApiErrorT(c, "Invalid parameters")
 		return
 	}
@@ -86,11 +92,13 @@ func Login(c *gin.Context) {
 	if err != nil {
 		switch {
 		case errors.Is(err, model.ErrDatabase):
-			common.SysLog(common.LogText("Login database error for user %s: %v", username, err))
+			common.SysLog(common.LogText("Login database error for user %s: %v", "anonymous", model.ErrDatabase))
 			common.ApiErrorT(c, "Database error, please contact the administrator")
 		case errors.Is(err, model.ErrUserEmptyCredentials):
+			c.Set(middleware.LoginFailureReasonKey, "invalid_parameters")
 			common.ApiErrorT(c, "Invalid parameters")
 		default:
+			c.Set(middleware.LoginFailureReasonKey, "invalid_credentials")
 			common.ApiErrorT(c, "Username or password is incorrect, or user has been banned")
 		}
 		return
@@ -125,7 +133,8 @@ func loginMethodFromContext(c *gin.Context) string {
 	}
 }
 
-// recordLoginAudit 记录登录成功审计日志（对所有用户启用，仅记录成功，不记录失败）。
+// recordLoginAudit retains successful login audit behavior. Password failures
+// are recorded by the bounded route middleware, before authenticated identity.
 func recordLoginAudit(user *model.User, c *gin.Context) {
 	method := loginMethodFromContext(c)
 	ip := c.ClientIP()
@@ -154,6 +163,7 @@ func setupLogin(user *model.User, migration *service.LegacyGitHubMigration, c *g
 		return
 	}
 	if challenge != nil {
+		c.Set(middleware.LoginFailureReasonKey, "")
 		setAuthNoStore(c)
 		common.ApiSuccess(c, challenge)
 		return
@@ -196,6 +206,7 @@ func setupLoginAtAuthVersion(user *model.User, expectedAuthVersion int64, c *gin
 }
 
 func writeLoginResponse(c *gin.Context, user *model.User, bundle *service.AuthBundle) {
+	c.Set(middleware.LoginFailureReasonKey, "")
 	c.Set("login_method", bundle.Session.LoginMethod)
 	model.UpdateUserLastLoginAt(user.Id)
 	service.WriteRefreshCookie(c, bundle.RefreshToken)
