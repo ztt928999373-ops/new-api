@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -13,9 +14,9 @@ import (
 func TestMockHTTPCostSource(t *testing.T) {
 	for _, scenario := range []string{"valid", "redirect", "oversized", "currency", "precision", "exponent", "project", "paging", "cancelled", "timeout", "unauthorized", "duplicate_key", "missing_paging", "missing_time"} {
 		t.Run(scenario, func(t *testing.T) {
-			calls := 0
+			var calls atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				calls++
+				calls.Add(1)
 				if scenario == "timeout" {
 					<-r.Context().Done()
 					return
@@ -73,9 +74,9 @@ func TestMockHTTPCostSource(t *testing.T) {
 				require.Error(t, err)
 			}
 			if scenario == "cancelled" {
-				require.Zero(t, calls)
+				require.Zero(t, calls.Load())
 			} else {
-				require.Equal(t, 1, calls, "no retries or redirects")
+				require.EqualValues(t, 1, calls.Load(), "no retries or redirects")
 			}
 		})
 	}
@@ -86,9 +87,9 @@ func TestMockHTTPCostSource(t *testing.T) {
 }
 
 func TestMockHTTPCompleteSnapshot(t *testing.T) {
-	calls := 0
+	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls++
+		calls.Add(1)
 		require.Equal(t, "1d", r.URL.Query().Get("bucket_width"))
 		if r.URL.Query().Get("page") == "" {
 			_, _ = w.Write([]byte(`{"object":"page","has_more":true,"next_page":"second","data":[{"start_time":100,"end_time":150,"results":[{"object":"organization.costs.result","project_id":"project","amount":{"currency":"usd","value":0.000007}}]}]}`))
@@ -103,7 +104,7 @@ func TestMockHTTPCompleteSnapshot(t *testing.T) {
 	snapshot, err := CollectCostSnapshot(context.Background(), source, "org", "project", 100, 200, time.Unix(300, 0), nil)
 	require.NoError(t, err)
 	require.True(t, snapshot.Complete)
-	require.Equal(t, 2, calls)
+	require.EqualValues(t, 2, calls.Load())
 	require.Len(t, snapshot.Buckets, 2)
 	require.EqualValues(t, 7, snapshot.Buckets[0].USDmicros)
 	require.EqualValues(t, 3, snapshot.Buckets[1].USDmicros)
