@@ -89,6 +89,101 @@ func setupUpstreamBudgetDB(t *testing.T, kind string) *gorm.DB {
 	return db
 }
 
+func TestSupplierCostReadOnlyFiltersDatabaseMatrix(t *testing.T) {
+	for _, kind := range []string{"sqlite", "mysql", "postgres"} {
+		t.Run(kind, func(t *testing.T) {
+			db := setupUpstreamBudgetDB(t, kind)
+			require.NoError(t, db.AutoMigrate(&model.UpstreamBudget{}, &model.UpstreamCostReservation{}, &model.SupplierCostStatement{}, &model.User{}, &model.UserSession{}, &model.UserAccessToken{}, &model.AuditLog{}, &model.CasbinRule{}, &model.AuthzRole{}))
+			require.NoError(t, authz.Init(db))
+			master, secret := common.IsMasterNode, common.SessionSecret
+			common.IsMasterNode, common.SessionSecret = true, "synthetic-readonly-cost-session"
+			t.Cleanup(func() { common.IsMasterNode, common.SessionSecret = master, secret })
+			tokens := map[int]string{}
+			for _, role := range []int{1, 10, 100} {
+				u := model.User{Username: fmt.Sprintf("cost-readonly-%d", role), Role: role, Status: 1, AuthVersion: 1, Group: "default", AffCode: fmt.Sprintf("read-%d", role)}
+				require.NoError(t, db.Create(&u).Error)
+				t.Cleanup(func() { db.Delete(&u) })
+				login, err := service.CreateLoginSession(u.Id, "synthetic", "127.0.0.1", "synthetic")
+				require.NoError(t, err)
+				tokens[role] = login.AccessToken
+			}
+			ch := model.Channel{Type: 1, Name: "synthetic-readonly-cost", Status: 2}
+			require.NoError(t, db.Create(&ch).Error)
+			t.Cleanup(func() { db.Delete(&ch) })
+			policy := model.UpstreamBudget{ChannelID: ch.Id, LimitMicros: 9000000, HeldMicros: 200000, ChargedMicros: 400000, Enabled: false, ReconciliationFrozen: true}
+			require.NoError(t, db.Create(&policy).Error)
+			t.Cleanup(func() { db.Delete(&policy) })
+			for i, at := range []int64{99, 100, 199, 200} {
+				row := model.SupplierCostStatement{ID: fmt.Sprintf("synthetic-readonly-%s-%d", kind, i), ChannelID: ch.Id, ActualMicros: int64(i), State: "settled", CreatedAt: at}
+				if i == 2 {
+					row.Alert = "conflicting_bill"
+				}
+				require.NoError(t, db.Create(&row).Error)
+				t.Cleanup(func() { db.Delete(&row) })
+			}
+			api := gin.New()
+			registerChannelRoutes(api.Group("/api"))
+			base := fmt.Sprintf("/api/channel/%d/upstream-budget", ch.Id)
+			get := func(role int, suffix string) *httptest.ResponseRecorder {
+				r := httptest.NewRequest("GET", base+suffix, nil)
+				if role != 0 {
+					r.Header.Set("Authorization", "Bearer "+tokens[role])
+				}
+				w := httptest.NewRecorder()
+				api.ServeHTTP(w, r)
+				return w
+			}
+			for _, role := range []int{0, 1, 10} {
+				for _, suffix := range []string{"", "/statements?start=100&end=200"} {
+					want := 403
+					if role == 0 {
+						want = 401
+					}
+					require.Equal(t, want, get(role, suffix).Code)
+				}
+			}
+			for _, scenario := range []struct {
+				query string
+				total int64
+				valid bool
+			}{
+				{"?start=100&end=200", 2, true}, {"?start=100&end=200&alerts_only=true&state=settled", 1, true},
+				{"?state=in_flight", 0, true}, {"?page=2", 4, true},
+				{"?start=200&end=100", 0, false}, {"?start=-1", 0, false}, {"?end=1.5", 0, false}, {"?state=unknown", 0, false}, {"?page=10001", 0, false},
+			} {
+				w := get(100, "/statements"+scenario.query)
+				if !scenario.valid {
+					require.Equal(t, 400, w.Code)
+					continue
+				}
+				require.Equal(t, 200, w.Code, w.Body.String())
+				var response struct {
+					Total        int64                         `json:"total"`
+					Data         []model.SupplierCostStatement `json:"data"`
+					Verification string                        `json:"verification"`
+				}
+				require.NoError(t, common.Unmarshal(w.Body.Bytes(), &response))
+				require.Equal(t, scenario.total, response.Total)
+				require.Equal(t, "operator_attested_not_independently_verified", response.Verification)
+				if scenario.query == "?page=2" {
+					require.Empty(t, response.Data)
+				}
+			}
+			require.Equal(t, 200, get(100, "").Code)
+			var after model.UpstreamBudget
+			require.NoError(t, db.First(&after, "channel_id = ?", ch.Id).Error)
+			require.Equal(t, policy, after, "GET filters never change budget, reservations or freeze state")
+			require.NoError(t, db.Callback().Query().Before("gorm:query").Register("readonly-budget-failure", func(tx *gorm.DB) {
+				if tx.Statement.Table == "upstream_budgets" {
+					tx.AddError(fmt.Errorf("synthetic database failure"))
+				}
+			}))
+			require.Equal(t, 503, get(100, "").Code, "database outage is not reported as no configured budget")
+			require.NoError(t, db.Callback().Query().Remove("readonly-budget-failure"))
+		})
+	}
+}
+
 func installBudgetTestCredential(t *testing.T, db *gorm.DB, userID int) string {
 	t.Helper()
 	keyDir := filepath.Join(t.TempDir(), "keys")
