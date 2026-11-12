@@ -1,0 +1,19 @@
+name: V1 automation safety checks
+on:
+  pull_request:
+    branches: [product/v1]
+    paths: ['.github/automation/**', '.github/workflows/v1-ai-manager.yml', '.github/workflows/v1-automation-check.yml']
+permissions:
+  contents: read
+concurrency:
+  group: v1-automation-check-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - run: node --test .github/automation/manager.test.cjs
