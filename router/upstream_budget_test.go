@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -1066,6 +1067,252 @@ func TestAggregateCostPublicationDatabaseMatrix(t *testing.T) {
 			var held model.UpstreamCostReservation
 			require.NoError(t, db.First(&held, "id = ?", reservation.ID).Error)
 			require.Equal(t, "held", held.State)
+		})
+	}
+}
+
+// This joint acceptance uses only the released F2.3a/F2.3b interfaces.
+func TestMergedMockCostPipelineDatabaseMatrix(t *testing.T) {
+	for _, kind := range []string{"sqlite", "mysql", "postgres"} {
+		t.Run(kind, func(t *testing.T) {
+			db := setupUpstreamBudgetDB(t, kind)
+			require.NoError(t, db.AutoMigrate(&model.AggregateCostHead{}, &model.AggregateCostVersion{}))
+			end := time.Now().Unix() - 10
+			start := end - 100
+			var calls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				a, b, next, more := start, start+50, "second", true
+				if r.URL.Query().Get("page") == "second" {
+					a, b, next, more = start+50, end, "", false
+				}
+				_, _ = fmt.Fprintf(w, `{"object":"page","has_more":%t,"next_page":%q,"data":[{"start_time":%d,"end_time":%d,"results":[{"object":"organization.costs.result","project_id":%q,"amount":{"currency":"usd","value":0.000007}}]}]}`, more, next, a, b, "joint-"+kind)
+			}))
+			defer server.Close()
+			source, err := service.NewMockHTTPCostSource(server.URL, "joint-org", "joint-"+kind, start, end)
+			require.NoError(t, err)
+			snapshot, err := service.CollectCostSnapshot(context.Background(), source, "joint-org", "joint-"+kind, start, end, time.Now(), nil)
+			require.NoError(t, err)
+			require.True(t, snapshot.Complete)
+			require.EqualValues(t, 2, calls.Load())
+			version, err := service.PublishMockCostSnapshot(context.Background(), db, "joint-org", "joint-"+kind, start, end, 0, snapshot)
+			require.NoError(t, err)
+			var stored model.AggregateCostVersion
+			require.NoError(t, db.First(&stored, "id = ?", version.ID).Error)
+			require.Equal(t, version, stored)
+		})
+	}
+}
+
+// Back up only quiescent synthetic fixtures, then restore into an independent
+// database. This does not add a production MySQL/PostgreSQL recovery command.
+func TestMockCostBackupRestoreDatabaseMatrix(t *testing.T) {
+	for _, kind := range []string{"sqlite", "mysql", "postgres"} {
+		t.Run(kind, func(t *testing.T) {
+			db := setupUpstreamBudgetDB(t, kind)
+			require.NoError(t, db.AutoMigrate(&model.AggregateCostHead{}, &model.AggregateCostVersion{}))
+			end := time.Now().Unix() - 10
+			snapshot := service.CostSnapshot{Complete: true, Buckets: []service.CostBucket{{Organization: "restore-org", Project: kind, Start: end - 100, End: end, USDmicros: 11}}}
+			_, err := service.PublishMockCostSnapshot(context.Background(), db, "restore-org", kind, end-100, end, 0, snapshot)
+			require.NoError(t, err)
+			var versions []model.AggregateCostVersion
+			var heads []model.AggregateCostHead
+			require.NoError(t, db.Order("id").Find(&versions).Error)
+			require.NoError(t, db.Order("scope").Find(&heads).Error)
+			var restored *gorm.DB
+			if kind == "sqlite" {
+				var files []struct{ File string }
+				require.NoError(t, db.Raw("PRAGMA database_list").Scan(&files).Error)
+				require.NotEmpty(t, files)
+				conn, err := db.DB()
+				require.NoError(t, err)
+				require.NoError(t, conn.Close()) // cold copy: SQLite is not running
+				data, err := os.ReadFile(files[0].File)
+				require.NoError(t, err)
+				path := filepath.Join(t.TempDir(), "restored.sqlite")
+				require.NoError(t, os.WriteFile(path, data, 0600))
+				restored, err = gorm.Open(sqlite.Open(path), &gorm.Config{})
+				require.NoError(t, err)
+			} else {
+				container := os.Getenv("SUANJIE_TEST_MYSQL_CONTAINER")
+				if kind == "postgres" {
+					container = os.Getenv("SUANJIE_TEST_POSTGRES_CONTAINER")
+				}
+				require.NotEmpty(t, container, "external recovery acceptance requires the synthetic CI container")
+				recovered := fmt.Sprintf("suanjie_recovery_%d", time.Now().UnixNano())
+				require.NoError(t, db.Exec("CREATE DATABASE "+recovered).Error)
+				// Database name is generated entirely by this test, never user supplied.
+				var dump, restore *exec.Cmd
+				if kind == "mysql" {
+					dump = exec.Command("docker", "exec", container, "mysqldump", "-uroot", "-psynthetic-test-only", "--single-transaction", "--set-gtid-purged=OFF", "--no-tablespaces", "credential_test")
+					restore = exec.Command("docker", "exec", "-i", container, "mysql", "-uroot", "-psynthetic-test-only", recovered)
+				} else {
+					dump = exec.Command("docker", "exec", container, "pg_dump", "-U", "postgres", "--no-owner", "--no-acl", "credential_test")
+					restore = exec.Command("docker", "exec", "-i", container, "psql", "-U", "postgres", "-v", "ON_ERROR_STOP=1", "-d", recovered)
+				}
+				data, err := dump.Output()
+				require.NoError(t, err)
+				restore.Stdin = strings.NewReader(string(data))
+				require.NoError(t, restore.Run())
+				var dialect gorm.Dialector = mysql.Open("root:synthetic-test-only@tcp(127.0.0.1:23316)/" + recovered + "?parseTime=true")
+				if kind == "postgres" {
+					dialect = postgres.Open("host=127.0.0.1 port=25436 user=postgres password=synthetic-test-only dbname=" + recovered + " sslmode=disable")
+				}
+				restored, err = gorm.Open(dialect, &gorm.Config{})
+				require.NoError(t, err)
+			}
+			conn, err := restored.DB()
+			require.NoError(t, err)
+			defer conn.Close()
+			var recoveredVersions []model.AggregateCostVersion
+			var recoveredHeads []model.AggregateCostHead
+			require.NoError(t, restored.Order("id").Find(&recoveredVersions).Error)
+			require.NoError(t, restored.Order("scope").Find(&recoveredHeads).Error)
+			require.Equal(t, versions, recoveredVersions)
+			require.Equal(t, heads, recoveredHeads)
+		})
+	}
+}
+
+// F2.3c coordinator acceptance.
+func TestMockCostCollectionDatabaseMatrix(t *testing.T) {
+	for _, kind := range []string{"sqlite", "mysql", "postgres"} {
+		t.Run(kind, func(t *testing.T) {
+			db := setupUpstreamBudgetDB(t, kind)
+			require.NoError(t, db.AutoMigrate(&model.UpstreamBudget{}, &model.UpstreamCostReservation{}, &model.AggregateCostHead{}, &model.AggregateCostVersion{}))
+			channel, policy := syntheticBudgetChannel(t, db)
+			hold, err := model.ReserveUpstreamCost(context.Background(), db, policy)
+			require.NoError(t, err)
+			var beforeBudget model.UpstreamBudget
+			require.NoError(t, db.First(&beforeBudget, "channel_id = ?", channel.Id).Error)
+			end := time.Now().Unix() - 10
+			start := end - 100
+			project := "collection-" + kind
+			var mode, calls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				require.Equal(t, "GET", r.Method)
+				require.Equal(t, "/v1/organization/costs", r.URL.Path)
+				if mode.Load() == 4 {
+					w.WriteHeader(500)
+					return
+				}
+				a, b, next, more, value := start, start+50, "second", true, "0.000007"
+				if r.URL.Query().Get("page") == "second" {
+					a, b, next, more = start+50, end, "", false
+					switch mode.Load() {
+					case 1:
+						value = "0.000008"
+					case 2:
+						a, b = start, start+50
+					case 3:
+						a, b, value = start, start+50, "0.000009"
+					case 6:
+						value = "0.000009"
+					case 7:
+						value = "-1"
+					case 8:
+						a = start + 51
+					}
+				}
+				_, _ = fmt.Fprintf(w, `{"object":"page","has_more":%t,"next_page":%q,"data":[{"start_time":%d,"end_time":%d,"results":[{"object":"organization.costs.result","project_id":%q,"amount":{"currency":"usd","value":%s}}]}]}`, more, next, a, b, project, value)
+			}))
+			defer server.Close()
+			source, err := service.NewMockHTTPCostSource(server.URL, "collection-org", project, start, end)
+			require.NoError(t, err)
+			collect := func(expected int64) (model.AggregateCostVersion, error) {
+				return service.CollectAndPublishMockCosts(context.Background(), db, source, expected)
+			}
+			query := func(before int64, limit int) ([]service.MockCostRevision, error) {
+				return service.QueryMockCostVersions(context.Background(), db, "collection-org", project, start, end, before, limit)
+			}
+			first, err := collect(0)
+			require.NoError(t, err)
+			require.EqualValues(t, 2, calls.Load(), "all pages fetched before publication")
+			replay, err := collect(0)
+			require.NoError(t, err)
+			require.Equal(t, first.ID, replay.ID)
+			mode.Store(1)
+			second, err := collect(1)
+			require.NoError(t, err)
+			require.Equal(t, "revision_requires_review", second.State)
+			rows, err := query(0, 1)
+			require.NoError(t, err)
+			require.Len(t, rows, 1)
+			require.Equal(t, second, rows[0].Version)
+			require.Len(t, rows[0].Changes, 1)
+			require.EqualValues(t, 7, rows[0].Changes[0].Before.USDmicros)
+			require.EqualValues(t, 8, rows[0].Changes[0].After.USDmicros)
+			older, err := query(2, 1)
+			require.NoError(t, err)
+			require.Len(t, older, 1)
+			require.Equal(t, first.Payload, older[0].Version.Payload)
+			require.Len(t, older[0].Changes, 2)
+			for _, failure := range []int32{2, 3, 4, 7, 8} {
+				mode.Store(failure)
+				_, err = collect(2)
+				require.Error(t, err)
+				unchanged, err := query(0, 1)
+				require.NoError(t, err)
+				require.Equal(t, second, unchanged[0].Version)
+			}
+			cancelled, cancel := context.WithCancel(context.Background())
+			cancel()
+			priorCalls := calls.Load()
+			_, err = service.CollectAndPublishMockCosts(cancelled, db, source, 2)
+			require.Error(t, err)
+			require.Equal(t, priorCalls, calls.Load())
+			_, err = service.CollectAndPublishMockCosts(context.Background(), db, nil, 2)
+			require.Error(t, err)
+			mode.Store(6)
+			require.NoError(t, db.Callback().Create().Before("gorm:create").Register("mock-collection-insert-failure", func(tx *gorm.DB) {
+				if tx.Statement.Table == "aggregate_cost_versions" {
+					tx.AddError(errors.New("synthetic insert failure"))
+				}
+			}))
+			_, err = collect(2)
+			require.Error(t, err)
+			require.NoError(t, db.Callback().Create().Remove("mock-collection-insert-failure"))
+			unchanged, err := query(0, 1)
+			require.NoError(t, err)
+			require.Equal(t, second, unchanged[0].Version)
+			var wg sync.WaitGroup
+			var published atomic.Int32
+			for range 8 {
+				wg.Go(func() {
+					row, e := collect(2)
+					if e == nil && row.Revision == 3 {
+						published.Add(1)
+					}
+				})
+			}
+			wg.Wait()
+			require.Positive(t, published.Load())
+			all, err := query(0, 100)
+			require.NoError(t, err)
+			require.Len(t, all, 3)
+			require.Equal(t, first.ID, all[2].Version.ID)
+			_, err = collect(1)
+			// Identical latest content may replay even with stale expected revision.
+			require.NoError(t, err)
+			mode.Store(1)
+			_, err = collect(1)
+			require.Error(t, err, "stale writer cannot move the head back to older content")
+			_, err = query(0, 101)
+			require.Error(t, err)
+			empty, err := service.QueryMockCostVersions(context.Background(), db, "other-org", project, start, end, 0, 10)
+			require.NoError(t, err)
+			require.Empty(t, empty)
+			require.NoError(t, db.Model(&model.AggregateCostVersion{}).Where("id = ?", all[0].Version.ID).Update("payload", "corrupt").Error)
+			_, err = query(0, 10)
+			require.Error(t, err, "corrupt restored payload must not be exposed as a valid diff")
+			require.NoError(t, db.Model(&model.AggregateCostVersion{}).Where("id = ?", all[0].Version.ID).Update("payload", all[0].Version.Payload).Error)
+			var afterBudget model.UpstreamBudget
+			require.NoError(t, db.First(&afterBudget, "channel_id = ?", channel.Id).Error)
+			require.Equal(t, beforeBudget, afterBudget)
+			var afterHold model.UpstreamCostReservation
+			require.NoError(t, db.First(&afterHold, "id = ?", hold.ID).Error)
+			require.Equal(t, hold, afterHold, "aggregate collection never releases the financial hold")
 		})
 	}
 }

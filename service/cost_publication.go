@@ -6,11 +6,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"time"
+
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
-	"time"
 )
 
 type stagedMockCosts struct{ buckets []CostBucket }
@@ -36,10 +37,8 @@ func PublishMockCostSnapshot(ctx context.Context, db *gorm.DB, organization, pro
 	if err != nil || len(payload) > 60000 {
 		return result, denied
 	}
-	scopeBytes, _ := common.Marshal([]any{"mock-openai-costs", organization, project, start, end})
-	scopeHash := sha256.Sum256(scopeBytes)
 	digest := sha256.Sum256(payload)
-	scope, digestText := hex.EncodeToString(scopeHash[:]), hex.EncodeToString(digest[:])
+	scope, digestText := mockCostScope(organization, project, start, end), hex.EncodeToString(digest[:])
 	err = db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&model.AggregateCostHead{Scope: scope}).Error != nil {
 			return denied
@@ -67,4 +66,10 @@ func PublishMockCostSnapshot(ctx context.Context, db *gorm.DB, organization, pro
 		return model.AggregateCostVersion{}, denied
 	}
 	return result, nil
+}
+
+func mockCostScope(organization, project string, start, end int64) string {
+	payload, _ := common.Marshal([]any{"mock-openai-costs", organization, project, start, end})
+	digest := sha256.Sum256(payload)
+	return hex.EncodeToString(digest[:])
 }
