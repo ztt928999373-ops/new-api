@@ -1,0 +1,284 @@
+=== Symbol Results ===
+
+Vulnerability #1: GO-2026-6888
+    Excessive memory allocation when decompressing crafted streams in
+    github.com/andybalholm/brotli
+  More info: https://pkg.go.dev/vuln/GO-2026-6888
+  Module: github.com/andybalholm/brotli
+    Found in: github.com/andybalholm/brotli@v1.2.0
+    Fixed in: github.com/andybalholm/brotli@v1.2.7
+    Example traces found:
+##[error]      #1: relay/channel/gemini/relay-gemini.go:632:25: gemini.FetchGeminiModels calls io.ReadAll, which calls brotli.Reader.Read
+##[error]      #2: controller/channel.go:1603:78: controller.CopyChannel calls brotli.decodeError.Error
+
+Vulnerability #2: GO-2026-6865
+    Panic on two-block frames in github.com/klauspost/compress
+  More info: https://pkg.go.dev/vuln/GO-2026-6865
+  Module: github.com/klauspost/compress
+    Found in: github.com/klauspost/compress@v1.18.7
+    Fixed in: github.com/klauspost/compress@v1.20.2
+    Example traces found:
+##[error]      #1: model/log.go:671:15: model.streamLogs calls sql.Rows.Next, which eventually calls fse.Compress
+##[error]      #2: service/upstream_budget.go:46:29: service.upstreamBudgetBody.Read calls zstd.Decoder.Read, which eventually calls fse.Decompress
+##[error]      #3: model/log.go:671:15: model.streamLogs calls sql.Rows.Next, which eventually calls huff0.Compress1X
+##[error]      #4: model/log.go:671:15: model.streamLogs calls sql.Rows.Next, which eventually calls huff0.Compress4X
+##[error]      #5: service/upstream_budget.go:46:29: service.upstreamBudgetBody.Read calls zstd.Decoder.Read, which eventually calls huff0.ReadTable
+
+Vulnerability #3: GO-2026-6859
+    HTTP/1 server crash due to MaxBytesReader header race in net/http
+  More info: https://pkg.go.dev/vuln/GO-2026-6859
+  Standard library
+    Found in: net/http@go1.26.10
+    Fixed in: net/http@go1.26.11
+    Example traces found:
+##[error]      #1: relay/channel/task/jsplugin/adaptor.go:1146:36: jsplugin.TaskAdaptor.BuildContentRequest calls http.CanonicalHeaderKey
+##[error]      #2: service/http_client.go:459:30: service.ResetProxyClientCache calls http.Client.CloseIdleConnections
+##[error]      #3: relay/channel/gemini/relay-gemini.go:625:29: gemini.FetchGeminiModels calls http.Client.Do
+##[error]      #4: service/download.go:67:42: service.DoDownloadRequest calls http.Client.Get
+##[error]      #5: service/download.go:49:29: service.DoWorkerRequest calls http.Client.Post
+##[error]      #6: relay/channel/vertex/service_account.go:128:30: vertex.exchangeJwtForAccessToken calls http.Client.PostForm
+##[error]      #7: controller/responses_websocket.go:117:29: controller.ResponsesWebSocket calls websocket.Upgrader.Upgrade, which eventually calls http.Error
+##[error]      #8: main.go:43:2: new.init calls pprof.init, which eventually calls http.HandleFunc
+##[error]      #9: controller/channel-billing.go:158:17: controller.GetResponseBody calls http.Header.Add
+##[error]      #10: controller/channel.go:2243:10: controller.OllamaPullModelStream calls gin.Context.Header, which calls http.Header.Del
+##[error]      #11: relay/channel/task/jsplugin/adaptor.go:503:56: jsplugin.TaskAdaptor.ParseResponse calls http.Header.Get
+##[error]      #12: relay/channel/gemini/relay-gemini.go:623:21: gemini.FetchGeminiModels calls http.Header.Set
+##[error]      #13: relay/channel/claude/adaptor.go:109:55: claude.CommonClaudeHeadersOperation calls http.Header.Values
+##[error]      #14: controller/responses_websocket.go:96:39: controller.newResponsesWSRequestRunner calls gin.Engine.ServeHTTP, which eventually calls http.Header.WriteSubset
+##[error]      #15: main.go:185:35: new.main calls http.ListenAndServe
+##[error]      #16: relay/channel/ollama/relay-ollama.go:545:33: ollama.FetchOllamaVersion calls http.NewRequest
+##[error]      #17: relay/channel/gemini/relay-gemini.go:617:45: gemini.FetchGeminiModels calls http.NewRequestWithContext
+##[error]      #18: middleware/turnstile-check.go:24:32: middleware.TurnstileCheck calls http.PostForm
+##[error]      #19: service/protected_fetch_client.go:108:26: service.ssrfProtectedRoundTripper.RoundTrip calls http.ProxyFromEnvironment
+##[error]      #20: controller/channel-test.go:156:44: controller.testChannel calls httptest.NewRequestWithContext, which calls http.ReadRequest
+##[error]      #21: relay/channel/api_request.go:426:45: channel.DoWssRequest calls websocket.Dialer.DialContext, which calls http.ReadResponse
+##[error]      #22: relay/helper/common.go:247:10: helper.StringData calls gin.Context.Render, which eventually calls http.Redirect
+##[error]      #23: relay/channel/api_request.go:426:45: channel.DoWssRequest calls websocket.Dialer.DialContext, which calls http.Request.AddCookie
+##[error]      #24: controller/auth_session.go:129:43: controller.DeleteLoginSession calls gin.Context.Cookie, which calls http.Request.Cookie
+##[error]      #25: relay/channel/cloudflare/adaptor.go:85:36: cloudflare.Adaptor.ConvertAudioRequest calls http.Request.FormFile
+##[error]      #26: controller/topup.go:418:32: controller.EpayNotify calls http.Request.ParseForm
+##[error]      #27: relay/channel/replicate/adaptor.go:407:31: replicate.uploadFileFromForm calls gin.Context.MultipartForm, which calls http.Request.ParseMultipartForm
+##[error]      #28: oauth/telegram.go:130:22: oauth.TelegramProvider.ExchangeToken calls http.Request.SetBasicAuth
+##[error]      #29: service/channel_affinity.go:561:34: service.GetPreferredChannelByAffinity calls http.Request.UserAgent
+##[error]      #30: relay/channel/api_request.go:426:45: channel.DoWssRequest calls websocket.Dialer.DialContext, which calls http.Request.Write
+##[error]      #31: relay/channel/api_request.go:426:45: channel.DoWssRequest calls websocket.Dialer.DialContext, which calls http.Response.Cookies
+##[error]      #32: relay/channel/aws/relay-aws.go:266:59: aws.awsStreamHandler calls bedrockruntime.Client.InvokeModelWithResponseStream, which eventually calls http.Response.Write
+##[error]      #33: relay/helper/stream_scanner.go:111:67: helper.streamResponseWriter.WriteString calls http.ResponseController.SetWriteDeadline
+##[error]      #34: main.go:236:31: new.main calls http.Server.ListenAndServe
+##[error]      #35: main.go:254:24: new.main calls http.Server.Shutdown
+##[error]      #36: service/auth_session.go:347:16: service.ClearRefreshCookie calls http.SetCookie
+##[error]      #37: service/http_client.go:82:37: service.newRelayHTTPTransport calls http.Transport.Clone
+##[error]      #38: service/protected_fetch_client.go:120:33: service.ssrfProtectedRoundTripper.CloseIdleConnections calls http.Transport.CloseIdleConnections
+##[error]      #39: service/protected_fetch_client.go:112:43: service.ssrfProtectedRoundTripper.RoundTrip calls http.Transport.RoundTrip
+##[error]      #40: relay/channel/gemini/relay-gemini.go:633:23: gemini.FetchGeminiModels calls http.body.Close
+##[error]      #41: service/upstream_budget.go:46:29: service.upstreamBudgetBody.Read calls http.body.Read
+##[error]      #42: relay/channel/gemini/relay-gemini.go:633:23: gemini.FetchGeminiModels calls http.bodyEOFSignal.Close
+##[error]      #43: service/upstream_budget.go:46:29: service.upstreamBudgetBody.Read calls http.bodyEOFSignal.Read
+##[error]      #44: pkg/ionet/client.go:53:24: ionet.DefaultHTTPClient.Do calls bytes.Buffer.ReadFrom, which calls http.bodyLocked.Read
+##[error]      #45: relay/channel/task/jsplugin/adaptor.go:298:31: jsplugin.TaskAdaptor.BuildRequestBody calls io.WriteString, which calls http.bufioFlushWriter.Write
+##[error]      #46: relay/channel/gemini/relay-gemini.go:633:23: gemini.FetchGeminiModels calls http.cancelTimerBody.Close
+##[error]      #47: service/upstream_budget.go:46:29: service.upstreamBudgetBody.Read calls http.cancelTimerBody.Read
+##[error]      #48: relay/channel/task/jsplugin/adaptor.go:298:31: jsplugin.TaskAdaptor.BuildRequestBody calls io.WriteString, which eventually calls http.checkConnErrorWriter.Write
+##[error]      #49: relay/channel/task/jsplugin/adaptor.go:298:31: jsplugin.TaskAdaptor.BuildRequestBody calls io.WriteString, which eventually calls http.chunkWriter.Write
+##[error]      #50: pkg/ionet/client.go:53:24: ionet.DefaultHTTPClient.Do calls bytes.Buffer.ReadFrom, which calls http.connReader.Read
+##[error]      #51: relay/channel/gemini/relay-gemini.go:633:23: gemini.FetchGeminiModels calls http.expectContinueReader.Close
+##[error]      #52: service/upstream_budget.go:46:29: service.upstreamBudgetBody.Read calls http.expectContinueReader.Read
+##[error]      #53: middleware/frontend_static.go:46:24: middleware.ServeFrontendFiles calls http.fileHandler.ServeHTTP
+##[error]      #54: relay/channel/gemini/relay-gemini.go:633:23: gemini.FetchGeminiModels calls http.gzipReader.Close
+##[error]      #55: service/upstream_budget.go:46:29: service.upstreamBudgetBody.Read calls http.gzipReader.Read
+##[error]      #56: controller/responses_websocket.go:121:2: controller.ResponsesWebSocket calls websocket.Conn.Close, which calls http.loggingConn.Close
+##[error]      #57: pkg/ionet/client.go:53:24: ionet.DefaultHTTPClient.Do calls bytes.Buffer.ReadFrom, which calls http.loggingConn.Read
+##[error]      #58: relay/channel/task/jsplugin/adaptor.go:298:31: jsplugin.TaskAdaptor.BuildRequestBody calls io.WriteString, which calls http.loggingConn.Write
+##[error]      #59: relay/channel/gemini/relay-gemini.go:633:23: gemini.FetchGeminiModels calls http.maxBytesReader.Close
+##[error]      #60: service/upstream_budget.go:46:29: service.upstreamBudgetBody.Read calls http.maxBytesReader.Read
+##[error]      #61: controller/video_proxy.go:336:11: controller.taskMediaCancelBody.Close calls sync.Once.Do, which eventually calls http.onceCloseListener.Close
+##[error]      #62: service/upstream_budget.go:46:29: service.upstreamBudgetBody.Read calls http.persistConn.Read
+##[error]      #63: relay/channel/openai/adaptor.go:602:25: openai.Adaptor.ConvertImageRequest calls io.Copy, which eventually calls http.persistConnWriter.ReadFrom
+##[error]      #64: relay/channel/task/jsplugin/adaptor.go:298:31: jsplugin.TaskAdaptor.BuildRequestBody calls io.WriteString, which eventually calls http.persistConnWriter.Write
+##[error]      #65: relay/channel/gemini/relay-gemini.go:633:23: gemini.FetchGeminiModels calls http.readTrackingBody.Close
+##[error]      #66: service/upstream_budget.go:46:29: service.upstreamBudgetBody.Read calls http.readTrackingBody.Read
+##[error]      #67: service/upstream_budget.go:46:29: service.upstreamBudgetBody.Read calls http.readWriteCloserBody.Read
+##[error]      #68: controller/channel.go:2274:16: controller.OllamaPullModelStream calls gin.responseWriter.Flush, which calls http.response.Flush
+##[error]      #69: relay/helper/common.go:164:29: helper.FlushWriter calls http.response.FlushError
+##[error]      #70: router/plugin-router.go:462:28: router.gatedResponseWriter.Hijack calls gin.responseWriter.Hijack, which calls http.response.Hijack
+##[error]      #71: relay/channel/openai/adaptor.go:602:25: openai.Adaptor.ConvertImageRequest calls io.Copy, which eventually calls http.response.ReadFrom
+##[error]      #72: relay/channel/task/jsplugin/adaptor.go:298:31: jsplugin.TaskAdaptor.BuildRequestBody calls io.WriteString, which calls http.response.Write
+##[error]      #73: relay/helper/common.go:55:38: helper.streamKeepAliveWriter.WriteHeaderNow calls gin.responseWriter.WriteHeaderNow, which calls http.response.WriteHeader
+##[error]      #74: relay/channel/task/jsplugin/adaptor.go:298:31: jsplugin.TaskAdaptor.BuildRequestBody calls io.WriteString, which calls http.response.WriteString
+##[error]      #75: controller/channel.go:1603:78: controller.CopyChannel calls http.transportReadFromServerError.Error
+
+Vulnerability #4: GO-2026-6629
+    Panic parsing crafted input in x/text/secure/precis in golang.org/x/text
+  More info: https://pkg.go.dev/vuln/GO-2026-6629
+  Module: golang.org/x/text
+    Found in: golang.org/x/text@v0.37.0
+    Fixed in: golang.org/x/text@v0.41.0
+    Example traces found:
+##[error]      #1: model/main.go:849:18: model.PingDB calls sql.DB.Ping, which eventually calls precis.Profile.String
+
+Vulnerability #5: GO-2026-6617
+    HTTP/2 server crash due to HPACK encoder race in net/http
+  More info: https://pkg.go.dev/vuln/GO-2026-6617
+  Module: golang.org/x/net
+    Found in: golang.org/x/net@v0.55.0
+    Fixed in: golang.org/x/net@v0.60.0
+    Example traces found:
+##[error]      #1: controller/channel.go:1603:78: controller.CopyChannel calls http2.ConnectionError.Error
+##[error]      #2: main.go:56:16: new.main calls fmt.Fprintln, which eventually calls http2.ErrCode.String
+##[error]      #3: main.go:56:16: new.main calls fmt.Fprintln, which eventually calls http2.FrameHeader.String
+##[error]      #4: main.go:56:16: new.main calls fmt.Fprintln, which eventually calls http2.FrameType.String
+##[error]      #5: controller/channel.go:1603:78: controller.CopyChannel calls http2.GoAwayError.Error
+##[error]      #6: main.go:56:16: new.main calls fmt.Fprintln, which eventually calls http2.Setting.String
+##[error]      #7: main.go:56:16: new.main calls fmt.Fprintln, which eventually calls http2.SettingID.String
+##[error]      #8: controller/channel.go:1603:78: controller.CopyChannel calls http2.StreamError.Error
+##[error]      #9: relay/channel/task/jsplugin/adaptor.go:298:31: jsplugin.TaskAdaptor.BuildRequestBody calls io.WriteString, which eventually calls http2.bufferedWriterTimeoutWriter.Write
+##[error]      #10: relay/channel/task/jsplugin/adaptor.go:298:31: jsplugin.TaskAdaptor.BuildRequestBody calls io.WriteString, which eventually calls http2.chunkWriter.Write
+##[error]      #11: controller/channel.go:1603:78: controller.CopyChannel calls http2.connError.Error
+##[error]      #12: controller/channel.go:1603:78: controller.CopyChannel calls http2.duplicatePseudoHeaderError.Error
+##[error]      #13: relay/channel/gemini/relay-gemini.go:633:23: gemini.FetchGeminiModels calls http2.gzipReader.Close
+##[error]      #14: service/upstream_budget.go:46:29: service.upstreamBudgetBody.Read calls http2.gzipReader.Read
+##[error]      #15: controller/channel.go:1603:78: controller.CopyChannel calls http2.headerFieldNameError.Error
+##[error]      #16: controller/channel.go:1603:78: controller.CopyChannel calls http2.headerFieldValueError.Error
+##[error]      #17: controller/channel.go:1603:78: controller.CopyChannel calls http2.pseudoHeaderError.Error
+##[error]      #18: relay/channel/task/jsplugin/adaptor.go:298:31: jsplugin.TaskAdaptor.BuildRequestBody calls io.WriteString, which eventually calls http2.stickyErrWriter.Write
+##[error]      #19: relay/channel/gemini/relay-gemini.go:633:23: gemini.FetchGeminiModels calls http2.transportResponseBody.Close
+##[error]      #20: service/upstream_budget.go:46:29: service.upstreamBudgetBody.Read calls http2.transportResponseBody.Read
+##[error]      #21: main.go:56:16: new.main calls fmt.Fprintln, which eventually calls http2.writeData.String
+
+Vulnerability #6: GO-2026-6612
+    Double flow control refund on HTTP/2 server streams in net/http
+  More info: https://pkg.go.dev/vuln/GO-2026-6612
+  Module: golang.org/x/net
+    Found in: golang.org/x/net@v0.55.0
+    Fixed in: golang.org/x/net@v0.60.0
+    Example traces found:
+##[error]      #1: controller/channel.go:1603:78: controller.CopyChannel calls http2.ConnectionError.Error
+##[error]      #2: main.go:56:16: new.main calls fmt.Fprintln, which eventually calls http2.ErrCode.String
+##[error]      #3: main.go:56:16: new.main calls fmt.Fprintln, which eventually calls http2.FrameHeader.String
+##[error]      #4: main.go:56:16: new.main calls fmt.Fprintln, which eventually calls http2.FrameType.String
+##[error]      #5: controller/channel.go:1603:78: controller.CopyChannel calls http2.GoAwayError.Error
+##[error]      #6: main.go:56:16: new.main calls fmt.Fprintln, which eventually calls http2.Setting.String
+##[error]      #7: main.go:56:16: new.main calls fmt.Fprintln, which eventually calls http2.SettingID.String
+##[error]      #8: controller/channel.go:1603:78: controller.CopyChannel calls http2.StreamError.Error
+##[error]      #9: relay/channel/task/jsplugin/adaptor.go:298:31: jsplugin.TaskAdaptor.BuildRequestBody calls io.WriteString, which eventually calls http2.bufferedWriterTimeoutWriter.Write
+##[error]      #10: relay/channel/task/jsplugin/adaptor.go:298:31: jsplugin.TaskAdaptor.BuildRequestBody calls io.WriteString, which eventually calls http2.chunkWriter.Write
+##[error]      #11: controller/channel.go:1603:78: controller.CopyChannel calls http2.connError.Error
+##[error]      #12: controller/channel.go:1603:78: controller.CopyChannel calls http2.duplicatePseudoHeaderError.Error
+##[error]      #13: relay/channel/gemini/relay-gemini.go:633:23: gemini.FetchGeminiModels calls http2.gzipReader.Close
+##[error]      #14: service/upstream_budget.go:46:29: service.upstreamBudgetBody.Read calls http2.gzipReader.Read
+##[error]      #15: controller/channel.go:1603:78: controller.CopyChannel calls http2.headerFieldNameError.Error
+##[error]      #16: controller/channel.go:1603:78: controller.CopyChannel calls http2.headerFieldValueError.Error
+##[error]      #17: controller/channel.go:1603:78: controller.CopyChannel calls http2.pseudoHeaderError.Error
+##[error]      #18: relay/channel/task/jsplugin/adaptor.go:298:31: jsplugin.TaskAdaptor.BuildRequestBody calls io.WriteString, which eventually calls http2.stickyErrWriter.Write
+##[error]      #19: relay/channel/gemini/relay-gemini.go:633:23: gemini.FetchGeminiModels calls http2.transportResponseBody.Close
+##[error]      #20: service/upstream_budget.go:46:29: service.upstreamBudgetBody.Read calls http2.transportResponseBody.Read
+##[error]      #21: main.go:56:16: new.main calls fmt.Fprintln, which eventually calls http2.writeData.String
+
+Vulnerability #7: GO-2026-6611
+    Excessive CPU consumption from repeated initial window changes in net/http
+  More info: https://pkg.go.dev/vuln/GO-2026-6611
+  Module: golang.org/x/net
+    Found in: golang.org/x/net@v0.55.0
+    Fixed in: golang.org/x/net@v0.60.0
+    Example traces found:
+##[error]      #1: controller/channel.go:1603:78: controller.CopyChannel calls http2.ConnectionError.Error
+##[error]      #2: main.go:56:16: new.main calls fmt.Fprintln, which eventually calls http2.ErrCode.String
+##[error]      #3: main.go:56:16: new.main calls fmt.Fprintln, which eventually calls http2.FrameHeader.String
+##[error]      #4: main.go:56:16: new.main calls fmt.Fprintln, which eventually calls http2.FrameType.String
+##[error]      #5: controller/channel.go:1603:78: controller.CopyChannel calls http2.GoAwayError.Error
+##[error]      #6: main.go:56:16: new.main calls fmt.Fprintln, which eventually calls http2.Setting.String
+##[error]      #7: main.go:56:16: new.main calls fmt.Fprintln, which eventually calls http2.SettingID.String
+##[error]      #8: controller/channel.go:1603:78: controller.CopyChannel calls http2.StreamError.Error
+##[error]      #9: relay/channel/task/jsplugin/adaptor.go:298:31: jsplugin.TaskAdaptor.BuildRequestBody calls io.WriteString, which eventually calls http2.bufferedWriterTimeoutWriter.Write
+##[error]      #10: relay/channel/task/jsplugin/adaptor.go:298:31: jsplugin.TaskAdaptor.BuildRequestBody calls io.WriteString, which eventually calls http2.chunkWriter.Write
+##[error]      #11: controller/channel.go:1603:78: controller.CopyChannel calls http2.connError.Error
+##[error]      #12: controller/channel.go:1603:78: controller.CopyChannel calls http2.duplicatePseudoHeaderError.Error
+##[error]      #13: relay/channel/gemini/relay-gemini.go:633:23: gemini.FetchGeminiModels calls http2.gzipReader.Close
+##[error]      #14: service/upstream_budget.go:46:29: service.upstreamBudgetBody.Read calls http2.gzipReader.Read
+##[error]      #15: controller/channel.go:1603:78: controller.CopyChannel calls http2.headerFieldNameError.Error
+##[error]      #16: controller/channel.go:1603:78: controller.CopyChannel calls http2.headerFieldValueError.Error
+##[error]      #17: controller/channel.go:1603:78: controller.CopyChannel calls http2.pseudoHeaderError.Error
+##[error]      #18: relay/channel/task/jsplugin/adaptor.go:298:31: jsplugin.TaskAdaptor.BuildRequestBody calls io.WriteString, which eventually calls http2.stickyErrWriter.Write
+##[error]      #19: relay/channel/gemini/relay-gemini.go:633:23: gemini.FetchGeminiModels calls http2.transportResponseBody.Close
+##[error]      #20: service/upstream_budget.go:46:29: service.upstreamBudgetBody.Read calls http2.transportResponseBody.Read
+##[error]      #21: main.go:56:16: new.main calls fmt.Fprintln, which eventually calls http2.writeData.String
+
+Vulnerability #8: GO-2026-6603
+    HTTP/2 server memory exhaustion due to Trailer headers in net/http
+  More info: https://pkg.go.dev/vuln/GO-2026-6603
+  Module: golang.org/x/net
+    Found in: golang.org/x/net@v0.55.0
+    Fixed in: golang.org/x/net@v0.60.0
+    Example traces found:
+##[error]      #1: controller/channel.go:1603:78: controller.CopyChannel calls http2.ConnectionError.Error
+##[error]      #2: main.go:56:16: new.main calls fmt.Fprintln, which eventually calls http2.ErrCode.String
+##[error]      #3: main.go:56:16: new.main calls fmt.Fprintln, which eventually calls http2.FrameHeader.String
+##[error]      #4: main.go:56:16: new.main calls fmt.Fprintln, which eventually calls http2.FrameType.String
+##[error]      #5: controller/channel.go:1603:78: controller.CopyChannel calls http2.GoAwayError.Error
+##[error]      #6: main.go:56:16: new.main calls fmt.Fprintln, which eventually calls http2.Setting.String
+##[error]      #7: main.go:56:16: new.main calls fmt.Fprintln, which eventually calls http2.SettingID.String
+##[error]      #8: controller/channel.go:1603:78: controller.CopyChannel calls http2.StreamError.Error
+##[error]      #9: relay/channel/task/jsplugin/adaptor.go:298:31: jsplugin.TaskAdaptor.BuildRequestBody calls io.WriteString, which eventually calls http2.bufferedWriterTimeoutWriter.Write
+##[error]      #10: relay/channel/task/jsplugin/adaptor.go:298:31: jsplugin.TaskAdaptor.BuildRequestBody calls io.WriteString, which eventually calls http2.chunkWriter.Write
+##[error]      #11: controller/channel.go:1603:78: controller.CopyChannel calls http2.connError.Error
+##[error]      #12: controller/channel.go:1603:78: controller.CopyChannel calls http2.duplicatePseudoHeaderError.Error
+##[error]      #13: relay/channel/gemini/relay-gemini.go:633:23: gemini.FetchGeminiModels calls http2.gzipReader.Close
+##[error]      #14: service/upstream_budget.go:46:29: service.upstreamBudgetBody.Read calls http2.gzipReader.Read
+##[error]      #15: controller/channel.go:1603:78: controller.CopyChannel calls http2.headerFieldNameError.Error
+##[error]      #16: controller/channel.go:1603:78: controller.CopyChannel calls http2.headerFieldValueError.Error
+##[error]      #17: controller/channel.go:1603:78: controller.CopyChannel calls http2.pseudoHeaderError.Error
+##[error]      #18: relay/channel/task/jsplugin/adaptor.go:298:31: jsplugin.TaskAdaptor.BuildRequestBody calls io.WriteString, which eventually calls http2.stickyErrWriter.Write
+##[error]      #19: relay/channel/gemini/relay-gemini.go:633:23: gemini.FetchGeminiModels calls http2.transportResponseBody.Close
+##[error]      #20: service/upstream_budget.go:46:29: service.upstreamBudgetBody.Read calls http2.transportResponseBody.Read
+##[error]      #21: main.go:56:16: new.main calls fmt.Fprintln, which eventually calls http2.writeData.String
+
+Vulnerability #9: GO-2026-6222
+    Excessive memory allocation during VP8L decoding in golang.org/x/image
+  More info: https://pkg.go.dev/vuln/GO-2026-6222
+  Module: golang.org/x/image
+    Found in: golang.org/x/image@v0.41.0
+    Fixed in: golang.org/x/image@v0.45.0
+    Example traces found:
+##[error]      #1: service/file_service.go:474:33: service.decodeImageConfig calls webp.DecodeConfig, which eventually calls vp8l.Decode
+
+Vulnerability #10: GO-2026-5970
+    Infinite loop on invalid input in golang.org/x/text
+  More info: https://pkg.go.dev/vuln/GO-2026-5970
+  Module: golang.org/x/text
+    Found in: golang.org/x/text@v0.37.0
+    Fixed in: golang.org/x/text@v0.39.0
+    Example traces found:
+##[error]      #1: setting/system_setting/passkey.go:58:34: system_setting.NormalizePasskeyRPID calls idna.Profile.ToASCII, which eventually calls norm.Form.Bytes
+##[error]      #2: setting/system_setting/passkey.go:58:34: system_setting.NormalizePasskeyRPID calls idna.Profile.ToASCII, which eventually calls norm.Form.IsNormalString
+##[error]      #3: model/migration_dialector.go:11:2: model.init calls schema.init, which eventually calls norm.Form.Properties
+##[error]      #4: setting/system_setting/passkey.go:58:34: system_setting.NormalizePasskeyRPID calls idna.Profile.ToASCII, which eventually calls norm.Form.QuickSpan
+##[error]      #5: model/main.go:849:18: model.PingDB calls sql.DB.Ping, which eventually calls norm.Form.Span
+##[error]      #6: setting/system_setting/passkey.go:58:34: system_setting.NormalizePasskeyRPID calls idna.Profile.ToASCII, which eventually calls norm.Form.String
+##[error]      #7: model/main.go:849:18: model.PingDB calls sql.DB.Ping, which eventually calls norm.Form.Transform
+
+Vulnerability #11: GO-2026-5061
+    Panic on VP8 alpha channel size mismatch in x/image/webp in
+    golang.org/x/image
+  More info: https://pkg.go.dev/vuln/GO-2026-5061
+  Module: golang.org/x/image
+    Found in: golang.org/x/image@v0.41.0
+    Fixed in: golang.org/x/image@v0.43.0
+    Example traces found:
+##[error]      #1: service/file_service.go:474:33: service.decodeImageConfig calls webp.DecodeConfig
+##[error]      #2: service/file_service.go:22:2: service.init calls webp.init
+
+Vulnerability #12: GO-2026-4961
+    Panic when decoding large WEBP image on 32-bit platforms in
+    golang.org/x/image
+  More info: https://pkg.go.dev/vuln/GO-2026-4961
+  Module: golang.org/x/image
+    Found in: golang.org/x/image@v0.41.0
+    Fixed in: golang.org/x/image@v0.42.0
+    Example traces found:
+##[error]      #1: service/file_service.go:474:33: service.decodeImageConfig calls webp.DecodeConfig
+
+Your code is affected by 12 vulnerabilities from 5 modules and the Go standard library.
+This scan also found 3 vulnerabilities in packages you import and 8
+vulnerabilities in modules you require, but your code doesn't appear to call
+these vulnerabilities.
+Use '-show verbose' for more details.

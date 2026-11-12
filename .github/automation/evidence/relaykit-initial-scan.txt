@@ -1,0 +1,243 @@
+=== Symbol Results ===
+
+Vulnerability #1: GO-2026-6859
+    HTTP/1 server crash due to MaxBytesReader header race in net/http
+  More info: https://pkg.go.dev/vuln/GO-2026-6859
+  Standard library
+    Found in: net/http@go1.25.1
+    Fixed in: net/http@go1.26.11
+    Example traces found:
+##[error]      #1: relayconvert/kitutil/log.go:63:13: kitutil.LogSystemError calls fmt.Fprintf, which eventually calls http.CanonicalHeaderKey
+##[error]      #2: relayconvert/kitutil/log.go:63:13: kitutil.LogSystemError calls fmt.Fprintf, which eventually calls http.Header.Del
+##[error]      #3: relayconvert/kitutil/log.go:63:13: kitutil.LogSystemError calls fmt.Fprintf, which eventually calls http.Header.Get
+##[error]      #4: relayconvert/kitutil/value.go:45:18: kitutil.GetUUID calls uuid.New, which eventually calls http.bodyEOFSignal.Read
+
+Vulnerability #2: GO-2026-6617
+    HTTP/2 server crash due to HPACK encoder race in net/http
+  More info: https://pkg.go.dev/vuln/GO-2026-6617
+  Standard library
+    Found in: net/http@go1.25.1
+    Fixed in: net/http@go1.26.9
+    Example traces found:
+##[error]      #1: relayconvert/kitutil/value.go:45:18: kitutil.GetUUID calls uuid.New, which eventually calls http.bodyEOFSignal.Read
+##[error]      #2: relayconvert/kitutil/value.go:45:18: kitutil.GetUUID calls uuid.New, which eventually calls http.bodyEOFSignal.Read
+##[error]      #3: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2ErrCode.String
+##[error]      #4: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2ErrCode.String
+##[error]      #5: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2FrameType.String
+##[error]      #6: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2FrameType.String
+##[error]      #7: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2Setting.String
+##[error]      #8: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2Setting.String
+##[error]      #9: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2SettingID.String
+##[error]      #10: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2SettingID.String
+##[error]      #11: relayconvert/kitutil/log.go:63:13: kitutil.LogSystemError calls fmt.Fprintf, which eventually calls http.http2bufferedWriterTimeoutWriter.Write
+##[error]      #12: relayconvert/kitutil/log.go:63:13: kitutil.LogSystemError calls fmt.Fprintf, which eventually calls http.http2bufferedWriterTimeoutWriter.Write
+##[error]      #13: relayconvert/kitutil/log.go:63:13: kitutil.LogSystemError calls fmt.Fprintf, which eventually calls http.http2chunkWriter.Write
+##[error]      #14: relayconvert/kitutil/log.go:63:13: kitutil.LogSystemError calls fmt.Fprintf, which eventually calls http.http2chunkWriter.Write
+##[error]      #15: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2duplicatePseudoHeaderError.Error
+##[error]      #16: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2duplicatePseudoHeaderError.Error
+##[error]      #17: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2headerFieldNameError.Error
+##[error]      #18: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2headerFieldNameError.Error
+##[error]      #19: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2headerFieldValueError.Error
+##[error]      #20: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2headerFieldValueError.Error
+##[error]      #21: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2pseudoHeaderError.Error
+##[error]      #22: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2pseudoHeaderError.Error
+##[error]      #23: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2writeData.String
+##[error]      #24: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2writeData.String
+
+Vulnerability #3: GO-2026-6613
+    HTTP/1 server connection desynchronization after 2xx CONNECT response in
+    net/http
+  More info: https://pkg.go.dev/vuln/GO-2026-6613
+  Standard library
+    Found in: net/http@go1.25.1
+    Fixed in: net/http@go1.26.9
+    Example traces found:
+##[error]      #1: relayconvert/kitutil/log.go:63:13: kitutil.LogSystemError calls fmt.Fprintf, which eventually calls http.CanonicalHeaderKey
+##[error]      #2: relayconvert/kitutil/log.go:63:13: kitutil.LogSystemError calls fmt.Fprintf, which eventually calls http.Header.Del
+##[error]      #3: relayconvert/kitutil/log.go:63:13: kitutil.LogSystemError calls fmt.Fprintf, which eventually calls http.Header.Get
+##[error]      #4: relayconvert/kitutil/value.go:45:18: kitutil.GetUUID calls uuid.New, which eventually calls http.bodyEOFSignal.Read
+
+Vulnerability #4: GO-2026-6612
+    Double flow control refund on HTTP/2 server streams in net/http
+  More info: https://pkg.go.dev/vuln/GO-2026-6612
+  Standard library
+    Found in: net/http@go1.25.1
+    Fixed in: net/http@go1.26.9
+    Example traces found:
+##[error]      #1: relayconvert/kitutil/value.go:45:18: kitutil.GetUUID calls uuid.New, which eventually calls http.bodyEOFSignal.Read
+##[error]      #2: relayconvert/kitutil/value.go:45:18: kitutil.GetUUID calls uuid.New, which eventually calls http.bodyEOFSignal.Read
+##[error]      #3: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2ErrCode.String
+##[error]      #4: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2ErrCode.String
+##[error]      #5: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2FrameType.String
+##[error]      #6: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2FrameType.String
+##[error]      #7: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2Setting.String
+##[error]      #8: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2Setting.String
+##[error]      #9: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2SettingID.String
+##[error]      #10: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2SettingID.String
+##[error]      #11: relayconvert/kitutil/log.go:63:13: kitutil.LogSystemError calls fmt.Fprintf, which eventually calls http.http2bufferedWriterTimeoutWriter.Write
+##[error]      #12: relayconvert/kitutil/log.go:63:13: kitutil.LogSystemError calls fmt.Fprintf, which eventually calls http.http2bufferedWriterTimeoutWriter.Write
+##[error]      #13: relayconvert/kitutil/log.go:63:13: kitutil.LogSystemError calls fmt.Fprintf, which eventually calls http.http2chunkWriter.Write
+##[error]      #14: relayconvert/kitutil/log.go:63:13: kitutil.LogSystemError calls fmt.Fprintf, which eventually calls http.http2chunkWriter.Write
+##[error]      #15: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2duplicatePseudoHeaderError.Error
+##[error]      #16: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2duplicatePseudoHeaderError.Error
+##[error]      #17: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2headerFieldNameError.Error
+##[error]      #18: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2headerFieldNameError.Error
+##[error]      #19: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2headerFieldValueError.Error
+##[error]      #20: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2headerFieldValueError.Error
+##[error]      #21: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2pseudoHeaderError.Error
+##[error]      #22: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2pseudoHeaderError.Error
+##[error]      #23: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2writeData.String
+##[error]      #24: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2writeData.String
+
+Vulnerability #5: GO-2026-6611
+    Excessive CPU consumption from repeated initial window changes in net/http
+  More info: https://pkg.go.dev/vuln/GO-2026-6611
+  Standard library
+    Found in: net/http@go1.25.1
+    Fixed in: net/http@go1.26.9
+    Example traces found:
+##[error]      #1: relayconvert/kitutil/value.go:45:18: kitutil.GetUUID calls uuid.New, which eventually calls http.bodyEOFSignal.Read
+##[error]      #2: relayconvert/kitutil/value.go:45:18: kitutil.GetUUID calls uuid.New, which eventually calls http.bodyEOFSignal.Read
+##[error]      #3: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2ErrCode.String
+##[error]      #4: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2ErrCode.String
+##[error]      #5: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2FrameType.String
+##[error]      #6: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2FrameType.String
+##[error]      #7: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2Setting.String
+##[error]      #8: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2Setting.String
+##[error]      #9: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2SettingID.String
+##[error]      #10: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2SettingID.String
+##[error]      #11: relayconvert/kitutil/log.go:63:13: kitutil.LogSystemError calls fmt.Fprintf, which eventually calls http.http2bufferedWriterTimeoutWriter.Write
+##[error]      #12: relayconvert/kitutil/log.go:63:13: kitutil.LogSystemError calls fmt.Fprintf, which eventually calls http.http2bufferedWriterTimeoutWriter.Write
+##[error]      #13: relayconvert/kitutil/log.go:63:13: kitutil.LogSystemError calls fmt.Fprintf, which eventually calls http.http2chunkWriter.Write
+##[error]      #14: relayconvert/kitutil/log.go:63:13: kitutil.LogSystemError calls fmt.Fprintf, which eventually calls http.http2chunkWriter.Write
+##[error]      #15: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2duplicatePseudoHeaderError.Error
+##[error]      #16: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2duplicatePseudoHeaderError.Error
+##[error]      #17: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2headerFieldNameError.Error
+##[error]      #18: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2headerFieldNameError.Error
+##[error]      #19: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2headerFieldValueError.Error
+##[error]      #20: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2headerFieldValueError.Error
+##[error]      #21: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2pseudoHeaderError.Error
+##[error]      #22: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2pseudoHeaderError.Error
+##[error]      #23: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2writeData.String
+##[error]      #24: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2writeData.String
+
+Vulnerability #6: GO-2026-6603
+    HTTP/2 server memory exhaustion due to Trailer headers in net/http
+  More info: https://pkg.go.dev/vuln/GO-2026-6603
+  Standard library
+    Found in: net/http@go1.25.1
+    Fixed in: net/http@go1.26.9
+    Example traces found:
+##[error]      #1: relayconvert/kitutil/value.go:45:18: kitutil.GetUUID calls uuid.New, which eventually calls http.bodyEOFSignal.Read
+##[error]      #2: relayconvert/kitutil/value.go:45:18: kitutil.GetUUID calls uuid.New, which eventually calls http.bodyEOFSignal.Read
+##[error]      #3: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2ErrCode.String
+##[error]      #4: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2ErrCode.String
+##[error]      #5: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2FrameType.String
+##[error]      #6: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2FrameType.String
+##[error]      #7: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2Setting.String
+##[error]      #8: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2Setting.String
+##[error]      #9: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2SettingID.String
+##[error]      #10: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2SettingID.String
+##[error]      #11: relayconvert/kitutil/log.go:63:13: kitutil.LogSystemError calls fmt.Fprintf, which eventually calls http.http2bufferedWriterTimeoutWriter.Write
+##[error]      #12: relayconvert/kitutil/log.go:63:13: kitutil.LogSystemError calls fmt.Fprintf, which eventually calls http.http2bufferedWriterTimeoutWriter.Write
+##[error]      #13: relayconvert/kitutil/log.go:63:13: kitutil.LogSystemError calls fmt.Fprintf, which eventually calls http.http2chunkWriter.Write
+##[error]      #14: relayconvert/kitutil/log.go:63:13: kitutil.LogSystemError calls fmt.Fprintf, which eventually calls http.http2chunkWriter.Write
+##[error]      #15: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2duplicatePseudoHeaderError.Error
+##[error]      #16: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2duplicatePseudoHeaderError.Error
+##[error]      #17: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2headerFieldNameError.Error
+##[error]      #18: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2headerFieldNameError.Error
+##[error]      #19: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2headerFieldValueError.Error
+##[error]      #20: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2headerFieldValueError.Error
+##[error]      #21: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2pseudoHeaderError.Error
+##[error]      #22: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2pseudoHeaderError.Error
+##[error]      #23: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2writeData.String
+##[error]      #24: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls http.http2writeData.String
+
+Vulnerability #7: GO-2026-5972
+    Enforce maximum recursion depth in encoding/asn1
+  More info: https://pkg.go.dev/vuln/GO-2026-5972
+  Standard library
+    Found in: encoding/asn1@go1.25.1
+    Fixed in: encoding/asn1@go1.25.13
+    Example traces found:
+##[error]      #1: relayconvert/kitutil/log_safety.go:86:72: kitutil.SanitizeLogText calls strings.Replacer.Replace, which eventually calls asn1.Unmarshal
+
+Vulnerability #8: GO-2026-5037
+    Inefficient candidate hostname parsing in crypto/x509
+  More info: https://pkg.go.dev/vuln/GO-2026-5037
+  Standard library
+    Found in: crypto/x509@go1.25.1
+    Fixed in: crypto/x509@go1.25.11
+    Example traces found:
+##[error]      #1: dto/claude.go:675:24: dto.ClaudeResponse.GetClaudeError calls fmt.Sprintf, which eventually calls x509.HostnameError.Error
+
+Vulnerability #9: GO-2026-4602
+    FileInfo can escape from a Root in os
+  More info: https://pkg.go.dev/vuln/GO-2026-4602
+  Standard library
+    Found in: os@go1.25.1
+    Fixed in: os@go1.25.8
+    Example traces found:
+##[error]      #1: relayconvert/kitutil/log_safety.go:86:72: kitutil.SanitizeLogText calls strings.Replacer.Replace, which eventually calls os.ReadDir
+
+Vulnerability #10: GO-2026-4601
+    Incorrect parsing of IPv6 host literals in net/url
+  More info: https://pkg.go.dev/vuln/GO-2026-4601
+  Standard library
+    Found in: net/url@go1.25.1
+    Fixed in: net/url@go1.25.8
+    Example traces found:
+##[error]      #1: relayconvert/kitutil/mask.go:116:27: kitutil.MaskSensitiveInfo calls url.Parse
+
+Vulnerability #11: GO-2026-4341
+    Memory exhaustion in query parameter parsing in net/url
+  More info: https://pkg.go.dev/vuln/GO-2026-4341
+  Standard library
+    Found in: net/url@go1.25.1
+    Fixed in: net/url@go1.25.6
+    Example traces found:
+##[error]      #1: relayconvert/kitutil/mask.go:72:31: kitutil.maskURLQuery calls url.ParseQuery
+##[error]      #2: dto/gemini.go:163:16: dto.GeminiChatRequest.IsStream calls url.URL.Query
+
+Vulnerability #12: GO-2025-4011
+    Parsing DER payload can cause memory exhaustion in encoding/asn1
+  More info: https://pkg.go.dev/vuln/GO-2025-4011
+  Standard library
+    Found in: encoding/asn1@go1.25.1
+    Fixed in: encoding/asn1@go1.25.2
+    Example traces found:
+##[error]      #1: relayconvert/kitutil/log_safety.go:86:72: kitutil.SanitizeLogText calls strings.Replacer.Replace, which eventually calls asn1.Unmarshal
+
+Vulnerability #13: GO-2025-4010
+    Insufficient validation of bracketed IPv6 hostnames in net/url
+  More info: https://pkg.go.dev/vuln/GO-2025-4010
+  Standard library
+    Found in: net/url@go1.25.1
+    Fixed in: net/url@go1.25.2
+    Example traces found:
+##[error]      #1: relayconvert/kitutil/mask.go:116:27: kitutil.MaskSensitiveInfo calls url.Parse
+
+Vulnerability #14: GO-2025-4009
+    Quadratic complexity when parsing some invalid inputs in encoding/pem
+  More info: https://pkg.go.dev/vuln/GO-2025-4009
+  Standard library
+    Found in: encoding/pem@go1.25.1
+    Fixed in: encoding/pem@go1.25.2
+    Example traces found:
+##[error]      #1: relayconvert/kitutil/log_safety.go:86:72: kitutil.SanitizeLogText calls strings.Replacer.Replace, which eventually calls pem.Decode
+
+Vulnerability #15: GO-2025-4007
+    Quadratic complexity when checking name constraints in crypto/x509
+  More info: https://pkg.go.dev/vuln/GO-2025-4007
+  Standard library
+    Found in: crypto/x509@go1.25.1
+    Fixed in: crypto/x509@go1.25.3
+    Example traces found:
+##[error]      #1: relayconvert/kitutil/log_safety.go:86:72: kitutil.SanitizeLogText calls strings.Replacer.Replace, which eventually calls x509.CertPool.AppendCertsFromPEM
+##[error]      #2: relayconvert/kitutil/log_safety.go:86:72: kitutil.SanitizeLogText calls strings.Replacer.Replace, which eventually calls x509.ParseCertificate
+
+Your code is affected by 15 vulnerabilities from the Go standard library.
+This scan also found 31 vulnerabilities in packages you import and 16
+vulnerabilities in modules you require, but your code doesn't appear to call
+these vulnerabilities.
+Use '-show verbose' for more details.
