@@ -1,0 +1,37 @@
+name: V1 operations weekly report
+on:
+  schedule:
+    - cron: '10 1 * * 1' # Monday 09:10 Asia/Shanghai (GitHub may delay)
+  workflow_dispatch:
+permissions:
+  contents: read
+  issues: read
+  checks: read
+concurrency:
+  group: v1-ops-weekly
+  cancel-in-progress: false
+jobs:
+  report:
+    if: github.repository == 'ztt928999373-ops/new-api' && github.ref == 'refs/heads/product/v1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout trusted weekly report
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: .github/automation
+      - name: Generate and deliver OPS report
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea9
+        env:
+          TELEGRAM_OPS_BOT_TOKEN: ${{ secrets.TELEGRAM_OPS_BOT_TOKEN }}
+          TELEGRAM_OPS_CHAT_ID: ${{ secrets.TELEGRAM_OPS_CHAT_ID }}
+        with:
+          script: |
+            try {
+              const {runOps} = require('./.github/automation/ops-report.cjs');
+              await runOps({github, context, core});
+            } catch {
+              core.setFailed('OPS report failed; inspect the last fixed stage marker. No sensitive error details logged.');
+            }
