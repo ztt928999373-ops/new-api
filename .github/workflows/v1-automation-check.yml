@@ -2,7 +2,7 @@ name: V1 automation safety checks
 on:
   pull_request:
     branches: [product/v1]
-    paths: ['.github/automation/**', '.github/workflows/v1-ai-manager.yml', '.github/workflows/v1-automation-check.yml']
+    paths: ['.github/automation/**', '.github/workflows/v1-ai-manager.yml', '.github/workflows/v1-upstream-monitor.yml', '.github/workflows/v1-automation-check.yml']
 permissions:
   contents: read
 concurrency:
@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
           persist-credentials: false
-      - run: node --test .github/automation/manager.test.cjs
+      - run: node --test .github/automation/manager.test.cjs .github/automation/upstream-monitor.test.cjs
   trusted-base-bootstrap:
     # Exercise the real workflow against the immutable old base, without secrets.
     permissions:

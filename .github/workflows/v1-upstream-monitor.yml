@@ -1,0 +1,82 @@
+name: 算介 API｜U1 官方更新监控
+on:
+  schedule:
+    - cron: '20 1 * * 1' # Monday 09:20 Asia/Shanghai; GitHub may delay
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: v1-upstream-monitor
+  cancel-in-progress: false
+jobs:
+  monitor:
+    if: github.repository == 'ztt928999373-ops/new-api' && github.ref == 'refs/heads/product/v1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: 检出可信产品主线脚本
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: .github/automation
+      - name: 恢复上次成功通知检查点
+        id: previous
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea9
+        with:
+          retries: 0
+          script: |
+            try {
+              const {data} = await github.rest.actions.listWorkflowRuns({...context.repo,
+                workflow_id: 'v1-upstream-monitor.yml', branch: 'product/v1', status: 'success', per_page: 30});
+              for (const run of data.workflow_runs) {
+                if (!['schedule', 'workflow_dispatch'].includes(run.event) || run.head_repository?.full_name !== 'ztt928999373-ops/new-api') continue;
+                const artifacts = await github.rest.actions.listWorkflowRunArtifacts({...context.repo, run_id: run.id, per_page: 100});
+                if (artifacts.data.artifacts.some(a => a.name === 'u1-checkpoint-v1' && !a.expired)) {
+                  core.setOutput('run', String(run.id)); return;
+                }
+              }
+              core.notice('没有可恢复的检查点；首次运行或保留期已过，将完整比较。');
+            } catch {
+              core.setFailed('恢复检查点失败；本次停止，避免重复通知。');
+            }
+      - name: 下载可信监控工作流检查点
+        if: steps.previous.outputs.run != ''
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: u1-checkpoint-v1
+          path: .u1-state
+          run-id: ${{ steps.previous.outputs.run }}
+          github-token: ${{ github.token }}
+      - name: 只读检查官方更新并复用技术主管通知
+        id: report
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea9
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        with:
+          retries: 0
+          script: |
+            const fs = require('node:fs');
+            try {
+              const previous = fs.existsSync('.u1-state/checkpoint.json')
+                ? JSON.parse(fs.readFileSync('.u1-state/checkpoint.json', 'utf8')) : null;
+              const {runUpstream} = require('./.github/automation/upstream-monitor.cjs');
+              await runUpstream({github, context, core, previous, save: async state => {
+                fs.mkdirSync('.u1-state', {recursive: true});
+                fs.writeFileSync('.u1-state/checkpoint.json', JSON.stringify(state));
+                core.setOutput('checkpoint', 'save');
+              }});
+            } catch {
+              core.setFailed('官方更新监控失败；检查点未提交，未输出敏感错误详情。');
+            }
+      - name: 保存已成功通知的检查点（含未变化时续存）
+        if: steps.report.outputs.checkpoint == 'save'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          path: .u1-state
+          name: u1-checkpoint-v1
+          retention-days: 90
+          include-hidden-files: true
+          if-no-files-found: error

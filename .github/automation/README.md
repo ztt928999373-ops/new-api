@@ -1,5 +1,17 @@
 # 算介 V1 虚拟员工
 
+## U1 官方更新监控（2026-11-13）
+
+新增独立 `v1-upstream-monitor.yml`，每周一北京时间 09:20（UTC 周一 01:20）检查；GitHub 定时可能延迟。此次已只读核实仓库默认分支为 `product/v1`，因此本工作流人工合并后可在默认分支调度。下文旧版“默认分支 main”的说明属于历史验收状态，不代表当前状态。不修改默认分支或产品代码。
+
+通过 GitHub 只读 API 比较固定官方 `QuantumNous/new-api main` 与当次 `product/v1` SHA，复用 `manager.cjs` 的 `notify`；不改变技术主管与运营主管。简体中文报告保存在 Actions Summary，Telegram 仅发送固定分类计数、SHA、报告链接，不发送上游任意标题/正文。分类为标题关键词线索，全部标记待核实，不能当作漏洞判定或迁移结论。每类最多列 20 个官方提交链接（无重要线索时 3 个），其余指向完整比较。
+
+首次扫描产品缺少的全部官方提交；以后同时比较当前产品完整差异与上次成功通知之后的官方增量。上游 SHA 相同不重复发送通知。只从本仓库、本工作流、产品主线的成功 schedule/workflow_dispatch 运行恢复 JSON 检查点，不执行产物代码；通知成功才推进，未变化时续存。检查点为 90 天保留的 Actions Artifact，无密钥、无仓库代码写入。产物失效/删除或超过最近 30 次成功运行的查找窗口可能导致重新初扫；Telegram 已成功但产物保存失败也可能重报，不宣称严格 exactly-once。
+
+任何比较超过 500 个提交、分页不完整、异常检查点、上游历史改写或访问失败均停止并标记待核实，不伪报无更新、不推进状态。Telegram 缺失时仍产出报告但明确未发送，不推进；部分配置或发送失败使工作流失败。网络 API 单次 15 秒、禁用主动重试，工作流限时 5 分钟。仅 contents:read / actions:read，复用现有 Telegram Secrets，不购买资源、不调用付费 AI。
+
+验收：`node --test .github/automation/manager.test.cjs .github/automation/upstream-monitor.test.cjs`；`actionlint -shellcheck= -pyflakes= .github/workflows/v1-upstream-monitor.yml .github/workflows/v1-automation-check.yml`。本地通知全部 Mock，不发送真实 Telegram。人工合并后首次定时/手工运行和真实送达仍需复核；本批不手动触发真实通知。
+
 AI-assisted。唯一主线 product/v1，费用后台 #22 的分支不受本工作影响。最终审核和合并由所有者决定。
 
 ## 审核采用 Codex 原生 Automatic Code Review
