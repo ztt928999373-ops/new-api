@@ -34,7 +34,9 @@ jobs:
           export SUANJIE_SHA=$(git rev-parse HEAD)
           docker compose -f deploy/d1/compose.yml config --quiet
           docker compose -f deploy/d1/compose.yml up -d --no-build --wait --wait-timeout 180
-          curl --fail --silent http://127.0.0.1:5781/api/status | jq -e '.success == true'
+          docker compose -f deploy/d1/compose.yml port app 3000
+          docker inspect --format '{{json .NetworkSettings.Ports}}' "$(docker compose -f deploy/d1/compose.yml ps -q app)"
+          curl --fail --silent --show-error http://127.0.0.1:5781/api/status | jq -e '.success == true'
           node deploy/d1/verify-admin.mjs
           docker compose -f deploy/d1/compose.yml exec -T app sh -c 'sha256sum /licenses/LICENSE /licenses/NOTICE /licenses/THIRD-PARTY-LICENSES.md' > /tmp/d1-licenses
           sha256sum LICENSE NOTICE THIRD-PARTY-LICENSES.md | awk '{print $1}' > /tmp/d1-source-licenses
@@ -46,7 +48,7 @@ jobs:
           docker compose -f deploy/d1/compose.yml up -d --no-build --force-recreate --wait --wait-timeout 180
           test "$(docker compose -f deploy/d1/compose.yml exec -T app cat /data/d1-proof)" = d1-persist
           docker compose -f deploy/d1/compose.yml exec -T app sqlite3 /data/test.sqlite 'PRAGMA quick_check;' | grep -qx ok
-          curl --fail --silent -H 'Content-Type: application/json' -d '{"username":"d1-denied","password":"Synthetic-D1-Only!2026"}' http://127.0.0.1:5781/api/user/register | jq -e '.success == false'
+          curl --fail --silent --show-error -H 'Content-Type: application/json' -d '{"username":"d1-denied","password":"Synthetic-D1-Only!2026"}' http://127.0.0.1:5781/api/user/register | jq -e '.success == false'
           docker compose -f deploy/d1/compose.yml exec -T app sqlite3 /data/test.sqlite "SELECT count(*) FROM options WHERE key IN ('RegisterEnabled','PasswordRegisterEnabled','payment_setting.compliance_confirmed') AND value='false';" | grep -qx 3
           docker compose -f deploy/d1/compose.yml exec -T app sqlite3 /data/test.sqlite 'SELECT count(*) FROM channels;' | grep -qx 0
       - name: 清理本次临时容器和卷
