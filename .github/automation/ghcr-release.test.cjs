@@ -130,16 +130,17 @@ test('管理员可绕过保护时拒绝发布，API 异常不放行',async()=>{
 function remoteFixture(mode='valid'){
  const {createHash}=require('node:crypto');
  const hash=b=>'sha256:'+createHash('sha256').update(b).digest('hex');
- const config=Buffer.from(JSON.stringify({os:'linux',architecture:'amd64',config:{Entrypoint:['/new-api'],Labels:{
+ let config=Buffer.from(JSON.stringify({os:'linux',architecture:'amd64',config:{Entrypoint:['/new-api'],Labels:{
   'org.opencontainers.image.source':'https://github.com/ztt928999373-ops/new-api',
   'org.opencontainers.image.revision':mode==='wrong-source'?'b'.repeat(40):SHA,
   'org.opencontainers.image.version':`sha-${SHA}`,'org.opencontainers.image.licenses':'AGPL-3.0-only',
  }}}));
+ if(mode==='invalid-json')config=Buffer.from('synthetic-private:{');
  const configDigest=hash(config);
  const manifest=Buffer.from(JSON.stringify({schemaVersion:2,config:{digest:mode==='wrong-config'?'sha256:'+'0'.repeat(64):configDigest}}));
  const digest=hash(manifest);
  return {sha:SHA,digest,configDigest,actor:'synthetic',token:'synthetic-only',fetcher:async(url,opts)=>{
-  assert.equal(new URL(url).hostname,'ghcr.io');assert.equal(opts.redirect,'error');
+  assert.equal(new URL(url).hostname,'ghcr.io');assert.equal(opts.redirect,url.includes('/token?')?'error':'manual');
   if(url.includes('/token?'))return {ok:true,json:async()=>({token:'synthetic-bearer'})};
   if(mode==='missing')return new Response('',{status:404});
   const content=url.includes('/manifests/')?manifest:config;
@@ -163,4 +164,129 @@ test('明确区分未推送、命令成功但 Digest 失败、推送未知和 Re
  assert.equal(publicationState({attempted:true,pushSucceeded:true,verified:false}),'推送命令成功但 Digest 未验证');
  assert.equal(publicationState({attempted:true,pushSucceeded:false,verified:false}),'推送状态未知');
  assert.equal(publicationState({attempted:true,pushSucceeded:false,verified:true}),'Registry 已验证发布');
+});
+
+
+function redirectedFixture(location = 'https://pkg-containers.githubusercontent.com/blob?sig=synthetic-private') {
+ const f = remoteFixture(), original = f.fetcher, calls = [];
+ let blob;
+ f.fetcher = async (url, opts) => {
+  calls.push({url, opts});
+  if (new URL(url).hostname === 'ghcr.io') {
+   const response = await original(url, opts);
+   if (url.includes('/blobs/')) {
+    blob = Buffer.from(await response.arrayBuffer());
+    return new Response(null, {status: 307, headers: {location}});
+   }
+   return response;
+  }
+  return new Response(blob);
+ };
+ return {f, calls};
+}
+
+test('Config blob 仅跟随一次官方 HTTPS 307，存储请求不含任何认证头并共享超时', async () => {
+ const {f, calls} = redirectedFixture();
+ assert.equal(await verifyRemoteDigest(f), `ghcr.io/ztt928999373-ops/suanjie-api@${f.digest}`);
+ const registry = calls.find(c => c.url.includes('/blobs/'));
+ const storage = calls.at(-1);
+ assert.equal(new URL(storage.url).hostname, 'pkg-containers.githubusercontent.com');
+ assert.deepEqual(storage.opts.headers, {Accept: 'application/octet-stream'});
+ assert.equal(storage.opts.credentials, 'omit');
+ assert.equal(storage.opts.redirect, 'manual');
+ assert.equal(storage.opts.signal, registry.opts.signal);
+});
+
+test('拒绝非法 blob 跳转且安全错误不含签名参数、响应或凭据', async t => {
+ for (const location of [
+  'https://evil.example/blob?sig=synthetic-private',
+  'https://pkg-containers.githubusercontent.com.evil.example/blob',
+  'http://pkg-containers.githubusercontent.com/blob',
+  'https://user:synthetic-private@pkg-containers.githubusercontent.com/blob',
+  'https://pkg-containers.githubusercontent.com:8443/blob',
+  '/relative?sig=synthetic-private', 'not-a-url',
+ ]) {
+  await t.test(location.split('?')[0], async () => {
+   const {f, calls} = redirectedFixture(location);
+   await assert.rejects(verifyRemoteDigest(f), {message: 'D2_BLOB_REDIRECT_REJECTED'});
+   assert.equal(calls.length, 3);
+  });
+ }
+});
+
+test('Manifest 跳转和 Config 连续跳转均禁止，不请求第二跳', async () => {
+ const m = remoteFixture(), original = m.fetcher;
+ m.fetcher = async (url, opts) => url.includes('/manifests/')
+  ? new Response(null, {status: 307, headers: {location: 'https://pkg-containers.githubusercontent.com/manifest'}})
+  : original(url, opts);
+ await assert.rejects(verifyRemoteDigest(m), {message: 'D2_MANIFEST_REDIRECT_REJECTED'});
+ const {f, calls} = redirectedFixture(), wrapped = f.fetcher;
+ f.fetcher = async (url, opts) => {
+  const response = await wrapped(url, opts);
+  return new URL(url).hostname === 'pkg-containers.githubusercontent.com'
+   ? new Response(null, {status: 307, headers: {location: 'https://evil.example/private?sig=synthetic-private'}})
+   : response;
+ };
+ await assert.rejects(verifyRemoteDigest(f), {message: 'D2_BLOB_REDIRECT_LIMIT'});
+ assert.equal(calls.length, 4);
+});
+
+test('正常跳转后仍验证 Config 哈希并限制响应大小', async () => {
+ for (const [content, code] of [['tampered', 'D2_CONFIG_HASH_MISMATCH'], [Buffer.alloc(1024 * 1024 + 1), 'D2_REGISTRY_BODY_LIMIT']]) {
+  const {f} = redirectedFixture(), original = f.fetcher;
+  f.fetcher = async (url, opts) => new URL(url).hostname === 'pkg-containers.githubusercontent.com'
+   ? new Response(content) : original(url, opts);
+  await assert.rejects(verifyRemoteDigest(f), {message: code});
+ }
+});
+
+test('超时、网络异常和响应流异常只暴露安全错误码', async t => {
+ const controller = new AbortController();
+ t.mock.method(AbortSignal, 'timeout', milliseconds => {assert.equal(milliseconds, 15000); return controller.signal;});
+ const {f} = redirectedFixture(), original = f.fetcher;
+ f.fetcher = async (url, opts) => {
+  if (new URL(url).hostname === 'pkg-containers.githubusercontent.com') {
+   controller.abort();
+   throw Error('synthetic-private token and signed URL');
+  }
+  return original(url, opts);
+ };
+ await assert.rejects(verifyRemoteDigest(f), {message: 'D2_REGISTRY_TIMEOUT'});
+ t.mock.restoreAll();
+ for (const mode of ['network', 'stream', 'status']) {
+  const {f} = redirectedFixture(), original = f.fetcher;
+  f.fetcher = async (url, opts) => {
+   if (new URL(url).hostname !== 'pkg-containers.githubusercontent.com') return original(url, opts);
+   if (mode === 'network') throw Error('https://private.example/?sig=synthetic-private');
+   if (mode === 'stream') return new Response(new ReadableStream({start(c) {c.error(Error('synthetic-private'));}}));
+   return new Response('synthetic-private', {status: 403});
+  };
+  await assert.rejects(verifyRemoteDigest(f), {message: mode === 'status' ? 'D2_REGISTRY_HTTP_403' : 'D2_REGISTRY_READ_FAILED'});
+ }
+});
+
+
+test('错误诊断只记录安全码，不记录认证异常或已通过哈希检查的无效 JSON', async t => {
+ const messages = [];
+ t.mock.method(console, 'error', message => messages.push(message));
+ const f = remoteFixture();
+ f.fetcher = async () => {throw Error('synthetic-private token and URL');};
+ await assert.rejects(verifyRemoteDigest(f), {message: 'D2_REGISTRY_AUTH_FAILED'});
+ await assert.rejects(verifyRemoteDigest(remoteFixture('invalid-json')), {message: 'D2_CONFIG_JSON_INVALID'});
+ assert.deepEqual(messages, ['D2_REGISTRY_AUTH_FAILED', 'D2_CONFIG_JSON_INVALID']);
+});
+
+
+test('公共镜像可匿名只读复核，仅申请 pull；写入前的标签门禁仍拒绝无凭据', async () => {
+ const {f} = redirectedFixture(), original = f.fetcher;
+ delete f.actor; delete f.token;
+ f.fetcher = async (url, opts) => {
+  if (url.includes('/token?')) {
+   assert.equal(new URL(url).searchParams.get('scope'), 'repository:ztt928999373-ops/suanjie-api:pull');
+   assert.deepEqual(opts.headers, {});
+  }
+  return original(url, opts);
+ };
+ assert.equal(await verifyRemoteDigest(f), `ghcr.io/ztt928999373-ops/suanjie-api@${f.digest}`);
+ await assert.rejects(assertTagAbsent({sha: SHA, fetcher: f.fetcher}), /D2_REGISTRY_AUTH_MISSING/);
 });
