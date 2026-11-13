@@ -1,0 +1,55 @@
+name: D1 自有镜像隔离验收（不推送）
+on:
+  pull_request:
+    branches: [product/v1]
+    paths: ['Dockerfile', '.dockerignore', 'deploy/d1/**', '.github/workflows/v1-d1-container.yml']
+permissions:
+  contents: read
+concurrency:
+  group: d1-container-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  isolated:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: 注入一次性测试随机值
+        run: |
+          session=$(openssl rand -hex 32)
+          crypto=$(openssl rand -hex 32)
+          echo "::add-mask::$session"
+          echo "::add-mask::$crypto"
+          echo "D1_SESSION_SECRET=$session" >> "$GITHUB_ENV"
+          echo "D1_CRYPTO_SECRET=$crypto" >> "$GITHUB_ENV"
+      - name: 复用根 Dockerfile 构建自有 SHA 镜像
+        shell: pwsh
+        run: ./deploy/d1/Build-Images.ps1
+      - name: 健康、许可证、持久化及注册关闭验收
+        run: |
+          set -euo pipefail
+          export SUANJIE_SHA=$(git rev-parse HEAD)
+          docker compose -f deploy/d1/compose.yml config --quiet
+          docker compose -f deploy/d1/compose.yml up -d --no-build --wait --wait-timeout 180
+          curl --fail --silent http://127.0.0.1:5781/api/status | jq -e '.success == true'
+          docker compose -f deploy/d1/compose.yml exec -T app sh -c 'sha256sum /licenses/LICENSE /licenses/NOTICE /licenses/THIRD-PARTY-LICENSES.md' > /tmp/d1-licenses
+          sha256sum LICENSE NOTICE THIRD-PARTY-LICENSES.md | awk '{print $1}' > /tmp/d1-source-licenses
+          awk '{print $1}' /tmp/d1-licenses | diff - /tmp/d1-source-licenses
+          docker compose -f deploy/d1/compose.yml exec -T app sh -c 'printf d1-persist > /data/d1-proof'
+          docker compose -f deploy/d1/compose.yml restart app
+          docker compose -f deploy/d1/compose.yml up -d --no-build --wait --wait-timeout 180
+          test "$(docker compose -f deploy/d1/compose.yml exec -T app cat /data/d1-proof)" = d1-persist
+          docker compose -f deploy/d1/compose.yml up -d --no-build --force-recreate --wait --wait-timeout 180
+          test "$(docker compose -f deploy/d1/compose.yml exec -T app cat /data/d1-proof)" = d1-persist
+          docker compose -f deploy/d1/compose.yml exec -T app sqlite3 /data/test.sqlite 'PRAGMA quick_check;' | grep -qx ok
+          curl --fail --silent -H 'Content-Type: application/json' -d '{"username":"d1-denied","password":"Synthetic-D1-Only!2026"}' http://127.0.0.1:5781/api/user/register | jq -e '.success == false'
+          docker compose -f deploy/d1/compose.yml exec -T app sqlite3 /data/test.sqlite "SELECT count(*) FROM options WHERE key IN ('RegisterEnabled','PasswordRegisterEnabled','payment_setting.compliance_confirmed') AND value='false';" | grep -qx 3
+          docker compose -f deploy/d1/compose.yml exec -T app sqlite3 /data/test.sqlite 'SELECT count(*) FROM channels;' | grep -qx 0
+      - name: 清理本次临时容器和卷
+        if: always()
+        run: |
+          export SUANJIE_SHA=$(git rev-parse HEAD)
+          docker compose -f deploy/d1/compose.yml down --volumes
