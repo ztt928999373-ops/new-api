@@ -152,7 +152,7 @@ jobs:
             }
             const state = release.publicationState({attempted, pushSucceeded, verified});
             await core.summary.addRaw(`## D2 发布状态\n源码：${process.env.RELEASE_SHA}\n状态：${state}\n${reference}\n不创建版本标签，不部署。未知或验证失败需人工查询，不可盲目重试。`).write();
-            if (attempted && (!verified || !pushSucceeded)) core.setFailed('D2 发布未完成确认；请依据上述状态核实 Registry，不能认定未发布。');
+            if ((attempted && (!verified || !pushSucceeded)) || ['failure', 'cancelled'].includes(process.env.PUSH_OUTCOME)) core.setFailed('D2 发布未完成确认；请依据上述状态核实 Registry，不能认定未发布。');
       - name: 清除临时 registry 登录
         if: always() && steps.login.outcome == 'success'
         run: docker logout ghcr.io

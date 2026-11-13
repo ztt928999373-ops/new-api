@@ -4,7 +4,7 @@ on:
     branches: [product/v1]
   pull_request:
     branches: [product/v1]
-    paths: ['.github/automation/ghcr-release*', '.github/workflows/v1-d2-*.yml', 'deploy/d2/**']
+    paths: ['.github/automation/ghcr-*', '.github/workflows/v1-d2-*.yml', 'deploy/d2/**']
 permissions:
   contents: read
 jobs:
