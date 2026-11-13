@@ -20,6 +20,7 @@ services:
       PORT: '3000'
       TRUSTED_PROXIES: none
       SESSION_COOKIE_SECURE: 'false' # 仅回环 HTTP 测试；VPS 必须另行配置 HTTPS
+      PASSWORD_LOGIN_ENCRYPTION_ENABLED: 'true'
       DEBUG: 'false'
       ENABLE_PPROF: 'false'
       BATCH_UPDATE_ENABLED: 'false'
