@@ -1,0 +1,71 @@
+name: suanjie-d1
+services:
+  app:
+    image: suanjie-api-test:${SUANJIE_SHA:?必须设置完整源码提交 SHA}
+    pull_policy: never
+    build:
+      context: ../..
+      dockerfile: deploy/d1/Dockerfile
+      args:
+        PRODUCT_IMAGE: suanjie-api:${SUANJIE_SHA:?必须先构建同一 SHA 的自有基础镜像}
+    restart: 'no'
+    environment:
+      SESSION_SECRET: ${D1_SESSION_SECRET:?必须注入隔离测试随机值}
+      CRYPTO_SECRET: ${D1_CRYPTO_SECRET:?必须注入另一个隔离测试随机值}
+      SQL_DSN: local
+      LOG_SQL_DSN: ''
+      SQLITE_PATH: /data/test.sqlite
+      REDIS_CONN_STRING: ''
+      BIND_ADDRESS: 0.0.0.0
+      PORT: '3000'
+      TRUSTED_PROXIES: none
+      SESSION_COOKIE_SECURE: 'false' # 仅回环 HTTP 测试；VPS 必须另行配置 HTTPS
+      PASSWORD_LOGIN_ENCRYPTION_ENABLED: 'true'
+      DEBUG: 'false'
+      ENABLE_PPROF: 'false'
+      BATCH_UPDATE_ENABLED: 'false'
+      DEFAULT_LANGUAGE: zh-CN
+      TZ: Asia/Shanghai
+    volumes:
+      - d1-data:/data
+    networks: [isolated]
+    security_opt: ['no-new-privileges:true']
+    cap_drop: [ALL]
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q -O - http://127.0.0.1:3000/api/status | grep -q ''"success":true''']
+      start_period: 60s
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: json-file
+      options: {max-size: '10m', max-file: '3'}
+  ingress:
+    image: suanjie-api-test:${SUANJIE_SHA:?必须设置完整源码提交 SHA}
+    pull_policy: never
+    entrypoint: ['socat']
+    command: ['TCP-LISTEN:3000,reuseaddr,fork', 'TCP:app:3000']
+    user: '65534:65534'
+    read_only: true
+    restart: 'no'
+    security_opt: ['no-new-privileges:true']
+    cap_drop: [ALL]
+    ports: ['127.0.0.1:5781:3000']
+    networks: [isolated, ingress]
+    depends_on:
+      app:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q -O - http://127.0.0.1:3000/api/status | grep -q ''"success":true''']
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: json-file
+      options: {max-size: '10m', max-file: '3'}
+networks:
+  isolated:
+    internal: true
+  ingress:
+volumes:
+  d1-data:
