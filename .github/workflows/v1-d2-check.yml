@@ -1,5 +1,7 @@
 name: D2 发布机制专项检查（无推送）
 on:
+  push:
+    branches: [product/v1]
   pull_request:
     branches: [product/v1]
     paths: ['.github/automation/ghcr-release*', '.github/workflows/v1-d2-*.yml', 'deploy/d2/**']
@@ -12,5 +14,11 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
+      - run: git rev-parse HEAD
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: '1.4.4'
+      - run: bun .github/automation/ghcr-workflow-check.mjs
       - run: node --test .github/automation/ghcr-release.test.cjs
