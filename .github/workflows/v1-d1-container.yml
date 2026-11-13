@@ -53,6 +53,8 @@ jobs:
           curl --fail --silent --show-error -H 'Content-Type: application/json' -d '{"username":"d1-denied","password":"Synthetic-D1-Only!2026"}' http://127.0.0.1:5781/api/user/register | jq -e '.success == false'
           docker compose -f deploy/d1/compose.yml exec -T app sqlite3 /data/test.sqlite "SELECT count(*) FROM options WHERE key IN ('RegisterEnabled','PasswordRegisterEnabled','payment_setting.compliance_confirmed') AND value='false';" | grep -qx 3
           docker compose -f deploy/d1/compose.yml exec -T app sqlite3 /data/test.sqlite 'SELECT count(*) FROM channels;' | grep -qx 0
+          docker compose -f deploy/d1/compose.yml exec -T app sqlite3 /data/test.sqlite "SELECT count(*) FROM users WHERE username='d1-admin' AND role=100;" | grep -qx 1
+          echo 'D1 动态验收全部通过：健康、管理员、许可证、关闭注册支付、出站隔离、重启、重建、数据库持久化和 SQLite 完整性。'
       - name: 清理本次临时容器和卷
         if: always()
         run: |
