@@ -28,7 +28,9 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
           sparse-checkout: .github/automation
-      - name: 核对主线、安全回归和人工审批规则
+      - name: 当前提交 D2 专项测试
+        run: node --test .github/automation/ghcr-release.test.cjs
+      - name: 核对主线、全部 CI 和人工审批规则
         id: gate
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea9
         env:
@@ -39,7 +41,7 @@ jobs:
             try {
               const result = await require('./.github/automation/ghcr-release.cjs').releaseGate({github, context, sha: process.env.RELEASE_SHA});
               core.setOutput('sha', result.sha);
-              await core.summary.addRaw(`申请发布：${result.image}\n安全回归运行：${result.securityRun}\n需要人工批准 d2-ghcr-release；本任务尚未获得 packages:write。`).write();
+              await core.summary.addRaw(`申请发布：${result.image}\n安全回归运行：${JSON.stringify(result.checks)}\n需要人工批准 d2-ghcr-release；本任务尚未获得 packages:write。`).write();
             } catch {
               core.setFailed('D2 发布资格不满足；请核对当前产品 SHA、安全回归成功及人工审批环境。');
             }
@@ -75,20 +77,35 @@ jobs:
             } catch {
               core.setFailed('D2 发布停止：资格已变化、标签已存在或 GHCR 权限/访问失败；不会覆盖已有标签。');
             }
-      - name: 复用 D1 Dockerfile 构建并校验元数据和许可证
+      - name: 配置隔离 BuildKit 构建器
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c
+      - name: 构建并校验元数据和许可证（不推送）
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
-          docker build --platform linux/amd64 \
+          docker buildx build --platform linux/amd64 --provenance=false --load \
             --label "org.opencontainers.image.revision=$RELEASE_SHA" \
             --label "org.opencontainers.image.version=sha-$RELEASE_SHA" \
             --label 'org.opencontainers.image.source=https://github.com/ztt928999373-ops/new-api' \
-            --label 'org.opencontainers.image.licenses=AGPL-3.0-only' \
-            -t "$RELEASE_IMAGE" .
+            --label 'org.opencontainers.image.licenses=AGPL-3.0-only' -t "$RELEASE_IMAGE" .
           docker image inspect "$RELEASE_IMAGE" > /tmp/d2-inspect.json
           node -e "const fs=require('node:fs'); require('./.github/automation/ghcr-release.cjs').validateMetadata(JSON.parse(fs.readFileSync('/tmp/d2-inspect.json','utf8'))[0],process.env.RELEASE_SHA)"
           docker run --rm --network none --entrypoint sha256sum "$RELEASE_IMAGE" /licenses/LICENSE /licenses/NOTICE /licenses/THIRD-PARTY-LICENSES.md | awk '{print $1}' > /tmp/d2-image-licenses
           sha256sum LICENSE NOTICE THIRD-PARTY-LICENSES.md | awk '{print $1}' | diff - /tmp/d2-image-licenses
+      - name: 推送前再次核对全部检查及旧标签
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea9
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        with:
+          retries: 0
+          script: |
+            try {
+              const release = require('./.github/automation/ghcr-release.cjs');
+              await release.releaseGate({github, context, sha: process.env.RELEASE_SHA});
+              await release.assertTagAbsent({sha: process.env.RELEASE_SHA, actor: context.actor, token: process.env.GHCR_TOKEN});
+            } catch {
+              core.setFailed('D2 推送前检查失败，不执行推送。');
+            }
       - name: 仅登录自有 GHCR
         id: login
         uses: docker/login-action@c99871dec2022cc055c062a10cc1a1310835ceb4
@@ -96,19 +113,46 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ github.token }}
-      - name: 推送唯一 SHA 标签并记录固定摘要
+      - name: 仅按 Digest 推送（不创建或覆盖任何标签）
+        id: push
+        continue-on-error: true
         run: |
           set -euo pipefail
-          docker push "$RELEASE_IMAGE" | tee /tmp/d2-push.log
-          digest=$(sed -n 's/.*digest: \(sha256:[a-f0-9]\{64\}\).*/\1/p' /tmp/d2-push.log)
-          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
-          {
-            echo '## D2 自有 GHCR 发布完成（未部署）'
-            echo "源码：$RELEASE_SHA"
-            echo "标签：$RELEASE_IMAGE"
-            echo "固定引用：ghcr.io/ztt928999373-ops/suanjie-api@$digest"
-            echo '版本选择和未来回滚请使用固定摘要；不会自动部署。'
-          } >> "$GITHUB_STEP_SUMMARY"
+          printf attempted > /tmp/d2-push-attempted
+          docker buildx build --platform linux/amd64 --provenance=false \
+            --label "org.opencontainers.image.revision=$RELEASE_SHA" \
+            --label "org.opencontainers.image.version=sha-$RELEASE_SHA" \
+            --label 'org.opencontainers.image.source=https://github.com/ztt928999373-ops/new-api' \
+            --label 'org.opencontainers.image.licenses=AGPL-3.0-only' \
+            --output 'type=image,name=ghcr.io/ztt928999373-ops/suanjie-api,push-by-digest=true,push=true' \
+            --metadata-file /tmp/d2-pushed.json .
+      - name: 始终记录发布状态并从 Registry 验证 Digest
+        if: always()
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea9
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+          PUSH_OUTCOME: ${{ steps.push.outcome }}
+        with:
+          retries: 0
+          script: |
+            const fs = require('node:fs');
+            const release = require('./.github/automation/ghcr-release.cjs');
+            const attempted = fs.existsSync('/tmp/d2-push-attempted');
+            const pushSucceeded = process.env.PUSH_OUTCOME === 'success';
+            let verified = false, reference = '';
+            if (attempted) {
+              try {
+                const digest = JSON.parse(fs.readFileSync('/tmp/d2-pushed.json', 'utf8'))['containerimage.digest'];
+                const configDigest = JSON.parse(fs.readFileSync('/tmp/d2-inspect.json', 'utf8'))[0].Id;
+                reference = await release.verifyRemoteDigest({sha: process.env.RELEASE_SHA, digest, configDigest, actor: context.actor, token: process.env.GHCR_TOKEN});
+                verified = true;
+              } catch {
+                // Never print registry errors, tokens or response bodies.
+              }
+            }
+            const state = release.publicationState({attempted, pushSucceeded, verified});
+            await core.summary.addRaw(`## D2 发布状态\n源码：${process.env.RELEASE_SHA}\n状态：${state}\n${reference}\n不创建版本标签，不部署。未知或验证失败需人工查询，不可盲目重试。`).write();
+            if ((attempted && (!verified || !pushSucceeded)) || ['failure', 'cancelled'].includes(process.env.PUSH_OUTCOME)) core.setFailed('D2 发布未完成确认；请依据上述状态核实 Registry，不能认定未发布。');
       - name: 清除临时 registry 登录
         if: always() && steps.login.outcome == 'success'
         run: docker logout ghcr.io
