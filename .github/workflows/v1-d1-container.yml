@@ -35,6 +35,7 @@ jobs:
           docker compose -f deploy/d1/compose.yml config --quiet
           docker compose -f deploy/d1/compose.yml up -d --no-build --wait --wait-timeout 180
           curl --fail --silent http://127.0.0.1:5781/api/status | jq -e '.success == true'
+          node deploy/d1/verify-admin.mjs
           docker compose -f deploy/d1/compose.yml exec -T app sh -c 'sha256sum /licenses/LICENSE /licenses/NOTICE /licenses/THIRD-PARTY-LICENSES.md' > /tmp/d1-licenses
           sha256sum LICENSE NOTICE THIRD-PARTY-LICENSES.md | awk '{print $1}' > /tmp/d1-source-licenses
           awk '{print $1}' /tmp/d1-licenses | diff - /tmp/d1-source-licenses

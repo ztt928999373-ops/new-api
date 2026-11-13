@@ -29,7 +29,7 @@ SQLite 无数据库服务器密码；Session/加密秘密从进程环境注入�
 
 卷为 `suanjie-d1_d1-data`，持久保存完整 `/data`。通常停止使用 `docker compose ... stop` 或 `down`，不要添加 `--volumes`。CI 是一次性数据，才在结尾删除自己的卷。
 
-验收命令见 `.github/workflows/v1-d1-container.yml`：健康、三个许可证文件哈希、重启和强制重建后标记保持、SQLite quick_check、注册拒绝、支付关闭及零渠道。工作流不会推送镜像、不会登录 registry。
+验收命令见 `.github/workflows/v1-d1-container.yml`：健康、一次性合成管理员初始化与加密登录、三个许可证文件哈希、重启和强制重建后标记保持、SQLite quick_check、注册拒绝、支付关闭及零渠道。`verify-admin.mjs` 只访问固定回环地址，不输出凭据，拒绝已有初始化实例，不能在原实例执行。工作流不会推送镜像、不会登录 registry。
 
 备份前停止 app 并确认已退出；禁止直接复制运行中的 SQLite。用相同 SHA 的测试镜像以 `--network none --entrypoint tar`，只读挂载完整停机卷，将整个目录归档到另外的私有备份位置。备份包含数据库及生成的加密材料，应限制目录权限并加密保管；Session/CRYPTO 环境随机值须单独安全备份。记录镜像 ID/digest、源码 SHA、备份校验和及时间。
 
