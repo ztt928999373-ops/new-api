@@ -164,43 +164,47 @@ func RequestStripePay(c *gin.Context) {
 func StripeWebhook(c *gin.Context) {
 	ctx := c.Request.Context()
 	if !isStripeWebhookEnabled() {
-		logger.LogWarn(ctx, common.LogText("Stripe webhook rejected reason=webhook_disabled path=%q client_ip=%s", c.Request.RequestURI, c.ClientIP()))
+		logger.LogWarn(ctx, common.LogText("Stripe webhook rejected stage=availability sensitive_fields=omitted"))
 		c.AbortWithStatus(http.StatusForbidden)
 		return
 	}
 
 	payload, err := io.ReadAll(c.Request.Body)
 	if err != nil {
-		logger.LogError(ctx, common.LogText("Stripe webhook failed to read request body path=%q client_ip=%s error=%q", c.Request.RequestURI, c.ClientIP(), err.Error()))
+		logger.LogError(ctx, common.LogText("Stripe webhook rejected stage=read_body reason=read_failed sensitive_fields=omitted"))
 		c.AbortWithStatus(http.StatusServiceUnavailable)
 		return
 	}
 
 	signature := c.GetHeader("Stripe-Signature")
-	logger.LogInfo(ctx, common.LogText("Stripe webhook received request path=%q client_ip=%s signature=%q body=%q", c.Request.RequestURI, c.ClientIP(), signature, string(payload)))
+	logger.LogInfo(ctx, common.LogText("Stripe webhook received stage=signature_verification body_bytes=%d sensitive_fields=omitted", len(payload)))
 	event, err := webhook.ConstructEventWithOptions(payload, signature, setting.StripeWebhookSecret, webhook.ConstructEventOptions{
 		IgnoreAPIVersionMismatch: true,
 	})
 
 	if err != nil {
-		logger.LogWarn(ctx, common.LogText("Stripe webhook signature verification failed path=%q client_ip=%s error=%q", c.Request.RequestURI, c.ClientIP(), err.Error()))
+		logger.LogWarn(ctx, common.LogText("Stripe webhook rejected stage=signature_verification reason=invalid_event_or_signature sensitive_fields=omitted"))
 		c.AbortWithStatus(http.StatusBadRequest)
 		return
 	}
 
 	callerIp := c.ClientIP()
-	logger.LogInfo(ctx, common.LogText("Stripe webhook signature verified event_type=%s client_ip=%s path=%q", string(event.Type), callerIp, c.Request.RequestURI))
+	logger.LogInfo(ctx, common.LogText("Stripe webhook signature verified stage=dispatch sensitive_fields=omitted"))
 	switch event.Type {
 	case stripe.EventTypeCheckoutSessionCompleted:
+		logger.LogInfo(ctx, common.LogText("Stripe webhook dispatch event_type=%s sensitive_fields=omitted", stripe.EventTypeCheckoutSessionCompleted))
 		sessionCompleted(ctx, event, callerIp)
 	case stripe.EventTypeCheckoutSessionExpired:
+		logger.LogInfo(ctx, common.LogText("Stripe webhook dispatch event_type=%s sensitive_fields=omitted", stripe.EventTypeCheckoutSessionExpired))
 		sessionExpired(ctx, event)
 	case stripe.EventTypeCheckoutSessionAsyncPaymentSucceeded:
+		logger.LogInfo(ctx, common.LogText("Stripe webhook dispatch event_type=%s sensitive_fields=omitted", stripe.EventTypeCheckoutSessionAsyncPaymentSucceeded))
 		sessionAsyncPaymentSucceeded(ctx, event, callerIp)
 	case stripe.EventTypeCheckoutSessionAsyncPaymentFailed:
+		logger.LogInfo(ctx, common.LogText("Stripe webhook dispatch event_type=%s sensitive_fields=omitted", stripe.EventTypeCheckoutSessionAsyncPaymentFailed))
 		sessionAsyncPaymentFailed(ctx, event, callerIp)
 	default:
-		logger.LogInfo(ctx, common.LogText("Stripe webhook ignored event event_type=%s client_ip=%s", string(event.Type), callerIp))
+		logger.LogInfo(ctx, common.LogText("Stripe webhook ignored event event_type=unsupported sensitive_fields=omitted"))
 	}
 
 	c.Status(http.StatusOK)

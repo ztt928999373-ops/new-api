@@ -1,11 +1,18 @@
 package controller
 
 import (
+	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
+	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Calcium-Ion/go-epay/epay"
 	"github.com/QuantumNous/new-api/model"
@@ -283,3 +290,57 @@ func TestEpayCallbacksVerifyBeforeSettlement(t *testing.T) {
 		}
 	}
 }
+
+// No network or real payment credentials: signatures are generated locally.
+func TestStripeWebhookSensitiveLogs(t *testing.T) {
+	confirmPaymentComplianceForTest(t)
+	oldAPI, oldSecret, oldPrice := setting.StripeApiSecret, setting.StripeWebhookSecret, setting.StripePriceId
+	oldWriter, oldErrorWriter := gin.DefaultWriter, gin.DefaultErrorWriter
+	t.Cleanup(func() {
+		setting.StripeApiSecret, setting.StripeWebhookSecret, setting.StripePriceId = oldAPI, oldSecret, oldPrice
+		gin.DefaultWriter, gin.DefaultErrorWriter = oldWriter, oldErrorWriter
+	})
+	setting.StripeApiSecret, setting.StripeWebhookSecret, setting.StripePriceId = "sk_test_synthetic", "whsec_synthetic_only", "price_synthetic"
+	for _, tc := range []struct {
+		name, body     string
+		signed, broken bool
+		status         int
+		stage          string
+	}{
+		{"valid_completed", `{"id":"evt_synthetic","object":"event","type":"checkout.session.completed","data":{"object":{"status":"complete","payment_status":"paid","customer_email":"private@example.invalid"}}}`, true, false, 200, "dispatch"},
+		{"invalid_signature", `{"customer_email":"private@example.invalid"}`, false, false, 400, "signature_verification"},
+		{"signed_malformed", `{"private@example.invalid":`, true, false, 400, "signature_verification"},
+		{"read_failure", "", false, true, 503, "read_body"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			gin.DefaultWriter, gin.DefaultErrorWriter = &logs, &logs
+			r := gin.New()
+			r.POST("/webhook", StripeWebhook)
+			req := httptest.NewRequest(http.MethodPost, "/webhook?customer=private@example.invalid", strings.NewReader(tc.body))
+			signature := "invalid-signature-synthetic"
+			if tc.signed {
+				now := time.Now().Unix()
+				mac := hmac.New(sha256.New, []byte(setting.StripeWebhookSecret))
+				fmt.Fprintf(mac, "%d.%s", now, tc.body)
+				signature = fmt.Sprintf("t=%d,v1=%x", now, mac.Sum(nil))
+			}
+			req.Header.Set("Stripe-Signature", signature)
+			if tc.broken {
+				req.Body = io.NopCloser(stripeFailingBody{})
+			}
+			response := httptest.NewRecorder()
+			r.ServeHTTP(response, req)
+			require.Equal(t, tc.status, response.Code)
+			assert.Contains(t, logs.String(), "stage="+tc.stage)
+			assert.Contains(t, logs.String(), "sensitive_fields=omitted")
+			for _, secret := range []string{"private@example.invalid", signature, setting.StripeWebhookSecret, "customer_email"} {
+				assert.NotContains(t, logs.String(), secret)
+			}
+		})
+	}
+}
+
+type stripeFailingBody struct{}
+
+func (stripeFailingBody) Read([]byte) (int, error) { return 0, errors.New("private@example.invalid") }
