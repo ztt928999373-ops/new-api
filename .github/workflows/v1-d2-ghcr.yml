@@ -1,0 +1,114 @@
+name: D2 算介自有 GHCR 手动发布
+run-name: D2 发布审批 ${{ inputs.sha }}
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: '人工审核的 product/v1 当前完整 40 位提交 SHA'
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: d2-ghcr-publish
+  cancel-in-progress: false
+jobs:
+  qualification:
+    if: github.repository == 'ztt928999373-ops/new-api' && github.ref == 'refs/heads/product/v1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      sha: ${{ steps.gate.outputs.sha }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: .github/automation
+      - name: 核对主线、安全回归和人工审批规则
+        id: gate
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea9
+        env:
+          RELEASE_SHA: ${{ inputs.sha }}
+        with:
+          retries: 0
+          script: |
+            try {
+              const result = await require('./.github/automation/ghcr-release.cjs').releaseGate({github, context, sha: process.env.RELEASE_SHA});
+              core.setOutput('sha', result.sha);
+              await core.summary.addRaw(`申请发布：${result.image}\n安全回归运行：${result.securityRun}\n需要人工批准 d2-ghcr-release；本任务尚未获得 packages:write。`).write();
+            } catch {
+              core.setFailed('D2 发布资格不满足；请核对当前产品 SHA、安全回归成功及人工审批环境。');
+            }
+  publish:
+    needs: qualification
+    environment:
+      name: d2-ghcr-release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+      packages: write
+    env:
+      RELEASE_SHA: ${{ needs.qualification.outputs.sha }}
+      RELEASE_IMAGE: ghcr.io/ztt928999373-ops/suanjie-api:sha-${{ needs.qualification.outputs.sha }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ needs.qualification.outputs.sha }}
+          persist-credentials: false
+      - name: 人工批准后重新核对资格和不可覆盖标签
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea9
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        with:
+          retries: 0
+          script: |
+            try {
+              const release = require('./.github/automation/ghcr-release.cjs');
+              await release.releaseGate({github, context, sha: process.env.RELEASE_SHA});
+              await release.assertTagAbsent({sha: process.env.RELEASE_SHA, actor: context.actor, token: process.env.GHCR_TOKEN});
+            } catch {
+              core.setFailed('D2 发布停止：资格已变化、标签已存在或 GHCR 权限/访问失败；不会覆盖已有标签。');
+            }
+      - name: 复用 D1 Dockerfile 构建并校验元数据和许可证
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          docker build --platform linux/amd64 \
+            --label "org.opencontainers.image.revision=$RELEASE_SHA" \
+            --label "org.opencontainers.image.version=sha-$RELEASE_SHA" \
+            --label 'org.opencontainers.image.source=https://github.com/ztt928999373-ops/new-api' \
+            --label 'org.opencontainers.image.licenses=AGPL-3.0-only' \
+            -t "$RELEASE_IMAGE" .
+          docker image inspect "$RELEASE_IMAGE" > /tmp/d2-inspect.json
+          node -e "const fs=require('node:fs'); require('./.github/automation/ghcr-release.cjs').validateMetadata(JSON.parse(fs.readFileSync('/tmp/d2-inspect.json','utf8'))[0],process.env.RELEASE_SHA)"
+          docker run --rm --network none --entrypoint sha256sum "$RELEASE_IMAGE" /licenses/LICENSE /licenses/NOTICE /licenses/THIRD-PARTY-LICENSES.md | awk '{print $1}' > /tmp/d2-image-licenses
+          sha256sum LICENSE NOTICE THIRD-PARTY-LICENSES.md | awk '{print $1}' | diff - /tmp/d2-image-licenses
+      - name: 仅登录自有 GHCR
+        id: login
+        uses: docker/login-action@c99871dec2022cc055c062a10cc1a1310835ceb4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: 推送唯一 SHA 标签并记录固定摘要
+        run: |
+          set -euo pipefail
+          docker push "$RELEASE_IMAGE" | tee /tmp/d2-push.log
+          digest=$(sed -n 's/.*digest: \(sha256:[a-f0-9]\{64\}\).*/\1/p' /tmp/d2-push.log)
+          [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]
+          {
+            echo '## D2 自有 GHCR 发布完成（未部署）'
+            echo "源码：$RELEASE_SHA"
+            echo "标签：$RELEASE_IMAGE"
+            echo "固定引用：ghcr.io/ztt928999373-ops/suanjie-api@$digest"
+            echo '版本选择和未来回滚请使用固定摘要；不会自动部署。'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: 清除临时 registry 登录
+        if: always() && steps.login.outcome == 'success'
+        run: docker logout ghcr.io
