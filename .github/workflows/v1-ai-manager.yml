@@ -1,0 +1,58 @@
+name: V1 AI review and technical supervisor
+on:
+  workflow_call:
+  pull_request_target:
+    branches: [product/v1]
+    types: [opened, synchronize, reopened, ready_for_review, closed]
+  pull_request_review:
+    types: [submitted]
+  workflow_dispatch:
+  schedule:
+    - cron: '0 1 * * *' # 09:00 Asia/Shanghai; schedule only runs from default branch
+permissions:
+  contents: read
+concurrency:
+  group: v1-ai-manager-${{ github.event.pull_request.number || 'report' }}
+  cancel-in-progress: false
+jobs:
+  manager:
+    if: >-
+      github.repository == 'ztt928999373-ops/new-api' &&
+      (github.event.pull_request.base.ref == 'product/v1' ||
+       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/product/v1') ||
+       github.event_name == 'schedule')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: read
+    steps:
+      - name: Checkout trusted product base only
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ github.event.pull_request.base.sha || 'product/v1' }}
+          persist-credentials: false
+          sparse-checkout: .github/automation
+      - name: Notify or generate report (native Codex reviews only)
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea9 # v7
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        with:
+          script: |
+            const fs = require('node:fs');
+            const path = require('node:path');
+            const managerPath = path.join(process.env.GITHUB_WORKSPACE, '.github/automation/manager.cjs');
+            if (!fs.existsSync(managerPath)) {
+              core.notice('AI manager not installed at trusted base SHA; safely skipped. No PR head fallback.');
+              await core.summary.addHeading('AI Manager: not installed').addRaw('Trusted base has no manager script. Notifications/report were NOT run. Merge requires owner review; never load PR head as fallback.').write();
+              return;
+            }
+            try {
+              const {manage} = require(managerPath);
+              await manage({github, context, core});
+            } catch {
+              // Do not expose a token-bearing Telegram URL or API response body.
+              core.setFailed('AI manager failed; check permissions, integration and secret configuration.');
+            }
