@@ -34,7 +34,7 @@ test('stale review is attributed to its own SHA, never the current head', async 
 test('missing configuration skips delivery; Telegram rejects and HTTP failures fail visibly', async () => {
   assert.equal(await notify('status', {}, () => {throw Error('must not call');}), 'not-configured');
   const env = {TELEGRAM_BOT_TOKEN: 'synthetic', TELEGRAM_CHAT_ID: '123'};
-  await assert.rejects(notify('status', env, async () => ({ok: false, status: 403})), /HTTP 403/);
+  await assert.rejects(notify('status', env, async () => ({ok: false, status: 403})), {status: 403});
   await assert.rejects(notify('status', env, async () => ({ok: true, json: async () => ({ok: false})})), /rejected/);
   assert.equal(await notify('status', env, async (url, options) => {
     assert.equal(new URL(url).hostname, 'api.telegram.org');
@@ -51,11 +51,15 @@ test('report distinguishes absent, skipped and failed checks from success and ig
   f.github.rest.repos = {getBranch: async () => ({data: {commit: {sha: 'base'}}})};
   f.github.rest.pulls.list = 'prs'; f.github.rest.pulls.listReviews = 'reviews';
   f.github.rest.checks = {listForRef: 'checks'};
-  f.github.paginate = async method => method === 'prs' ? [{number: 22, head: {sha: 'abc'}, draft: true, html_url: 'url'}] : method === 'reviews' ? [] : [
+  f.github.paginate = async (method, params, mapPage) => {
+    const data = method === 'prs' ? [{number: 22, head: {sha: 'abc'}, draft: true, html_url: 'url'}] : method === 'reviews' ? [] : [
     {id: 1, name: 'CI', status: 'completed', conclusion: 'failure'},
     {id: 2, name: 'CI', status: 'completed', conclusion: 'success'},
     {id: 3, name: 'Security', status: 'completed', conclusion: 'skipped'},
   ];
+    // Octokit normalizes check_runs to response.data before invoking mapPage.
+    return mapPage ? [].concat(mapPage({data})) : data;
+  };
   await manage(f);
   assert.match(report, /1 success \/ 0 failure \/ 1 pending-or-other/);
   assert.match(report, /待关注 PR：1\/1/);
@@ -110,5 +114,58 @@ test('installed manager load/transport errors fail with fixed message and redact
     assert.equal(failure, 'AI manager failed; check permissions, integration and secret configuration.');
     assert.doesNotMatch(failure, /synthetic-secret/);
     assert.equal(f.notices.length, 0);
+  }
+});
+
+test('manual report sends once through normalized pagination and marks Telegram sent', async () => {
+  const f = fixture(); delete f.context.payload.pull_request;
+  f.env = {TELEGRAM_BOT_TOKEN: 'synthetic-token', TELEGRAM_CHAT_ID: 'synthetic-chat'};
+  f.github.rest.repos = {getBranch: async () => ({data: {commit: {sha: 'base'}}})};
+  Object.assign(f.github.rest.pulls, {list: 'prs', listReviews: 'reviews'});
+  f.github.rest.checks = {listForRef: 'checks'};
+  f.github.paginate = async (method, params, mapPage) => {
+    const data = method === 'prs' ? [{number: 23, head: {sha: 'abc'}, html_url: 'github-pr'}] : method === 'reviews' ? [] : [{id: 1, name: 'CI', status: 'completed', conclusion: 'success'}];
+    return mapPage ? [].concat(mapPage({data})) : data;
+  };
+  let sent = 0;
+  f.fetcher = async () => {sent++; return {ok: true, json: async () => ({ok: true})};};
+  await manage(f);
+  assert.equal(sent, 1);
+  assert.ok(f.notices.includes('Telegram: sent'));
+  assert.ok(f.notices.indexOf('AI Manager stage: report-generation: success') < f.notices.indexOf('AI Manager stage: telegram-send: start'));
+});
+
+test('failure stages distinguish configuration, GitHub, report and Telegram without leaking inputs', async () => {
+  for (const phase of ['configuration', 'github-read-prs', 'github-read-branch', 'github-read-checks', 'github-read-reviews', 'report-generation', 'telegram-send-http', 'telegram-send-network']) {
+    const f = fixture(); delete f.context.payload.pull_request;
+    f.env = {TELEGRAM_BOT_TOKEN: 'synthetic-token', TELEGRAM_CHAT_ID: 'synthetic-chat'};
+    const tainted = Object.assign(new Error('synthetic-token synthetic-chat private-response https://example.invalid/request'), {status: 403});
+    f.github.rest.repos = {getBranch: async () => {
+      if (phase === 'github-read-branch') throw tainted;
+      return {data: {commit: {sha: 'base'}}};
+    }};
+    Object.assign(f.github.rest.pulls, {list: 'prs', listReviews: 'reviews'});
+    f.github.rest.checks = {listForRef: 'checks'};
+    f.github.paginate = async method => {
+      if (phase === `github-read-${method}`) throw tainted;
+      return method === 'prs' ? [{number: 23, head: {sha: 'abc'}, html_url: 'github-pr'}] : [];
+    };
+    if (phase === 'configuration') delete f.env.TELEGRAM_CHAT_ID;
+    if (phase === 'report-generation') f.core.summary.write = async () => {throw tainted;};
+    let sent = 0;
+    f.fetcher = async () => {
+      sent++;
+      if (phase === 'telegram-send-network') throw tainted;
+      return {ok: false, status: 403};
+    };
+    const stage = phase.startsWith('telegram-send') ? 'telegram-send' : phase;
+    await assert.rejects(manage(f), error => {
+      assert.match(error.message, new RegExp(`^AI Manager stage: ${stage}: failed`));
+      assert.doesNotMatch(error.message, /synthetic-token|synthetic-chat|private-response|https:/);
+      return true;
+    });
+    assert.doesNotMatch(f.notices.join('\n'), /synthetic-token|synthetic-chat|private-response|https:/);
+    assert.equal(sent, phase.startsWith('telegram-send') ? 1 : 0);
+    assert.ok(!f.notices.includes('Telegram: sent'));
   }
 });
