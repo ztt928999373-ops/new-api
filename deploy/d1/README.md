@@ -17,7 +17,9 @@ docker compose -f deploy/d1/compose.yml config --quiet
 docker compose -f deploy/d1/compose.yml up -d --no-build --wait --wait-timeout 180
 ```
 
-脚本仅构建本地 `suanjie-api:<完整SHA>`，再派生 `suanjie-api-test:<同一SHA>`；无镜像推送或 registry 登录。基础镜像已有 AGPL、NOTICE、第三方清单，测试派生镜像继承。派生层只增加 SQLite CLI 和隔离启动检查，不改应用二进制。不要把测试层用于正式服务。
+脚本仅构建本地 `suanjie-api:<完整SHA>`，再派生 `suanjie-api-test:<同一SHA>`；无镜像推送或 registry 登录。基础镜像已有 AGPL、NOTICE、第三方清单，测试派生镜像继承。派生层只增加 SQLite CLI、socat 和隔离启动检查，不改应用二进制。不要把测试层用于正式服务。
+
+应用仅连接 internal 网络、没有默认出站路由；不同 Docker 引擎可能不会发布 internal-only 容器端口。为保持这一限制，单独使用同一测试镜像的非 root、只读、无秘密入口容器，将 `127.0.0.1:5781` 的 TCP 请求固定转发到 `app:3000`。它不是 HTTP/SOCKS 通用代理，没有可配置目标，不为应用开放任意出站。CI 同时检查应用只有一个网络且没有 IPv4 默认路由。
 
 访问 `http://127.0.0.1:5781/api/status` 验证基本健康；该接口是公共健康接口，不等同管理员登录验收。若需要管理员，使用本地初始化页面设置合成账户及独立随机密码；没有预置管理员密码。注册由数据库选项在首次启动前关闭，支付合规开关保持 false，无渠道且网络 internal，不允许供应商出站。本轮不确认支付合规，不填任何真实凭据。
 

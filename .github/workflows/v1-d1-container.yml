@@ -34,8 +34,10 @@ jobs:
           export SUANJIE_SHA=$(git rev-parse HEAD)
           docker compose -f deploy/d1/compose.yml config --quiet
           docker compose -f deploy/d1/compose.yml up -d --no-build --wait --wait-timeout 180
-          docker compose -f deploy/d1/compose.yml port app 3000
-          docker inspect --format '{{json .NetworkSettings.Ports}}' "$(docker compose -f deploy/d1/compose.yml ps -q app)"
+          docker compose -f deploy/d1/compose.yml port ingress 3000
+          docker inspect --format '{{json .NetworkSettings.Ports}}' "$(docker compose -f deploy/d1/compose.yml ps -q ingress)"
+          test "$(docker inspect --format '{{len .NetworkSettings.Networks}}' "$(docker compose -f deploy/d1/compose.yml ps -q app)")" = 1
+          docker compose -f deploy/d1/compose.yml exec -T app awk '$2 == "00000000" {exit 1}' /proc/net/route
           curl --fail --silent --show-error http://127.0.0.1:5781/api/status | jq -e '.success == true'
           node deploy/d1/verify-admin.mjs
           docker compose -f deploy/d1/compose.yml exec -T app sh -c 'sha256sum /licenses/LICENSE /licenses/NOTICE /licenses/THIRD-PARTY-LICENSES.md' > /tmp/d1-licenses
