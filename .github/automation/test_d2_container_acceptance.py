@@ -311,6 +311,21 @@ class Guards(unittest.TestCase):
         self.assertEqual(logs['stdout'], 'complete line')
         self.assertLessEqual(len(logs['stdout']) + len(logs['stderr']), 128)
 
+    def test_sensitive_fields_redact_short_values_in_text_and_nested_dictionaries(self):
+        job = self.job()
+        for field in ['passwd', 'private_key', 'bearer', 'access_key', 'ACCESS-KEY', 'private key',
+                      'password', 'secret', 'token', 'credential', 'authorization', 'cookie', 'api_key', 'dsn',
+                      'pass\x00wd', 'access\x1b[31m_key']:
+            with self.subTest(field=field):
+                secret = 's3!'
+                self.assertNotIn(secret, job.redact(field + '=' + secret))
+                for value in [secret, {'nested': secret}, [secret], 42, None]:
+                    safe = job.diagnostic_value({'State': {field: value}})
+                    self.assertEqual(list(safe['State'].values()), ['[REDACTED]'])
+                    self.assertNotIn(secret, json.dumps(safe))
+        safe = job.diagnostic_value({'ExitCode': 137, 'OOMKilled': True, 'Error': 'permission denied'})
+        self.assertEqual(safe, {'ExitCode': 137, 'OOMKilled': True, 'Error': 'permission denied'})
+
     def test_log_timeout_and_command_failure_have_safe_codes_and_do_not_hang(self):
         job = self.job()
         real_popen = subprocess.Popen

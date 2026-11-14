@@ -20,6 +20,9 @@ CONFIG = 'sha256:a0cc42d43e45ee9ccf69bc12fad8e7c150df78867817dfc727e155e7b186f66
 MIN_FREE = 5 * 1024**3
 DIAGNOSTIC_BYTES = 64 * 1024
 DIAGNOSTIC_TIMEOUT = 15
+SENSITIVE_FIELD = re.compile(
+    r'secret|token|password|passwd|credential|authorization|cookie|(?:api|private|access)[_ -]?key|dsn|bearer',
+    re.I)
 LABEL = 'io.suanjie.d2.acceptance'
 OPTIONS = ('RegisterEnabled', 'PasswordRegisterEnabled', 'payment_setting.compliance_confirmed')
 LICENSES = {
@@ -143,13 +146,13 @@ class Acceptance:
         text = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', text)
         text = ''.join(c for c in text if c.isprintable() or c in '\n\t')
         for key, value in self.env.items():
-            if re.search(r'secret|token|password|credential|authorization|dsn|proxy', key, re.I) and len(value) >= 8:
+            if (SENSITIVE_FIELD.search(key) or 'proxy' in key.lower()) and len(value) >= 8:
                 text = text.replace(value, '[REDACTED]')
         text = re.sub(r'-----BEGIN [^-]*PRIVATE KEY-----.*?(?:-----END [^-]*PRIVATE KEY-----|\Z)',
                       '[REDACTED PRIVATE KEY]', text, flags=re.S)
         lines = []
         for line in text.splitlines():
-            if re.search(r'(?i)secret|token|password|passwd|credential|authorization|cookie|api[_ -]?key|private[_ -]?key|dsn|bearer', line):
+            if SENSITIVE_FIELD.search(line):
                 line = '[REDACTED SENSITIVE LINE]'
             line = re.sub(r'(?i)\b[a-z][a-z0-9+.-]*://[^\s\"\'<>]+', '[REDACTED URL]', line)
             line = re.sub(r'(?<![\w])[A-Za-z0-9_+/=-]{32,}(?![\w])', '[REDACTED OPAQUE VALUE]', line)
@@ -161,8 +164,8 @@ class Acceptance:
         if depth > 8:
             return '[TRUNCATED DEPTH]'
         if isinstance(value, dict):
-            return {self.redact(key)[:128]: ('[REDACTED]' if re.search(
-                        r'(?i)secret|token|password|credential|authorization|cookie|api[_ -]?key|dsn', key)
+            return {self.redact(key)[:128]: ('[REDACTED]' if SENSITIVE_FIELD.search(key)
+                        or self.redact(key).startswith('[REDACTED')
                         else self.diagnostic_value(item, depth + 1))
                     for key, item in list(value.items())[:64]}
         if isinstance(value, list):
