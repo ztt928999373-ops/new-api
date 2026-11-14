@@ -104,3 +104,28 @@ actionlint -shellcheck= -pyflakes= .github/workflows/v1-d2-image-acceptance.yml
 ```
 
 若原镜像缺少健康工具、只读根不兼容、启动退出、容量不足或网络/数据库断言失败，保留真实失败阶段，不改用重新构建的镜像掩盖问题；先报告再由用户决定是否需要修复。所有动态项目真正通过后才能关闭 D2。后续优先做固定 Digest 的隔离部署与恢复验收，不扩展发布基础设施、不进入 C2 或公网运营。
+
+### SQLite 启动失败的证据采集与边界
+
+运行 [43566672555](https://github.com/ztt928999373-ops/new-api/actions/runs/43566672555) 已定位到 SQLite 打开失败（14 / SQLITE_CANTOPEN），尚未确定底层文件系统原因。`glebarez/go-sqlite v1.21.2` 在连接尚未赋值时读取 `sqlite3_errmsg`，会附带空句柄的 “out of memory” 文本；它不是发生容器 OOM 的证据。此前修复只让退出状态和日志可见，没有修复产品或数据权限。以下新增能力尚未在真实固定镜像上运行，离线测试不能替代实测。
+
+| 数据 | 来源与含义 |
+|---|---|
+| seed 大小、UID/GID、模式 | 复制前的宿主 `lstat`，仅证明源文件，不代表复制后的权限 |
+| Image/Container Config.User、WorkingDir | Docker inspect 实际配置，不能当作进程 UID/GID 实测 |
+| UsernsMode、CapDrop/CapAdd、SecurityOpt、Privileged、GroupAdd、Mounts.RW | Docker inspect 白名单；不输出 Env、挂载宿主 Source 或 inspect 全文 |
+| 原进程有效 UID/GID、用户映射 | 启动后尽力读取宿主 `/proc/PID/{status,uid_map,gid_map,cgroup}`；前后 inspect 的 ID/PID/Running 必须一致，cgroup 必须含完整容器 ID，再转换命名空间 ID。进程已退出、不同宿主/命名空间、读权限不足或竞争均记 UNKNOWN |
+| 卷内目录/文件 UID/GID、模式、类型、大小 | 同固定镜像辅助进程的 GNU stat 实测；不读数据库内容。目录不可遍历时，文件元数据可能仍是 UNKNOWN |
+| 目录遍历、文件读写权限 | 辅助进程的内核 access 检查；不是原进程的实际文件打开，更不是 SQLite 成功 |
+| 目录创建能力 | 辅助进程用 umask 077 创建并删除随机零字节文件；不覆盖数据库、journal、WAL、SHM 或 seed 标记 |
+| 创建失败类别 | 对 LC_ALL=C 下 mktemp 的有限错误文本分类（EACCES/EROFS/ENOSPC/ENOENT）；不是 SQLite 的实际 syscall errno。不输出原始工具 stderr |
+
+辅助进程只在诊断 finally 中运行，使用已经存在的同一固定 Digest（pull=never），匹配实际容器 User、UsernsMode、挂载 RW，并保留 network=none、无端口、只读根、cap-drop ALL、no-new-privileges 和资源上限。配置不满足既有隔离契约则停止辅助探针并记 UNKNOWN，不增加权限。只允许本次精确卷名、local 驱动、无驱动选项且归属标签一致的卷。
+
+不能假定镜像内有 shell 或工具。先通过既有 Unix Docker socket 的 archive **HEAD** API 仅查 `/bin/sh`、id/stat/mktemp/rm 的文件元数据，限制符号链接解析路径、次数和15秒超时，不读取任何文件响应体；不支持 API、工具缺失或类型不符均记 UNKNOWN，不启动探针。此步骤只证明可执行文件元数据存在；真正执行失败、stat 格式不支持或协议字段缺失仍记 UNKNOWN。辅助进程不需要 Python、sqlite3 或额外镜像。
+
+辅助输出复用尾部200行、合计64KiB、15秒命令超时的脱敏日志采集，再按固定协议只保留数字、模式、文件类型和枚举；未知 stdout/stderr 不进入报告，截断不能冒充成功。`measurement.access_status=PASS` 仅表示辅助访问检查通过；顶层 storage.status 仍保持 UNKNOWN（或记录直接观测到的失败），不推导原进程身份、数据库写打开、SQLite errno 或 WAL/SHM 创建成功。属主不匹配本身也不是拒绝访问的证明，必须结合实测访问结果。
+
+探针名及归属先原子记录到本轮私有状态文件，再创建容器。最终清理先处理该探针，再处理原容器和卷；仅移除精确名称且标签匹配的本次资源。探针清理失败仍继续尝试原资源清理，最后报告失败；异常不覆盖原验收错误，不执行全局 prune。Runner 被硬终止时仍可能没有完整证据。
+
+下一次需先人工审核、合并并单独批准手动验收。届时优先对比复制前大小与卷内实际文件、原进程身份与辅助身份、挂载 RW、目录遍历及创建失败类别：只有数据支持时才判断路径、权限或挂载根因。文件大小变化可能来自正常应用初始化，不能单凭大小不等断言复制损坏。若这些检查通过但 SQLite 仍失败，errno/journal/WAL/SHM 的具体失败步骤仍是 UNKNOWN，须另行授权有针对性的系统调用证据采集，不能盲目 chown、chmod 777、加权限或修改驱动。

@@ -1,5 +1,7 @@
 """Manual D2 acceptance of an existing image; never builds or publishes."""
 import hashlib
+import base64
+import http.client
 from datetime import datetime, timezone
 import json
 import os
@@ -7,12 +9,15 @@ from pathlib import Path
 import re
 import secrets
 import selectors
+import socket
+import stat
 import shutil
 import sqlite3
 import subprocess
 import sys
 import tempfile
 import time
+from urllib.parse import quote
 
 IMAGE = 'ghcr.io/ztt928999373-ops/suanjie-api@sha256:725d45a3fe8deb3155950a0935bc9873bf0439ef99a425be2dd5f13cbaa21ddf'
 REVISION = 'cd8937c602640fc31c0144994a73266c3d792782'
@@ -32,6 +37,45 @@ LICENSES = {
 }
 PHASES = ('capacity', 'pull', 'identity', 'seed', 'licenses', 'startup', 'health', 'network',
           'policy', 'stopped_database', 'restart_persistence', 'final_database', 'cleanup')
+
+# Only metadata/access checks; never opens SQLite or reads database contents.
+# Missing tools and failed protocol fields remain UNKNOWN in the host parser.
+STORAGE_PROBE = r'''
+LC_ALL=C; export LC_ALL
+umask 077
+printf 'VERSION=1\n'
+printf 'UID=%s\n' "$(/usr/bin/id -u 2>/dev/null)"
+printf 'GID=%s\n' "$(/usr/bin/id -g 2>/dev/null)"
+printf 'DATA=%s\n' "$(/usr/bin/stat -c '%u|%g|%a|%F|%s' -- /data 2>/dev/null)"
+printf 'DB=%s\n' "$(/usr/bin/stat -c '%u|%g|%a|%F|%s' -- /data/test.sqlite 2>/dev/null)"
+if [ ! -x /data ]; then printf 'EXISTS=UNKNOWN\n'
+elif [ -e /data/test.sqlite ] || [ -L /data/test.sqlite ]; then printf 'EXISTS=YES\n'; else printf 'EXISTS=NO\n'; fi
+if [ -x /data ]; then printf 'TRAVERSE=PASS\n'; else printf 'TRAVERSE=FAIL\n'; fi
+if [ -f /data/test.sqlite ] && [ ! -L /data/test.sqlite ]; then
+  if [ -r /data/test.sqlite ]; then printf 'READ_ACCESS=PASS\n'; else printf 'READ_ACCESS=FAIL\n'; fi
+  if [ -w /data/test.sqlite ]; then printf 'WRITE_ACCESS=PASS\n'; else printf 'WRITE_ACCESS=FAIL\n'; fi
+fi
+probe=''
+trap '[ -z "$probe" ] || /usr/bin/rm -f -- "$probe" >/dev/null 2>&1' EXIT HUP INT TERM
+result=$(/usr/bin/mktemp /data/.d2-diagnostic-XXXXXXXXXX 2>&1)
+if [ "$?" -eq 0 ]; then
+  probe=$result
+  printf 'CREATE=PASS\nCREATE_ERROR_CLASS=NONE\n'
+  if /usr/bin/rm -- "$probe" 2>/dev/null; then probe=''; printf 'REMOVE=PASS\n'; else printf 'REMOVE=FAIL\n'; fi
+else
+  printf 'CREATE=FAIL\n'
+  case "$result" in
+    *'Permission denied'*) printf 'CREATE_ERROR_CLASS=EACCES\n';;
+    *'Read-only file system'*) printf 'CREATE_ERROR_CLASS=EROFS\n';;
+    *'No space left on device'*) printf 'CREATE_ERROR_CLASS=ENOSPC\n';;
+    *'No such file or directory'*) printf 'CREATE_ERROR_CLASS=ENOENT\n';;
+    *) printf 'CREATE_ERROR_CLASS=UNKNOWN\n';;
+  esac
+fi
+for kind in uid gid; do
+  while IFS= read -r line; do printf '%s_MAP=%s\n' "$kind" "$line"; done < /proc/self/${kind}_map
+done
+'''
 
 
 def require(value, code):
@@ -176,10 +220,10 @@ class Acceptance:
             return value
         return '[UNSUPPORTED VALUE]'
 
-    def container_logs(self):
+    def container_logs(self, name=None):
         """Read separate streams with a combined byte ceiling and wall-clock timeout."""
         command = ['docker', '--host=unix:///var/run/docker.sock', 'logs', '--timestamps', '--tail=200',
-                   self.state['container']]
+                   name or self.state['container']]
         buffers = {'stdout': bytearray(), 'stderr': bytearray()}
         total, truncated = 0, False
         deadline = time.monotonic() + DIAGNOSTIC_TIMEOUT
@@ -263,6 +307,201 @@ class Acceptance:
             diagnostics['errors'].append('D2_DIAGNOSTIC_LOG_FAILED')
         if diagnostics['errors']:
             diagnostics['status'] = 'incomplete'
+        try:
+            diagnostics['storage'] = self.storage_diagnostics()
+        except Exception as error:
+            code = 'D2_STORAGE_DIAGNOSTIC_TIMEOUT' if isinstance(error, (TimeoutError, subprocess.TimeoutExpired)) else 'D2_STORAGE_DIAGNOSTIC_FAILED'
+            diagnostics.setdefault('storage', {}).update(status='UNKNOWN', error_code=code)
+        if diagnostics['storage']['status'] == 'UNKNOWN':
+            diagnostics['status'] = 'incomplete'
+
+    def observe_primary_identity(self):
+        """Best effort while alive; bind host /proc evidence to the exact container ID."""
+        identity = {'status': 'UNKNOWN', 'source': 'host_proc_bound_to_container_id'}
+        self.report['primary_process_identity'] = identity
+        try:
+            projection = '{"Id":{{json .Id}},"Pid":{{json .State.Pid}},"Running":{{json .State.Running}}}'
+            first = json.loads(self.docker('inspect', '--format', projection, self.state['container'], timeout=DIAGNOSTIC_TIMEOUT))
+            require(first['Running'] is True and type(first['Pid']) is int and first['Pid'] > 0
+                    and re.fullmatch('[a-f0-9]{64}', first['Id']), 'D2_PRIMARY_PROCESS_UNAVAILABLE')
+            values = {}
+            for name in ('cgroup', 'status', 'uid_map', 'gid_map'):
+                with (Path('/proc') / str(first['Pid']) / name).open() as stream:
+                    text = stream.read(8193)
+                require(len(text) <= 8192, 'D2_PRIMARY_METADATA_LIMIT')
+                values[name] = text
+            require(first['Id'] in values['cgroup'], 'D2_PRIMARY_HOST_MISMATCH')
+            second = json.loads(self.docker('inspect', '--format', projection, self.state['container'], timeout=DIAGNOSTIC_TIMEOUT))
+            require(first == second, 'D2_PRIMARY_PROCESS_CHANGED')
+            for label, mapping_name in (('Uid', 'uid_map'), ('Gid', 'gid_map')):
+                line = next(s for s in values['status'].splitlines() if s.startswith(label + ':'))
+                host_id = int(line.split()[2])
+                mapping = [[int(n) for n in row.split()] for row in values[mapping_name].splitlines()]
+                require(all(len(row) == 3 and all(0 <= n <= 2**32 for n in row) for row in mapping), 'D2_PRIMARY_MAP_INVALID')
+                translated = [inside + host_id - outside for inside, outside, count in mapping
+                              if outside <= host_id < outside + count]
+                require(len(translated) == 1, 'D2_PRIMARY_MAP_UNKNOWN')
+                identity[label.lower()] = translated[0]
+                identity[mapping_name] = mapping
+            identity['status'] = 'MEASURED'
+            identity['host_pid'] = first['Pid']
+        except Exception:
+            identity.update(status='UNKNOWN', error_code='D2_PRIMARY_IDENTITY_UNAVAILABLE')
+
+    def image_tool(self, path):
+        """Docker archive HEAD reads path metadata only, not file or database bodies."""
+        for _ in range(4):
+            require(path.startswith(('/bin/', '/usr/bin/')) and '..' not in path,
+                    'D2_TOOL_PATH_REJECTED')
+            connection = http.client.HTTPConnection('localhost', timeout=DIAGNOSTIC_TIMEOUT)
+            try:
+                connection.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                connection.sock.settimeout(DIAGNOSTIC_TIMEOUT)
+                connection.sock.connect('/var/run/docker.sock')
+                connection.request('HEAD', '/v1.45/containers/' + quote(self.state['container'], safe='')
+                                   + '/archive?path=' + quote(path, safe=''))
+                response = connection.getresponse()
+                require(response.status == 200, 'D2_TOOL_UNAVAILABLE')
+                header = response.getheader('X-Docker-Container-Path-Stat', '')
+                require(len(header) <= 8192, 'D2_TOOL_METADATA_LIMIT')
+                entry = json.loads(base64.b64decode(header, validate=True))
+            finally:
+                connection.close()
+            mode = entry['mode']
+            if mode & (1 << 27):  # Go FileMode.ModeSymlink
+                target = entry['linkTarget']
+                path = target if target.startswith('/') else str(Path(path).parent / target)
+                continue
+            require(type(mode) is int and mode & ~0o777 == 0 and mode & 0o111 and entry['size'] > 0,
+                    'D2_TOOL_NOT_EXECUTABLE')
+            return
+        raise RuntimeError('D2_TOOL_LINK_LIMIT')
+
+    def storage_result(self, output, mount):
+        """Parse a fixed protocol, never publish arbitrary probe stdout/stderr."""
+        result = {'status': 'UNKNOWN', 'source': 'same_image_auxiliary_process',
+                  'primary_process_identity': 'UNKNOWN', 'sqlite_open_errno': 'UNKNOWN',
+                  'database_write_open': 'UNKNOWN', 'checks': {}, 'metadata': {}}
+        fields = {}
+        for line in output.splitlines():
+            key, separator, value = line.partition('=')
+            if separator and key not in ('uid_MAP', 'gid_MAP'):
+                require(key not in fields, 'D2_PROBE_PROTOCOL_DUPLICATE')
+                fields[key] = value
+            elif key in ('uid_MAP', 'gid_MAP'):
+                mapping = [int(n) for n in value.split()]
+                require(len(mapping) == 3 and all(0 <= n <= 2**32 for n in mapping), 'D2_PROBE_PROTOCOL_INVALID')
+                result.setdefault(key, []).append(mapping)
+                require(len(result[key]) <= 8, 'D2_PROBE_PROTOCOL_LIMIT')
+        require(fields.get('VERSION') == '1', 'D2_PROBE_PROTOCOL_INVALID')
+        for name in ('UID', 'GID'):
+            if re.fullmatch(r'\d{1,10}', fields.get(name, '')):
+                result[name] = int(fields[name])
+        for key in ('DATA', 'DB'):
+            parts = fields.get(key, '').split('|')
+            if (len(parts) == 5 and re.fullmatch(r'\d{1,10}', parts[0])
+                    and re.fullmatch(r'\d{1,10}', parts[1]) and re.fullmatch('[0-7]{1,4}', parts[2])
+                    and parts[3] in ('directory', 'regular file', 'regular empty file', 'symbolic link', 'fifo', 'character special file', 'block special file', 'socket')
+                    and re.fullmatch(r'\d{1,20}', parts[4])):
+                result['metadata'][key] = {'uid': int(parts[0]), 'gid': int(parts[1]),
+                                           'mode': parts[2], 'type': parts[3], 'size': int(parts[4])}
+        checks = result['checks']
+        checks['mount_rw'] = 'PASS' if mount['RW'] is True else 'FAIL' if mount['RW'] is False else 'UNKNOWN'
+        for key in ('TRAVERSE', 'READ_ACCESS', 'WRITE_ACCESS', 'CREATE', 'REMOVE'):
+            checks[key] = fields.get(key) if fields.get(key) in ('PASS', 'FAIL') else 'UNKNOWN'
+        if checks['CREATE'] == 'FAIL':
+            checks['REMOVE'] = 'NOT_APPLICABLE'
+        result['create_error_class'] = fields.get('CREATE_ERROR_CLASS') if fields.get('CREATE_ERROR_CLASS') in ('NONE', 'EACCES', 'EROFS', 'ENOSPC', 'ENOENT') else 'UNKNOWN'
+        db, directory = result['metadata'].get('DB'), result['metadata'].get('DATA')
+        checks['file_exists'] = 'PASS' if fields.get('EXISTS') == 'YES' else 'FAIL' if fields.get('EXISTS') == 'NO' else 'UNKNOWN'
+        checks['regular_database'] = ('PASS' if db['type'] == 'regular file' and db['size'] > 0 else 'FAIL') if db else 'UNKNOWN'
+        checks['directory'] = ('PASS' if directory['type'] == 'directory' else 'FAIL') if directory else 'UNKNOWN'
+        # Mismatch is evidence, not proof of denial: group/ACL permissions may grant access.
+        result['owner_matches_probe_uid'] = {key: (item['uid'] == result['UID'] if 'UID' in result else 'UNKNOWN')
+                                             for key, item in result['metadata'].items()}
+        complete = ('UID' in result and 'GID' in result and 'uid_MAP' in result and 'gid_MAP' in result)
+        result['access_status'] = 'FAIL' if 'FAIL' in checks.values() else 'PASS' if complete and all(v in ('PASS', 'NOT_APPLICABLE') for v in checks.values()) else 'UNKNOWN'
+        result['status'] = 'FAIL' if result['access_status'] == 'FAIL' else 'UNKNOWN'
+        return result
+
+    def storage_diagnostics(self):
+        result = {'status': 'UNKNOWN', 'primary_process_identity': 'UNKNOWN', 'source': 'docker_inspect_configuration'}
+        self.report.setdefault('diagnostics', {})['storage'] = result
+        result['primary_process_identity'] = self.report.get('primary_process_identity', {'status': 'UNKNOWN'})
+        projection = ('{"Id":{{json .Id}},"Image":{{json .Image}},"User":{{json .Config.User}},'
+                      '"WorkingDir":{{json .Config.WorkingDir}},"UsernsMode":{{json .HostConfig.UsernsMode}},'
+                      '"CapDrop":{{json .HostConfig.CapDrop}},"SecurityOpt":{{json .HostConfig.SecurityOpt}},'
+                      '"CapAdd":{{json .HostConfig.CapAdd}},"Privileged":{{json .HostConfig.Privileged}},"GroupAdd":{{json .HostConfig.GroupAdd}},'
+                      '"ReadonlyRootfs":{{json .HostConfig.ReadonlyRootfs}},"NetworkMode":{{json .HostConfig.NetworkMode}},'
+                      '"Owner":{{json (index .Config.Labels "' + LABEL + '")}},"Mounts":{{json .Mounts}}}')
+        config = json.loads(self.docker('inspect', '--format', projection, self.state['container'], timeout=DIAGNOSTIC_TIMEOUT))
+        require(config['Owner'] == self.state['owner'] and config['Image'] == CONFIG, 'D2_PROBE_OWNERSHIP')
+        result['container_config'] = self.diagnostic_value({key: config[key] for key in
+            ('User', 'WorkingDir', 'UsernsMode', 'CapDrop', 'CapAdd', 'Privileged', 'GroupAdd', 'SecurityOpt', 'ReadonlyRootfs', 'NetworkMode')})
+        image = json.loads(self.docker('image', 'inspect', '--format', '{{json .Config.User}}', IMAGE, timeout=DIAGNOSTIC_TIMEOUT))
+        require(isinstance(image, str) and isinstance(config['User'], str), 'D2_PROBE_CONFIG_INVALID')
+        result['image_config_user'] = self.redact(image)
+        mounts = [m for m in config['Mounts'] if m.get('Destination') == '/data']
+        require(len(mounts) == 1, 'D2_PROBE_MOUNT_INVALID')
+        mount = mounts[0]
+        require(mount.get('Type') == 'volume' and mount.get('Name') == self.state['volume']
+                and type(mount.get('RW')) is bool, 'D2_PROBE_MOUNT_INVALID')
+        result['mount'] = {key: mount[key] for key in ('Type', 'Name', 'Destination', 'RW')}
+        volume = json.loads(self.docker('volume', 'inspect', self.state['volume'], timeout=DIAGNOSTIC_TIMEOUT))[0]
+        require((volume.get('Labels') or {}).get(LABEL) == self.state['owner']
+                and volume.get('Driver') == 'local' and not volume.get('Options'), 'D2_PROBE_OWNERSHIP')
+        require(config['ReadonlyRootfs'] is True and config['NetworkMode'] == 'none'
+                and config['CapAdd'] in (None, []) and config['Privileged'] is False and config['GroupAdd'] in (None, [])
+                and config['CapDrop'] == ['ALL'] and config['SecurityOpt'] == ['no-new-privileges:true'],
+                'D2_PROBE_CONFIG_MISMATCH')
+        capabilities = {}
+        result['capabilities'] = capabilities
+        for path in ('/bin/sh', '/usr/bin/id', '/usr/bin/stat', '/usr/bin/mktemp', '/usr/bin/rm'):
+            try:
+                self.image_tool(path)
+                capabilities[path] = 'EXECUTABLE_METADATA_PRESENT'
+            except Exception:
+                capabilities[path] = 'UNKNOWN'
+        if 'UNKNOWN' in capabilities.values():
+            result['error_code'] = 'D2_PROBE_TOOLS_UNKNOWN'
+            return result
+        probe = self.state['owner'] + '-probe'
+        require(self.resource('container', probe) is None, 'D2_PROBE_ALREADY_EXISTS')
+        self.state['probe'] = probe
+        # Keep the previous valid cleanup record if persisting the probe record fails.
+        with tempfile.NamedTemporaryFile(mode='w', dir=self.work, delete=False) as pending:
+            pending.write(json.dumps(self.state))
+        try:
+            os.replace(pending.name, self.state_file)
+        finally:
+            Path(pending.name).unlink(missing_ok=True)
+        command = ['create', '--name', probe, '--label', LABEL + '=' + self.state['owner'],
+                   '--pull=never', '--network=none', '--restart=no', '--read-only', '--cap-drop=ALL',
+                   '--security-opt=no-new-privileges:true', '--memory=1g', '--cpus=2', '--pids-limit=256',
+                   '--tmpfs=/tmp:rw,noexec,nosuid,size=128m', '--log-opt=max-size=10m', '--log-opt=max-file=3',
+                   '--mount', 'type=volume,src=' + self.state['volume'] + ',dst=/data' + ('' if mount['RW'] else ',readonly'),
+                   '--entrypoint=/bin/sh']
+        if config['User']:
+            command += ['--user', config['User']]
+        if config['UsernsMode']:
+            command += ['--userns', config['UsernsMode']]
+        self.docker(*command, IMAGE, '-c', STORAGE_PROBE, timeout=DIAGNOSTIC_TIMEOUT)
+        self.docker('start', probe, timeout=DIAGNOSTIC_TIMEOUT)
+        exit_code = self.docker('wait', probe, timeout=DIAGNOSTIC_TIMEOUT).strip()
+        logs = self.container_logs(probe)
+        require(exit_code == '0' and not logs['error_code'] and not logs['truncated'], 'D2_PROBE_EXECUTION_FAILED')
+        result['measurement'] = self.storage_result(logs['stdout'], mount)
+        primary = result['primary_process_identity']
+        measured = result['measurement']
+        result['probe_identity_matches_observed_primary'] = (
+            primary['uid'] == measured.get('UID') and primary['gid'] == measured.get('GID')
+            if primary.get('status') == 'MEASURED' and 'UID' in measured and 'GID' in measured else 'UNKNOWN')
+        db = result['measurement']['metadata'].get('DB')
+        result['database_size_matches_seed'] = (db['size'] == self.report['seed_file']['size']
+            if db and 'seed_file' in self.report else 'UNKNOWN')
+        result['status'] = result['measurement']['status']
+        result['source'] = 'docker_inspect_configuration_and_auxiliary_process_measurement'
+        return result
 
     def run(self):
         require(self.fresh, 'D2_STATE_REUSE_REJECTED')
@@ -315,6 +554,10 @@ class Acceptance:
         proof = secrets.token_hex(24)
         directory = self.work / 'seed'
         seed(directory, proof)
+        info = (directory / 'test.sqlite').lstat()
+        self.report['seed_file'] = {'source': 'host_lstat_before_copy', 'size': info.st_size,
+                                    'mode': oct(info.st_mode & 0o777), 'uid': info.st_uid, 'gid': info.st_gid,
+                                    'regular_file': stat.S_ISREG(info.st_mode)}
         self.docker('cp', str(directory) + '/.', name + ':/data')
         self.passed()
         self.step('licenses')
@@ -325,6 +568,7 @@ class Acceptance:
         self.passed()
         self.step('startup')
         self.docker('start', name)
+        self.observe_primary_identity()
         self.passed()
         self.step('health')
         self.health()
@@ -362,6 +606,16 @@ class Acceptance:
         require(re.fullmatch('d2-accept-[a-f0-9]{24}', state.get('owner', ''))
                 and state.get('container') == state['owner']
                 and state.get('volume') == state['owner'] + '-data', 'D2_CLEANUP_STATE_INVALID')
+        probe_error = False
+        if state.get('probe'):
+            try:
+                require(state['probe'] == state['owner'] + '-probe', 'D2_CLEANUP_STATE_INVALID')
+                item = self.resource('container', state['probe'])
+                if item is not None:
+                    require((item.get('Config', {}).get('Labels') or {}).get(LABEL) == state['owner'], 'D2_CLEANUP_OWNERSHIP')
+                    self.docker('container', 'rm', '--force', state['probe'])
+            except Exception:
+                probe_error = True
         for kind, key in (('container', 'container'), ('volume', 'volume')):
             name = state[key]
             item = self.resource(kind, name)
@@ -370,6 +624,7 @@ class Acceptance:
             labels = item.get('Config', {}).get('Labels', {}) if kind == 'container' else item.get('Labels', {})
             require(labels.get(LABEL) == state['owner'], 'D2_CLEANUP_OWNERSHIP')
             self.docker(kind, 'rm', *(['--force'] if kind == 'container' else []), name)
+        require(not probe_error, 'D2_PROBE_CLEANUP_FAILED')
 
 
 def main():
