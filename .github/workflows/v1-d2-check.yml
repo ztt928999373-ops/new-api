@@ -4,7 +4,7 @@ on:
     branches: [product/v1]
   pull_request:
     branches: [product/v1]
-    paths: ['.github/automation/ghcr-*', '.github/workflows/v1-d2-*.yml', 'deploy/d2/**']
+    paths: ['.github/automation/ghcr-*', '.github/automation/*d2_container_acceptance.py', '.github/workflows/v1-d2-*.yml', 'deploy/d2/**']
 permissions:
   contents: read
 jobs:
@@ -17,6 +17,8 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - run: git rev-parse HEAD
+      - name: D2 隔离验收离线回归（不拉取或启动镜像）
+        run: python3 -m unittest discover -s .github/automation -p 'test_d2_container_acceptance.py'
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version: '1.4.4'
