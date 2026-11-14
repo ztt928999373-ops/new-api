@@ -1,10 +1,12 @@
 """Manual D2 acceptance of an existing image; never builds or publishes."""
 import hashlib
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
 import re
 import secrets
+import selectors
 import shutil
 import sqlite3
 import subprocess
@@ -16,6 +18,11 @@ IMAGE = 'ghcr.io/ztt928999373-ops/suanjie-api@sha256:725d45a3fe8deb3155950a0935b
 REVISION = 'cd8937c602640fc31c0144994a73266c3d792782'
 CONFIG = 'sha256:a0cc42d43e45ee9ccf69bc12fad8e7c150df78867817dfc727e155e7b186f66a'
 MIN_FREE = 5 * 1024**3
+DIAGNOSTIC_BYTES = 64 * 1024
+DIAGNOSTIC_TIMEOUT = 15
+SENSITIVE_FIELD = re.compile(
+    r'secret|token|password|passwd|credential|authorization|cookie|(?:api|private|access)[_ -]?key|dsn|bearer',
+    re.I)
 LABEL = 'io.suanjie.d2.acceptance'
 OPTIONS = ('RegisterEnabled', 'PasswordRegisterEnabled', 'payment_setting.compliance_confirmed')
 LICENSES = {
@@ -131,6 +138,131 @@ class Acceptance:
         destination.mkdir(mode=0o700)
         self.docker('cp', self.state['container'] + ':/data/.', str(destination))
         database(destination, proof)
+
+    def redact(self, text):
+        """Fail closed on credential-bearing lines; never publish raw Docker output."""
+        text = str(text)
+        # Normalize terminal/control obfuscation before searching for secret fields.
+        text = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', text)
+        text = ''.join(c for c in text if c.isprintable() or c in '\n\t')
+        for key, value in self.env.items():
+            if (SENSITIVE_FIELD.search(key) or 'proxy' in key.lower()) and len(value) >= 8:
+                text = text.replace(value, '[REDACTED]')
+        text = re.sub(r'-----BEGIN [^-]*PRIVATE KEY-----.*?(?:-----END [^-]*PRIVATE KEY-----|\Z)',
+                      '[REDACTED PRIVATE KEY]', text, flags=re.S)
+        lines = []
+        for line in text.splitlines():
+            if SENSITIVE_FIELD.search(line):
+                line = '[REDACTED SENSITIVE LINE]'
+            line = re.sub(r'(?i)\b[a-z][a-z0-9+.-]*://[^\s\"\'<>]+', '[REDACTED URL]', line)
+            line = re.sub(r'(?<![\w])[A-Za-z0-9_+/=-]{32,}(?![\w])', '[REDACTED OPAQUE VALUE]', line)
+            lines.append(line)
+        return '\n'.join(lines)
+
+    def diagnostic_value(self, value, depth=0):
+        """Bound and sanitize the complete State tree, excluding all Config/Env data."""
+        if depth > 8:
+            return '[TRUNCATED DEPTH]'
+        if isinstance(value, dict):
+            return {self.redact(key)[:128]: ('[REDACTED]' if SENSITIVE_FIELD.search(key)
+                        or self.redact(key).startswith('[REDACTED')
+                        else self.diagnostic_value(item, depth + 1))
+                    for key, item in list(value.items())[:64]}
+        if isinstance(value, list):
+            return [self.diagnostic_value(item, depth + 1) for item in value[:16]]
+        if isinstance(value, str):
+            return self.redact(value)[:8192]
+        if value is None or type(value) in (bool, int, float):
+            return value
+        return '[UNSUPPORTED VALUE]'
+
+    def container_logs(self):
+        """Read separate streams with a combined byte ceiling and wall-clock timeout."""
+        command = ['docker', '--host=unix:///var/run/docker.sock', 'logs', '--timestamps', '--tail=200',
+                   self.state['container']]
+        buffers = {'stdout': bytearray(), 'stderr': bytearray()}
+        total, truncated = 0, False
+        deadline = time.monotonic() + DIAGNOSTIC_TIMEOUT
+        error = None
+        with subprocess.Popen(command, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
+            try:
+                with selectors.DefaultSelector() as selector:
+                    for stream, name in ((process.stdout, 'stdout'), (process.stderr, 'stderr')):
+                        os.set_blocking(stream.fileno(), False)
+                        selector.register(stream, selectors.EVENT_READ, name)
+                    while selector.get_map():
+                        remaining = deadline - time.monotonic()
+                        require(remaining > 0, 'D2_DIAGNOSTIC_LOG_TIMEOUT')
+                        for key, _ in selector.select(min(remaining, 0.1)):
+                            chunk = os.read(key.fd, min(4096, DIAGNOSTIC_BYTES - total))
+                            if not chunk:
+                                selector.unregister(key.fileobj)
+                                continue
+                            buffers[key.data].extend(chunk)
+                            total += len(chunk)
+                            if total >= DIAGNOSTIC_BYTES:
+                                truncated = True
+                                break
+                        if truncated:
+                            break
+                if not truncated:
+                    require(process.wait(timeout=max(0.01, deadline - time.monotonic())) == 0,
+                            'D2_DIAGNOSTIC_LOG_FAILED')
+            except Exception as failure:
+                error = str(failure) if str(failure) in ('D2_DIAGNOSTIC_LOG_TIMEOUT', 'D2_DIAGNOSTIC_LOG_FAILED') else 'D2_DIAGNOSTIC_LOG_FAILED'
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                process.wait(timeout=5)
+        # Discard any incomplete trailing line: a byte limit may split a secret value.
+        logs = {}
+        budget = DIAGNOSTIC_BYTES
+        for name, data in buffers.items():
+            if (truncated or error) and data and not data.endswith(b'\n'):
+                data = data[:data.rfind(b'\n') + 1]
+            safe = self.redact(bytes(data).decode('utf-8', errors='replace')).encode('utf-8')
+            truncated = truncated or len(safe) > budget
+            logs[name] = safe[:budget].decode('utf-8', errors='ignore')
+            budget -= len(logs[name].encode('utf-8'))
+        return {**logs, 'truncated': truncated, 'error_code': error}
+
+    def diagnose(self):
+        diagnostics = {'status': 'success', 'errors': [], 'runtime_seconds': None,
+                       'capture_phase': self.phase,
+                       'limits': {'log_bytes_combined': DIAGNOSTIC_BYTES, 'log_tail_lines': 200,
+                                  'timeout_seconds_per_command': DIAGNOSTIC_TIMEOUT,
+                                  'state_string_characters': 8192, 'state_depth': 8}}
+        self.report['diagnostics'] = diagnostics
+        try:
+            raw = self.docker('inspect', '--format',
+                              '{"State":{{json .State}},"RestartCount":{{json .RestartCount}}}',
+                              self.state['container'], timeout=DIAGNOSTIC_TIMEOUT)
+            require(len(raw.encode('utf-8')) <= 2 * DIAGNOSTIC_BYTES, 'D2_DIAGNOSTIC_STATE_TOO_LARGE')
+            inspected = json.loads(raw)
+            state = inspected['State']
+            require(isinstance(state, dict) and type(inspected['RestartCount']) is int,
+                    'D2_DIAGNOSTIC_STATE_INVALID')
+            diagnostics['State'] = self.diagnostic_value(state)
+            diagnostics['RestartCount'] = inspected['RestartCount']
+            try:
+                start = datetime.fromisoformat(state['StartedAt'].replace('Z', '+00:00'))
+                require(start.year > 1 and start.tzinfo is not None, 'D2_DIAGNOSTIC_TIME_INVALID')
+                end = datetime.now(timezone.utc) if state.get('Running') else datetime.fromisoformat(state['FinishedAt'].replace('Z', '+00:00'))
+                require(end.year > 1 and end.tzinfo is not None and end >= start, 'D2_DIAGNOSTIC_TIME_INVALID')
+                diagnostics['runtime_seconds'] = (end - start).total_seconds()
+                diagnostics['runtime_kind'] = 'elapsed_at_capture' if state.get('Running') else 'completed_execution'
+            except Exception:
+                diagnostics['errors'].append('D2_DIAGNOSTIC_TIME_INVALID')
+        except Exception:
+            diagnostics['errors'].append('D2_DIAGNOSTIC_STATE_FAILED')
+        try:
+            diagnostics['logs'] = self.container_logs()
+            if diagnostics['logs']['error_code']:
+                diagnostics['errors'].append(diagnostics['logs']['error_code'])
+        except Exception:
+            diagnostics['errors'].append('D2_DIAGNOSTIC_LOG_FAILED')
+        if diagnostics['errors']:
+            diagnostics['status'] = 'incomplete'
 
     def run(self):
         require(self.fresh, 'D2_STATE_REUSE_REJECTED')
@@ -256,6 +388,11 @@ def main():
         job.report['phases'][job.phase] = 'failure'
         job.report['error_code'] = code
     finally:
+        try:
+            job.diagnose()
+        except Exception:
+            # Auxiliary evidence must never replace the original phase/error or skip cleanup.
+            job.report['diagnostics'] = {'status': 'incomplete', 'errors': ['D2_DIAGNOSTIC_FAILED']}
         try:
             job.cleanup()
             job.report['phases']['cleanup'] = 'success'
