@@ -1,5 +1,7 @@
 """Offline guards only: these tests do not pull or start an image."""
 import json
+import base64
+import io
 import os
 from pathlib import Path
 import sqlite3
@@ -7,7 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 import d2_container_acceptance as d2
 
@@ -225,7 +227,7 @@ class Guards(unittest.TestCase):
         self.assertEqual(diagnostic['RestartCount'], 2)
         self.assertEqual(diagnostic['runtime_seconds'], 3.5)
         self.assertEqual(diagnostic['runtime_kind'], 'completed_execution')
-        self.assertEqual(diagnostic['status'], 'success')
+        self.assertEqual(diagnostic['status'], 'incomplete')  # State succeeded, filesystem evidence is UNKNOWN
 
     def test_diagnostic_state_and_logs_fail_independently_without_sensitive_errors(self):
         for state_failure, logs_failure in [(True, False), (False, True), (True, True)]:
@@ -387,6 +389,320 @@ class Guards(unittest.TestCase):
         cleanup.assert_called_once()
         self.assertNotIn('error_code', job.report)
         self.assertEqual(job.report['diagnostics']['errors'], ['D2_DIAGNOSTIC_FAILED'])
+
+    def storage_fixture(self):
+        return ('VERSION=1\nUID=0\nGID=0\nDATA=0|0|700|directory|4096\n'
+                'DB=0|0|600|regular file|8192\nEXISTS=YES\nTRAVERSE=PASS\n'
+                'READ_ACCESS=PASS\nWRITE_ACCESS=PASS\nCREATE=PASS\nCREATE_ERROR_CLASS=NONE\nREMOVE=PASS\n'
+                'uid_MAP=0 0 4294967295\ngid_MAP=0 0 4294967295\n')
+
+    def storage_config(self, job):
+        return {'Id': 'a' * 64, 'Image': d2.CONFIG, 'Owner': job.state['owner'],
+                'User': '1001:1001', 'WorkingDir': '/data', 'UsernsMode': '', 'CapDrop': ['ALL'],
+                'SecurityOpt': ['no-new-privileges:true'], 'ReadonlyRootfs': True, 'NetworkMode': 'none',
+                'CapAdd': None, 'Privileged': False, 'GroupAdd': None,
+                'Mounts': [{'Type': 'volume', 'Name': job.state['volume'], 'Destination': '/data', 'RW': True}]}
+
+    def test_storage_missing_type_owner_permissions_and_readonly_are_observations(self):
+        job = self.job()
+        cases = [
+            ('missing', [('EXISTS=YES', 'EXISTS=NO'), ('DB=0|0|600|regular file|8192', 'DB=')], True, 'file_exists'),
+            ('directory instead of db', [('regular file|8192', 'directory|4096')], True, 'regular_database'),
+            ('owner mismatch', [('DB=0|0|600', 'DB=1001|1001|600'), ('READ_ACCESS=PASS', 'READ_ACCESS=FAIL')], True, 'READ_ACCESS'),
+            ('mode denied', [('DB=0|0|600', 'DB=0|0|000'), ('WRITE_ACCESS=PASS', 'WRITE_ACCESS=FAIL')], True, 'WRITE_ACCESS'),
+            ('readonly mount', [], False, 'mount_rw'),
+            ('unwritable directory', [('CREATE=PASS', 'CREATE=FAIL'), ('CREATE_ERROR_CLASS=NONE', 'CREATE_ERROR_CLASS=EACCES')], True, 'CREATE')]
+        for name, replacements, rw, check in cases:
+            with self.subTest(name=name):
+                output = self.storage_fixture()
+                for before, after in replacements:
+                    output = output.replace(before, after)
+                result = job.storage_result(output, {'RW': rw})
+                self.assertEqual(result['checks'][check], 'FAIL')
+                self.assertEqual(result['status'], 'FAIL')
+                self.assertEqual(result['sqlite_open_errno'], 'UNKNOWN')
+        result = job.storage_result(self.storage_fixture().replace('DB=0|0|600', 'DB=1001|1001|644'), {'RW': True})
+        self.assertFalse(result['owner_matches_probe_uid']['DB'])
+        self.assertEqual(result['access_status'], 'PASS')  # mismatch alone is not denial
+        self.assertEqual(result['status'], 'UNKNOWN')  # auxiliary success is not application success
+
+    def test_missing_or_partial_measurements_are_never_success(self):
+        job = self.job()
+        for missing in ['UID=0\n', 'DB=0|0|600|regular file|8192\n', 'CREATE=PASS\n', 'uid_MAP=0 0 4294967295\n']:
+            result = job.storage_result(self.storage_fixture().replace(missing, ''), {'RW': True})
+            self.assertEqual(result['access_status'], 'UNKNOWN')
+            self.assertEqual(result['status'], 'UNKNOWN')
+        with self.assertRaisesRegex(RuntimeError, 'D2_PROBE_PROTOCOL_INVALID'):
+            job.storage_result('VERSION=invalid\n', {'RW': True})
+
+    def test_storage_protocol_never_publishes_unrecognized_or_sensitive_output(self):
+        job = self.job()
+        result = job.storage_result(self.storage_fixture() + 'PASSWORD=short-private\nUNEXPECTED=https://private.invalid/?token=short\n', {'RW': True})
+        self.assertNotIn('short-private', json.dumps(result))
+        self.assertNotIn('private.invalid', json.dumps(result))
+
+    def test_tool_capability_uses_head_only_and_checks_symlinks_mode_and_timeouts(self):
+        job = self.job()
+        regular = {'mode': 0o755, 'size': 100, 'linkTarget': ''}
+        for status, entry, error in [(200, regular, None), (404, regular, 'D2_TOOL_UNAVAILABLE'),
+                                      (200, {'mode': 1 << 31, 'size': 4096}, 'D2_TOOL_NOT_EXECUTABLE')]:
+            response = MagicMock(status=status)
+            response.getheader.return_value = base64.b64encode(json.dumps(entry).encode()).decode()
+            connection = MagicMock()
+            connection.getresponse.return_value = response
+            with patch('http.client.HTTPConnection', return_value=connection), patch('socket.socket'):
+                if error:
+                    with self.assertRaisesRegex(RuntimeError, error): job.image_tool('/bin/sh')
+                else:
+                    job.image_tool('/bin/sh')
+                self.assertEqual(connection.request.call_args.args[0], 'HEAD')
+                response.read.assert_not_called()
+                connection.close.assert_called_once()
+        connection = MagicMock()
+        connection.getresponse.side_effect = TimeoutError('synthetic-private')
+        with patch('http.client.HTTPConnection', return_value=connection), patch('socket.socket'), self.assertRaises(TimeoutError):
+            job.image_tool('/bin/sh')
+        connection.close.assert_called_once()
+        response = MagicMock(status=200)
+        response.getheader.return_value = base64.b64encode(json.dumps({'mode': 1 << 27, 'linkTarget': '/private/unsafe'}).encode()).decode()
+        connection = MagicMock()
+        connection.getresponse.return_value = response
+        with patch('http.client.HTTPConnection', return_value=connection), patch('socket.socket'), self.assertRaisesRegex(RuntimeError, 'D2_TOOL_PATH_REJECTED'):
+            job.image_tool('/bin/sh')
+
+    def test_probe_protocol_with_local_synthetic_file_never_changes_file_or_leaves_probe(self):
+        directory = self.root / 'probe-fixture'
+        directory.mkdir(mode=0o700)
+        db = directory / 'test.sqlite'
+        db.write_bytes(b'synthetic-metadata-only' * 400)
+        before = db.stat()
+        script = d2.STORAGE_PROBE.replace('/data', str(directory))
+        result = subprocess.run(['/bin/sh', '-c', script], capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0)
+        measurement = self.job().storage_result(result.stdout, {'RW': True})
+        self.assertEqual(measurement['metadata']['DB']['size'], before.st_size)
+        self.assertEqual(measurement['access_status'], 'PASS')
+        self.assertEqual(measurement['status'], 'UNKNOWN')
+        self.assertEqual(db.stat().st_size, before.st_size)
+        self.assertEqual(db.stat().st_mtime_ns, before.st_mtime_ns)
+        self.assertEqual(list(directory.iterdir()), [db])
+    def test_probe_matches_identity_isolation_mount_and_never_reads_sqlite(self):
+        job = self.job()
+        config = self.storage_config(job)
+        volume = {'Labels': {d2.LABEL: job.state['owner']}, 'Driver': 'local', 'Options': None}
+        calls = []
+        def docker(*args, **kwargs):
+            calls.append(args)
+            if args[0] == 'inspect': return json.dumps(config)
+            if args[:2] == ('image', 'inspect'): return json.dumps('1001:1001')
+            if args[:2] == ('volume', 'inspect'): return json.dumps([volume])
+            if args[0] == 'wait': return '0\n'
+            return ''
+        with patch.object(job, 'docker', side_effect=docker), patch.object(job, 'image_tool'), \
+             patch.object(job, 'resource', return_value=None), \
+             patch.object(job, 'container_logs', return_value={'stdout': self.storage_fixture(), 'stderr': '', 'truncated': False, 'error_code': None}):
+            result = job.storage_diagnostics()
+        create = next(args for args in calls if args[0] == 'create')
+        self.assertEqual(create[create.index('--user') + 1], '1001:1001')
+        self.assertIn('--network=none', create)
+        self.assertIn('--cap-drop=ALL', create)
+        self.assertEqual(create[-3:], (d2.IMAGE, '-c', d2.STORAGE_PROBE))
+        self.assertEqual(result['measurement']['UID'], 0)  # fixture measurement, never inferred from --user
+        self.assertEqual(result['status'], 'UNKNOWN')
+        self.assertNotIn('chmod', d2.STORAGE_PROBE)
+        self.assertNotIn('chown', d2.STORAGE_PROBE)
+        self.assertNotIn('sqlite3', d2.STORAGE_PROBE)
+        self.assertEqual(json.loads(job.state_file.read_text())['probe'], job.state['owner'] + '-probe')
+
+    def test_unavailable_tools_do_not_create_probe_or_claim_success(self):
+        job = self.job()
+        config = self.storage_config(job)
+        volume = {'Labels': {d2.LABEL: job.state['owner']}, 'Driver': 'local', 'Options': None}
+        with patch.object(job, 'docker', side_effect=[json.dumps(config), '"1001:1001"', json.dumps([volume])]) as docker, \
+             patch.object(job, 'image_tool', side_effect=TimeoutError('password=synthetic-private')):
+            result = job.storage_diagnostics()
+        self.assertEqual(result['status'], 'UNKNOWN')
+        self.assertEqual(result['error_code'], 'D2_PROBE_TOOLS_UNKNOWN')
+        self.assertNotIn('synthetic-private', json.dumps(result))
+        self.assertFalse(any(call.args[0] == 'create' for call in docker.call_args_list))
+
+    def test_probe_timeout_or_log_failure_preserves_original_error_and_partial_metadata(self):
+        for failure in [subprocess.TimeoutExpired(['synthetic-private'], 15), RuntimeError('synthetic-private')]:
+            job = self.job()
+            job.report['error_code'] = 'D2_CONTAINER_EXITED'
+            config = self.storage_config(job)
+            volume = {'Labels': {d2.LABEL: job.state['owner']}, 'Driver': 'local', 'Options': None}
+            def docker(*args, **kwargs):
+                if args[0] == 'inspect' and 'RestartCount' in args[2]:
+                    return json.dumps({'State': {'Running': False}, 'RestartCount': 0})
+                if args[0] == 'inspect': return json.dumps(config)
+                if args[:2] == ('image', 'inspect'): return '"1001:1001"'
+                if args[:2] == ('volume', 'inspect'): return json.dumps([volume])
+                if args[0] == 'wait': raise failure
+                return ''
+            with patch.object(job, 'docker', side_effect=docker), patch.object(job, 'image_tool'), \
+                 patch.object(job, 'resource', return_value=None), \
+                 patch.object(job, 'container_logs', return_value={'stdout': '', 'stderr': '', 'error_code': None}):
+                job.diagnose()
+            self.assertEqual(job.report['error_code'], 'D2_CONTAINER_EXITED')
+            storage = job.report['diagnostics']['storage']
+            self.assertEqual(storage['status'], 'UNKNOWN')
+            self.assertEqual(storage['container_config']['User'], '1001:1001')
+            self.assertNotIn('synthetic-private', json.dumps(storage))
+
+    def test_probe_cleanup_failure_still_attempts_original_owned_resources(self):
+        job = self.job()
+        job.state['probe'] = job.state['owner'] + '-probe'
+        owner = {'Config': {'Labels': {d2.LABEL: job.state['owner']}}}
+        with patch.object(job, 'resource', side_effect=[RuntimeError('synthetic-private'), owner,
+                         {'Labels': {d2.LABEL: job.state['owner']}}]), patch.object(job, 'docker') as docker:
+            with self.assertRaisesRegex(RuntimeError, 'D2_PROBE_CLEANUP_FAILED'): job.cleanup()
+        self.assertEqual(docker.call_args_list[0].args, ('container', 'rm', '--force', job.state['container']))
+        self.assertEqual(docker.call_args_list[1].args, ('volume', 'rm', job.state['volume']))
+
+    def test_truncated_or_failed_probe_logs_are_unknown_and_not_published(self):
+        for truncated, error in [(True, None), (False, 'D2_DIAGNOSTIC_LOG_FAILED')]:
+            job = self.job()
+            job.report['error_code'] = 'D2_CONTAINER_EXITED'
+            config = self.storage_config(job)
+            volume = {'Labels': {d2.LABEL: job.state['owner']}, 'Driver': 'local', 'Options': None}
+            def docker(*args, **kwargs):
+                if args[0] == 'inspect' and 'RestartCount' in args[2]:
+                    return json.dumps({'State': {'Running': False}, 'RestartCount': 0})
+                if args[0] == 'inspect': return json.dumps(config)
+                if args[:2] == ('image', 'inspect'): return '"1001:1001"'
+                if args[:2] == ('volume', 'inspect'): return json.dumps([volume])
+                if args[0] == 'wait': return '0'
+                return ''
+            logs = [{'stdout': '', 'stderr': '', 'error_code': None},
+                    {'stdout': 'password=synthetic-private', 'stderr': '', 'error_code': error, 'truncated': truncated}]
+            with patch.object(job, 'docker', side_effect=docker), patch.object(job, 'image_tool'), \
+                 patch.object(job, 'resource', return_value=None), patch.object(job, 'container_logs', side_effect=logs):
+                job.diagnose()
+            self.assertEqual(job.report['diagnostics']['storage']['status'], 'UNKNOWN')
+            self.assertEqual(job.report['error_code'], 'D2_CONTAINER_EXITED')
+            self.assertNotIn('synthetic-private', json.dumps(job.report))
+
+    def test_owned_probe_cleanup_precedes_original_container_and_volume(self):
+        job = self.job()
+        job.state['probe'] = job.state['owner'] + '-probe'
+        def resource(kind, name):
+            return {'Config': {'Labels': {d2.LABEL: job.state['owner']}}} if kind == 'container' else {'Labels': {d2.LABEL: job.state['owner']}}
+        with patch.object(job, 'resource', side_effect=resource), patch.object(job, 'docker') as docker:
+            job.cleanup()
+        self.assertEqual([call.args[-1] for call in docker.call_args_list],
+                         [job.state['probe'], job.state['container'], job.state['volume']])
+
+    def test_application_log_collector_keeps_rfc3339nano_timestamps_by_default(self):
+        job = self.job()
+        real_popen = subprocess.Popen
+        commands = []
+        stamp = '2026-11-14T06:30:44.187484700Z '
+        def producer(command, **kwargs):
+            commands.append(command)
+            payload = (stamp if '--timestamps' in command else '') + 'application startup failed\n'
+            return real_popen([sys.executable, '-c', 'import sys; sys.stdout.write(sys.argv[1])', payload], **kwargs)
+        with patch('subprocess.Popen', side_effect=producer):
+            logs = job.container_logs()
+        self.assertEqual(commands[0], ['docker', '--host=unix:///var/run/docker.sock', 'logs',
+                                       '--timestamps', '--tail=200', job.state['container']])
+        self.assertEqual(logs['stdout'], stamp + 'application startup failed')
+        self.assertIsNone(logs['error_code'])
+
+    def test_probe_log_collection_to_parser_handles_docker_format_and_failures_before_cleanup(self):
+        real_popen = subprocess.Popen
+        for case in ('normal', 'unexpected_timestamp', 'malformed_timestamp', 'missing_field', 'truncated'):
+            with self.subTest(case=case):
+                work = self.root / case
+                work.mkdir()
+                job = d2.Acceptance(work, {})
+                job.phase = 'health'
+                config = self.storage_config(job)
+                volume = {'Labels': {d2.LABEL: job.state['owner']}, 'Driver': 'local', 'Options': None}
+                commands = []
+                def docker(*args, **kwargs):
+                    if args[0] == 'inspect' and 'RestartCount' in args[2]:
+                        return json.dumps({'State': {'Running': False, 'StartedAt': '2026-11-14T06:30:44Z',
+                                                    'FinishedAt': '2026-11-14T06:30:45Z'}, 'RestartCount': 0})
+                    if args[0] == 'inspect': return json.dumps(config)
+                    if args[:2] == ('image', 'inspect'): return '"1001:1001"'
+                    if args[:2] == ('volume', 'inspect'): return json.dumps([volume])
+                    if args[0] == 'wait': return '0'
+                    return ''
+                def producer(command, **kwargs):
+                    commands.append(command)
+                    payload = self.storage_fixture() if command[-1].endswith('-probe') else 'application startup failed\n'
+                    if command[-1].endswith('-probe'):
+                        if case == 'unexpected_timestamp': payload = ''.join('2026-11-14T06:30:44.187484700Z ' + line + '\n' for line in payload.splitlines())
+                        if case == 'malformed_timestamp': payload = payload.replace('VERSION=1', 'not-a-timestamp VERSION=1')
+                        if case == 'missing_field': payload = payload.replace('UID=0\n', '')
+                    # Emulate Docker's actual flag-dependent wire format, not a pre-parsed fixture.
+                    if '--timestamps' in command:
+                        payload = ''.join('2026-11-14T06:30:44.187484700Z ' + line + '\n' for line in payload.splitlines())
+                    return real_popen([sys.executable, '-c', 'import sys; sys.stdout.write(sys.argv[1])', payload], **kwargs)
+                env = {'RUNNER_TEMP': str(work), 'GITHUB_RUN_ID': '1', 'GITHUB_RUN_ATTEMPT': '1',
+                       'GITHUB_STEP_SUMMARY': str(work / 'summary')}
+                with patch.dict(os.environ, env), patch.object(d2, 'trusted'), \
+                     patch.object(d2, 'Acceptance', return_value=job), patch.object(sys, 'argv', ['acceptance.py']), \
+                     patch.object(job, 'run', side_effect=RuntimeError('D2_CONTAINER_EXITED')), \
+                     patch.object(job, 'docker', side_effect=docker), patch.object(job, 'image_tool'), \
+                     patch.object(job, 'resource', return_value=None), patch('subprocess.Popen', side_effect=producer), \
+                     patch.object(d2, 'DIAGNOSTIC_BYTES', 128 if case == 'truncated' else 65536), \
+                     patch.object(job, 'cleanup', wraps=job.cleanup) as cleanup:
+                    with self.assertRaisesRegex(RuntimeError, '^D2_ACCEPTANCE_INCOMPLETE$'):
+                        d2.main()
+                self.assertEqual(len(commands), 2)
+                self.assertIn('--timestamps', commands[0])
+                self.assertNotIn('--timestamps', commands[1])
+                self.assertEqual(commands[1][-2:], ['--tail=200', job.state['owner'] + '-probe'])
+                storage = job.report['diagnostics']['storage']
+                if case == 'normal':
+                    measured = storage['measurement']
+                    self.assertEqual(measured['UID'], 0)
+                    self.assertEqual(measured['GID'], 0)
+                    self.assertEqual(measured['metadata']['DATA'], {'uid': 0, 'gid': 0, 'mode': '700', 'type': 'directory', 'size': 4096})
+                    self.assertEqual(measured['metadata']['DB'], {'uid': 0, 'gid': 0, 'mode': '600', 'type': 'regular file', 'size': 8192})
+                    self.assertEqual(measured['uid_MAP'], [[0, 0, 4294967295]])
+                    self.assertEqual(measured['gid_MAP'], [[0, 0, 4294967295]])
+                    self.assertEqual(measured['access_status'], 'PASS')  # also requires VERSION=1
+                else:
+                    self.assertEqual(storage['status'], 'UNKNOWN')
+                    self.assertNotEqual(storage.get('measurement', {}).get('access_status'), 'PASS')
+                self.assertEqual(job.report['error_code'], 'D2_CONTAINER_EXITED')
+                self.assertEqual(job.report['phases']['health'], 'failure')
+                self.assertEqual(job.report['phases']['cleanup'], 'success')
+                cleanup.assert_called_once()
+
+    def test_foreign_or_injected_probe_is_never_removed(self):
+        for name, item in [('foreign', None), ('owned-name', {'Config': {'Labels': {}}})]:
+            job = self.job()
+            job.state['probe'] = 'foreign' if name == 'foreign' else job.state['owner'] + '-probe'
+            def resource(kind, resource_name):
+                if resource_name == job.state['probe']: return item
+                return {'Config': {'Labels': {d2.LABEL: job.state['owner']}}} if kind == 'container' else {'Labels': {d2.LABEL: job.state['owner']}}
+            with patch.object(job, 'resource', side_effect=resource), patch.object(job, 'docker') as docker:
+                with self.assertRaisesRegex(RuntimeError, 'D2_PROBE_CLEANUP_FAILED'): job.cleanup()
+            self.assertFalse(any(call.args[-1] == job.state['probe'] for call in docker.call_args_list))
+
+    def test_primary_identity_requires_live_pid_cgroup_binding_and_userns_translation(self):
+        job = self.job()
+        state = {'Id': 'a' * 64, 'Pid': 12345, 'Running': True}
+        data = {'cgroup': '0::/docker/' + 'a' * 64, 'status': 'Uid:\t100000 100001 100001 100001\nGid:\t200000 200002 200002 200002\n',
+                'uid_map': '0 100000 65536', 'gid_map': '0 200000 65536'}
+        with patch.object(job, 'docker', return_value=json.dumps(state)), \
+             patch.object(Path, 'open', side_effect=lambda p, *args: io.StringIO(data[p.name]), autospec=True):
+            job.observe_primary_identity()
+        self.assertEqual(job.report['primary_process_identity']['status'], 'MEASURED')
+        self.assertEqual(job.report['primary_process_identity']['uid'], 1)
+        self.assertEqual(job.report['primary_process_identity']['gid'], 2)
+        with patch.object(job, 'docker', return_value=json.dumps({**state, 'Running': False, 'Pid': 0})):
+            job.observe_primary_identity()
+        self.assertEqual(job.report['primary_process_identity']['status'], 'UNKNOWN')
+        data['cgroup'] = '0::/different-host'
+        with patch.object(job, 'docker', return_value=json.dumps(state)), \
+             patch.object(Path, 'open', side_effect=lambda p, *args: io.StringIO(data[p.name]), autospec=True):
+            job.observe_primary_identity()
+        self.assertEqual(job.report['primary_process_identity']['status'], 'UNKNOWN')
 
 
 if __name__ == '__main__':
