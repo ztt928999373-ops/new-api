@@ -220,10 +220,12 @@ class Acceptance:
             return value
         return '[UNSUPPORTED VALUE]'
 
-    def container_logs(self, name=None):
+    def container_logs(self, name=None, timestamps=True):
         """Read separate streams with a combined byte ceiling and wall-clock timeout."""
-        command = ['docker', '--host=unix:///var/run/docker.sock', 'logs', '--timestamps', '--tail=200',
-                   name or self.state['container']]
+        command = ['docker', '--host=unix:///var/run/docker.sock', 'logs']
+        if timestamps:
+            command.append('--timestamps')
+        command += ['--tail=200', name or self.state['container']]
         buffers = {'stdout': bytearray(), 'stderr': bytearray()}
         total, truncated = 0, False
         deadline = time.monotonic() + DIAGNOSTIC_TIMEOUT
@@ -488,7 +490,7 @@ class Acceptance:
         self.docker(*command, IMAGE, '-c', STORAGE_PROBE, timeout=DIAGNOSTIC_TIMEOUT)
         self.docker('start', probe, timeout=DIAGNOSTIC_TIMEOUT)
         exit_code = self.docker('wait', probe, timeout=DIAGNOSTIC_TIMEOUT).strip()
-        logs = self.container_logs(probe)
+        logs = self.container_logs(probe, timestamps=False)
         require(exit_code == '0' and not logs['error_code'] and not logs['truncated'], 'D2_PROBE_EXECUTION_FAILED')
         result['measurement'] = self.storage_result(logs['stdout'], mount)
         primary = result['primary_process_identity']

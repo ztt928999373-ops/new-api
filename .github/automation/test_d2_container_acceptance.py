@@ -593,6 +593,86 @@ class Guards(unittest.TestCase):
         self.assertEqual([call.args[-1] for call in docker.call_args_list],
                          [job.state['probe'], job.state['container'], job.state['volume']])
 
+    def test_application_log_collector_keeps_rfc3339nano_timestamps_by_default(self):
+        job = self.job()
+        real_popen = subprocess.Popen
+        commands = []
+        stamp = '2026-11-14T06:30:44.187484700Z '
+        def producer(command, **kwargs):
+            commands.append(command)
+            payload = (stamp if '--timestamps' in command else '') + 'application startup failed\n'
+            return real_popen([sys.executable, '-c', 'import sys; sys.stdout.write(sys.argv[1])', payload], **kwargs)
+        with patch('subprocess.Popen', side_effect=producer):
+            logs = job.container_logs()
+        self.assertEqual(commands[0], ['docker', '--host=unix:///var/run/docker.sock', 'logs',
+                                       '--timestamps', '--tail=200', job.state['container']])
+        self.assertEqual(logs['stdout'], stamp + 'application startup failed')
+        self.assertIsNone(logs['error_code'])
+
+    def test_probe_log_collection_to_parser_handles_docker_format_and_failures_before_cleanup(self):
+        real_popen = subprocess.Popen
+        for case in ('normal', 'unexpected_timestamp', 'malformed_timestamp', 'missing_field', 'truncated'):
+            with self.subTest(case=case):
+                work = self.root / case
+                work.mkdir()
+                job = d2.Acceptance(work, {})
+                job.phase = 'health'
+                config = self.storage_config(job)
+                volume = {'Labels': {d2.LABEL: job.state['owner']}, 'Driver': 'local', 'Options': None}
+                commands = []
+                def docker(*args, **kwargs):
+                    if args[0] == 'inspect' and 'RestartCount' in args[2]:
+                        return json.dumps({'State': {'Running': False, 'StartedAt': '2026-11-14T06:30:44Z',
+                                                    'FinishedAt': '2026-11-14T06:30:45Z'}, 'RestartCount': 0})
+                    if args[0] == 'inspect': return json.dumps(config)
+                    if args[:2] == ('image', 'inspect'): return '"1001:1001"'
+                    if args[:2] == ('volume', 'inspect'): return json.dumps([volume])
+                    if args[0] == 'wait': return '0'
+                    return ''
+                def producer(command, **kwargs):
+                    commands.append(command)
+                    payload = self.storage_fixture() if command[-1].endswith('-probe') else 'application startup failed\n'
+                    if command[-1].endswith('-probe'):
+                        if case == 'unexpected_timestamp': payload = ''.join('2026-11-14T06:30:44.187484700Z ' + line + '\n' for line in payload.splitlines())
+                        if case == 'malformed_timestamp': payload = payload.replace('VERSION=1', 'not-a-timestamp VERSION=1')
+                        if case == 'missing_field': payload = payload.replace('UID=0\n', '')
+                    # Emulate Docker's actual flag-dependent wire format, not a pre-parsed fixture.
+                    if '--timestamps' in command:
+                        payload = ''.join('2026-11-14T06:30:44.187484700Z ' + line + '\n' for line in payload.splitlines())
+                    return real_popen([sys.executable, '-c', 'import sys; sys.stdout.write(sys.argv[1])', payload], **kwargs)
+                env = {'RUNNER_TEMP': str(work), 'GITHUB_RUN_ID': '1', 'GITHUB_RUN_ATTEMPT': '1',
+                       'GITHUB_STEP_SUMMARY': str(work / 'summary')}
+                with patch.dict(os.environ, env), patch.object(d2, 'trusted'), \
+                     patch.object(d2, 'Acceptance', return_value=job), patch.object(sys, 'argv', ['acceptance.py']), \
+                     patch.object(job, 'run', side_effect=RuntimeError('D2_CONTAINER_EXITED')), \
+                     patch.object(job, 'docker', side_effect=docker), patch.object(job, 'image_tool'), \
+                     patch.object(job, 'resource', return_value=None), patch('subprocess.Popen', side_effect=producer), \
+                     patch.object(d2, 'DIAGNOSTIC_BYTES', 128 if case == 'truncated' else 65536), \
+                     patch.object(job, 'cleanup', wraps=job.cleanup) as cleanup:
+                    with self.assertRaisesRegex(RuntimeError, '^D2_ACCEPTANCE_INCOMPLETE$'):
+                        d2.main()
+                self.assertEqual(len(commands), 2)
+                self.assertIn('--timestamps', commands[0])
+                self.assertNotIn('--timestamps', commands[1])
+                self.assertEqual(commands[1][-2:], ['--tail=200', job.state['owner'] + '-probe'])
+                storage = job.report['diagnostics']['storage']
+                if case == 'normal':
+                    measured = storage['measurement']
+                    self.assertEqual(measured['UID'], 0)
+                    self.assertEqual(measured['GID'], 0)
+                    self.assertEqual(measured['metadata']['DATA'], {'uid': 0, 'gid': 0, 'mode': '700', 'type': 'directory', 'size': 4096})
+                    self.assertEqual(measured['metadata']['DB'], {'uid': 0, 'gid': 0, 'mode': '600', 'type': 'regular file', 'size': 8192})
+                    self.assertEqual(measured['uid_MAP'], [[0, 0, 4294967295]])
+                    self.assertEqual(measured['gid_MAP'], [[0, 0, 4294967295]])
+                    self.assertEqual(measured['access_status'], 'PASS')  # also requires VERSION=1
+                else:
+                    self.assertEqual(storage['status'], 'UNKNOWN')
+                    self.assertNotEqual(storage.get('measurement', {}).get('access_status'), 'PASS')
+                self.assertEqual(job.report['error_code'], 'D2_CONTAINER_EXITED')
+                self.assertEqual(job.report['phases']['health'], 'failure')
+                self.assertEqual(job.report['phases']['cleanup'], 'success')
+                cleanup.assert_called_once()
+
     def test_foreign_or_injected_probe_is_never_removed(self):
         for name, item in [('foreign', None), ('owned-name', {'Config': {'Labels': {}}})]:
             job = self.job()
