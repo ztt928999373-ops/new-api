@@ -78,3 +78,29 @@ NODE_USE_ENV_PROXY=1 node -e "require('./.github/automation/ghcr-release.cjs').v
 ```
 
 预期输出固定 `ghcr.io/ztt928999373-ops/suanjie-api@sha256:...` 引用并退出 0；失败仅输出安全码并非零退出。保存执行时的修复提交、原源码 SHA、两个 Digest 和结果；不将原失败运行改记成功，也不将镜像存在当作部署完成。跳转策略参照 [OWASP SSRF 防护建议](https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html)，仅声明本文列出的已测试边界，不声称完成全面合规审计。
+
+## 已发布镜像的手动隔离容器验收（不发布）
+
+`v1-d2-image-acceptance.yml` 是独立的 `workflow_dispatch` 工作流；无 push/PR/定时触发，无输入可替换镜像，仅 GitHub 托管 Ubuntu 24.04，权限仅 `contents:read`。仓库、事件和 `refs/heads/product/v1` 同时满足才启动 Job；检出事件完整 SHA，并用只读 Git ref 查询确认仍是当前主线。不会运行 PR checkout。不要把离线测试或其他 ref 的 skipped Job 记为容器通过。
+
+人工合并本工作流后，在 Actions 选择“D2 已发布 Digest 隔离容器验收（仅手动）”，分支选 `product/v1`，核实主线 SHA 后手动运行一次。本次开发不触发它，也不重跑 GHCR publish。实际容器流程由 `.github/automation/d2_container_acceptance.py` 执行，先运行同目录离线安全回归；静态/Mock 通过不代替后续真实流程。
+
+- 固定拉取 `ghcr.io/ztt928999373-ops/suanjie-api@sha256:725d45a3fe8deb3155950a0935bc9873bf0439ef99a425be2dd5f13cbaa21ddf`。全新私有 Docker client 配置不读取原 registry 登录，仅匿名 pull；不足权限即停止。没有登录、build、push、tag、镜像删除或 packages 权限。
+- Docker 数据目录所在文件系统拉取前、拉取后及测试末均须至少有 5 GiB 可用空间；不会移动 daemon、改变驱动或执行 prune。该值是余量门禁，不是镜像解包大小估算；Summary 记录实际可用字节和拉取后 image Size。
+- 确认 RepoDigest、Config Id、linux/amd64；复用现有 `validateMetadata` 检查原源码 `cd8937c602640fc31c0144994a73266c3d792782`、OCI 身份和入口。三个许可证文件与原发布源码对应的固定 SHA256 比对；不把工作流新提交误当镜像源码。
+- 复用 D1 的三个关闭选项和隔离思想，不构建 D1 派生镜像。宿主 Python 在全新私有目录创建 SQLite：RegisterEnabled=false、PasswordRegisterEnabled=false、payment_setting.compliance_confirmed=false。创建全新卷和容器前拒绝同名资源；只将该合成数据复制到尚未启动的新容器；不接触既有数据。
+- 两个随机临时密钥只经进程环境注入，不记录值、不提供可用默认值。容器仅 `network=none`、无宿主端口、cap_drop ALL、no-new-privileges，根文件系统只读，仅新卷和临时 /tmp 可写。无 Redis/渠道/真实服务配置，日志限制为 10 MiB × 3。
+- 从容器 loopback 检查 Docker health 和 `/api/status`；验证合成注册请求被拒绝、渠道为零、三个关闭选项不变。先停机复制完整 /data 后检查 SQLite `integrity_check`，再启动同一卷验证标记持久化，最后再次停机检查数据库。不是生产管理员或支付验收。
+- finally 和 always 兜底只清理本次状态文件中的精确容器/卷名，并要求随机归属标签一致；不扫描删除其他资源，不删除镜像、不清理全局数据。没有创建 Docker 网络，不删除内置 none 网络。缺失资源可幂等重试，权限/daemon 错误不能当作资源不存在。
+
+详细的固定身份、磁盘字节、每项 success/failure/not_run 和安全错误码留在 Actions Job Summary 的 JSON 中；不上传 SQLite、密钥、Docker config、inspect 全文或原始应用日志。测试异常会失败退出，后续未运行项保持 not_run；清理失败同样不能算成功。Runner 硬终止时报告/清理可能来不及完成，须按取消或未确认处理，不认定通过。
+
+合并前离线验证命令：
+
+```sh
+python3 -m unittest discover -s .github/automation -p 'test_d2_container_acceptance.py' -v
+python3 -m py_compile .github/automation/d2_container_acceptance.py .github/automation/test_d2_container_acceptance.py
+actionlint -shellcheck= -pyflakes= .github/workflows/v1-d2-image-acceptance.yml
+```
+
+若原镜像缺少健康工具、只读根不兼容、启动退出、容量不足或网络/数据库断言失败，保留真实失败阶段，不改用重新构建的镜像掩盖问题；先报告再由用户决定是否需要修复。所有动态项目真正通过后才能关闭 D2。后续优先做固定 Digest 的隔离部署与恢复验收，不扩展发布基础设施、不进入 C2 或公网运营。

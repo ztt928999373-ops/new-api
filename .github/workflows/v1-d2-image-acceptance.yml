@@ -1,0 +1,37 @@
+name: D2 已发布 Digest 隔离容器验收（仅手动）
+run-name: D2 隔离验收 ${{ github.sha }}
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: d2-fixed-image-acceptance
+  cancel-in-progress: false
+jobs:
+  acceptance:
+    if: github.repository == 'ztt928999373-ops/new-api' && github.ref == 'refs/heads/product/v1' && github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: 核实受信任主线，拒绝旧 ref 或未经审核代码
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(gh api repos/ztt928999373-ops/new-api/git/ref/heads/product/v1 --jq '.object.sha')" = "$GITHUB_SHA"
+      - name: 离线安全回归（不代替动态验收）
+        run: python3 -m unittest discover -s .github/automation -p 'test_d2_container_acceptance.py'
+      - name: 仅拉取固定 Digest 并完成隔离验收
+        run: python3 .github/automation/d2_container_acceptance.py
+      - name: 最后兜底清理，仅处理本任务记录且标签匹配的资源
+        if: always()
+        run: |
+          state="$RUNNER_TEMP/d2-acceptance-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/d2-acceptance-state.json"
+          if [ -f "$state" ]; then
+            python3 .github/automation/d2_container_acceptance.py --cleanup
+          fi
