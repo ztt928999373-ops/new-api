@@ -704,6 +704,141 @@ class Guards(unittest.TestCase):
             job.observe_primary_identity()
         self.assertEqual(job.report['primary_process_identity']['status'], 'UNKNOWN')
 
+    def seed_owner_fixture(self, job):
+        directory = job.work / 'seed'
+        d2.seed(directory, 'synthetic-proof')
+        db = directory / 'test.sqlite'
+        original = db.lstat()
+        values = list(original)
+        values[4], values[5] = 0, 0
+        return db, original, os.stat_result(values)
+
+    def test_seed_owner_adjustment_preserves_0600_and_verifies_root_with_lstat(self):
+        job = self.job()
+        db, original, root = self.seed_owner_fixture(job)
+        original_lstat = Path.lstat
+        for runner_uid in (0, 1001):
+            replies = iter([original, root])
+            with self.subTest(uid=runner_uid), patch.object(os, 'geteuid', return_value=runner_uid), \
+                 patch.object(Path, 'lstat', autospec=True, side_effect=lambda p, *a, **k: next(replies) if p == db else original_lstat(p, *a, **k)), \
+                 patch.object(os, 'chown') as chown, patch.object(job, 'call') as call:
+                job.prepare_seed_owner(db)
+            if runner_uid == 0:
+                chown.assert_called_once_with(db, 0, 0, follow_symlinks=False)
+                call.assert_not_called()
+            else:
+                self.assertEqual(call.call_args.args[0], ['/usr/bin/sudo', '-n', '--', '/usr/bin/chown', '--no-dereference', '0:0', str(db)])
+                chown.assert_not_called()
+            self.assertEqual(job.report['seed_file']['uid'], 0)
+            self.assertEqual(job.report['seed_file']['gid'], 0)
+            self.assertEqual(job.report['seed_file']['mode'], '0o600')
+            self.assertTrue(job.report['seed_file']['regular_file'])
+            self.assertEqual(d2.stat.S_IMODE(db.stat().st_mode), 0o600)
+
+    def test_seed_owner_failure_or_wrong_postconditions_abort_without_copy(self):
+        job = self.job()
+        db, original, root = self.seed_owner_fixture(job)
+        original_lstat = Path.lstat
+        wrong = list(root)
+        wrong[0] = (wrong[0] & ~0o777) | 0o644
+        wrong = os.stat_result(wrong)
+        for outcome, expected in [(RuntimeError('password=synthetic-private'), 'D2_SEED_OWNER_CHANGE_FAILED'),
+                                   (wrong, 'D2_SEED_OWNER_VERIFICATION_FAILED')]:
+            replies = iter([original, wrong])
+            with patch.object(os, 'geteuid', return_value=1001), \
+                 patch.object(Path, 'lstat', autospec=True, side_effect=lambda p, *a, **k: next(replies) if p == db else original_lstat(p, *a, **k)), \
+                 patch.object(job, 'call', side_effect=outcome if isinstance(outcome, Exception) else None), \
+                 patch.object(job, 'docker') as docker:
+                with self.assertRaisesRegex(RuntimeError, '^' + expected + '$'):
+                    job.prepare_seed_owner(db)
+            docker.assert_not_called()
+
+    def test_root_owned_private_seed_copy_uses_only_scoped_noninteractive_sudo(self):
+        job = self.job()
+        directory = job.work / 'seed'
+        with patch.object(os, 'geteuid', return_value=1001), patch.object(job, 'call') as call, patch.object(job, 'docker') as docker:
+            job.copy_seed(directory)
+        self.assertEqual(call.call_args.args[0], ['/usr/bin/sudo', '-n', '--', '/usr/bin/docker',
+            '--host=unix:///var/run/docker.sock', '--config=' + job.env['DOCKER_CONFIG'], 'cp', str(directory) + '/.', job.state['container'] + ':/data'])
+        docker.assert_not_called()
+        with patch.object(os, 'geteuid', return_value=1001), patch.object(job, 'call', side_effect=RuntimeError('synthetic-private')):
+            with self.assertRaisesRegex(RuntimeError, '^D2_SEED_COPY_FAILED$'):
+                job.copy_seed(directory)
+
+    def preflight_fixture(self, job):
+        job.state['probe'] = job.state['owner'] + '-probe'
+        measured = job.storage_result(self.storage_fixture(), {'RW': True})
+        return {'status': 'UNKNOWN', 'measurement': measured, 'database_size_matches_seed': True}
+
+    def test_copied_seed_preflight_requires_measured_owner_mode_and_access(self):
+        job = self.job()
+        evidence = self.preflight_fixture(job)
+        item = {'Config': {'Labels': {d2.LABEL: job.state['owner']}}, 'State': {'Running': False}}
+        with patch.object(job, 'storage_diagnostics', return_value=evidence), patch.object(job, 'resource', return_value=item), \
+             patch.object(job, 'docker') as docker:
+            job.preflight_seed()
+        self.assertEqual(job.report['seed_preflight']['status'], 'PASS')
+        self.assertEqual(evidence['status'], 'UNKNOWN')  # unrelated SQLite/process evidence is not promoted
+        self.assertEqual(evidence['measurement']['metadata']['DB']['mode'], '600')
+        docker.assert_called_once_with('container', 'rm', job.state['probe'], timeout=d2.DIAGNOSTIC_TIMEOUT)
+
+    def test_preflight_wrong_owner_unknown_or_denied_access_blocks_startup(self):
+        for case, expected in [('host_owner_change', 'D2_SEED_OWNER_CHANGE_FAILED'),
+                               ('owner', 'D2_SEED_PREFLIGHT_OWNER'), ('mode', 'D2_SEED_PREFLIGHT_FILE'),
+                               ('read', 'D2_SEED_PREFLIGHT_ACCESS'), ('write', 'D2_SEED_PREFLIGHT_ACCESS'),
+                               ('unknown', 'D2_SEED_PREFLIGHT_ACCESS'), ('missing', 'D2_SEED_PREFLIGHT_UNKNOWN'),
+                               ('identity_unknown', 'D2_SEED_PREFLIGHT_IDENTITY'), ('size_unknown', 'D2_SEED_PREFLIGHT_SIZE')]:
+            with self.subTest(case=case):
+                work = self.root / case
+                work.mkdir()
+                job = d2.Acceptance(work, {})
+                evidence = self.preflight_fixture(job)
+                measured = evidence['measurement']
+                if case == 'owner': measured['metadata']['DB']['uid'] = 1001
+                if case == 'mode': measured['metadata']['DB']['mode'] = '644'
+                if case in ('read', 'write', 'unknown'):
+                    measured['checks']['READ_ACCESS' if case != 'write' else 'WRITE_ACCESS'] = 'UNKNOWN' if case == 'unknown' else 'FAIL'
+                if case == 'missing': measured['metadata'].pop('DB')
+                if case == 'identity_unknown': measured['UID'] = 'UNKNOWN'
+                if case == 'size_unknown': evidence['database_size_matches_seed'] = 'UNKNOWN'
+                calls = []
+                def docker(*args, **kwargs):
+                    calls.append(args)
+                    if args[0] == 'info': return str(self.root)
+                    if args[:2] == ('image', 'inspect'):
+                        return json.dumps([{'RepoDigests': [d2.IMAGE], 'Id': d2.CONFIG, 'Size': 100, 'Os': 'linux', 'Architecture': 'amd64'}])
+                    return ''
+                owned = {'Labels': {d2.LABEL: job.state['owner']}, 'Driver': 'local', 'Options': None}
+                with patch.object(job, 'docker', side_effect=docker), patch.object(job, 'resource', side_effect=[None, None, owned]), \
+                     patch.object(job, 'prepare_seed_owner', side_effect=RuntimeError('D2_SEED_OWNER_CHANGE_FAILED') if case == 'host_owner_change' else None), \
+                     patch.object(job, 'copy_seed') as copy, \
+                     patch.object(job, 'storage_diagnostics', return_value=evidence), \
+                     patch('subprocess.run', return_value=subprocess.CompletedProcess([], 0, '', '')), patch('shutil.disk_usage') as usage:
+                    usage.return_value.free = d2.MIN_FREE + 1024
+                    with self.assertRaisesRegex(RuntimeError, '^' + expected + '$'):
+                        job.run()
+                self.assertFalse(any(args[0] == 'start' for args in calls))
+                if case == 'host_owner_change':
+                    copy.assert_not_called()
+                    self.assertNotIn('seed_preflight', job.report)
+                else:
+                    self.assertEqual(job.report['seed_preflight']['status'], 'FAIL')
+
+    def test_preflight_failure_survives_diagnostic_failure_and_cleanup_runs(self):
+        job = self.job()
+        job.phase = 'seed'
+        env = {'RUNNER_TEMP': str(self.root), 'GITHUB_RUN_ID': '1', 'GITHUB_RUN_ATTEMPT': '1',
+               'GITHUB_STEP_SUMMARY': str(self.root / 'summary')}
+        with patch.dict(os.environ, env), patch.object(d2, 'trusted'), patch.object(d2, 'Acceptance', return_value=job), \
+             patch.object(sys, 'argv', ['acceptance.py']), patch.object(job, 'run', side_effect=RuntimeError('D2_SEED_PREFLIGHT_OWNER')), \
+             patch.object(job, 'diagnose', side_effect=RuntimeError('synthetic-private')), patch.object(job, 'cleanup') as cleanup:
+            with self.assertRaisesRegex(RuntimeError, '^D2_ACCEPTANCE_INCOMPLETE$'):
+                d2.main()
+        self.assertEqual(job.report['error_code'], 'D2_SEED_PREFLIGHT_OWNER')
+        self.assertEqual(job.report['phases']['seed'], 'failure')
+        self.assertEqual(job.report['phases']['startup'], 'not_run')
+        cleanup.assert_called_once()
+
 
 if __name__ == '__main__':
     unittest.main()

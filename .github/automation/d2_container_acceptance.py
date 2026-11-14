@@ -556,11 +556,9 @@ class Acceptance:
         proof = secrets.token_hex(24)
         directory = self.work / 'seed'
         seed(directory, proof)
-        info = (directory / 'test.sqlite').lstat()
-        self.report['seed_file'] = {'source': 'host_lstat_before_copy', 'size': info.st_size,
-                                    'mode': oct(info.st_mode & 0o777), 'uid': info.st_uid, 'gid': info.st_gid,
-                                    'regular_file': stat.S_ISREG(info.st_mode)}
-        self.docker('cp', str(directory) + '/.', name + ':/data')
+        self.prepare_seed_owner(directory / 'test.sqlite')
+        self.copy_seed(directory)
+        self.preflight_seed()
         self.passed()
         self.step('licenses')
         for filename, digest in LICENSES.items():
@@ -602,6 +600,82 @@ class Acceptance:
         self.snapshot(self.work / 'after-restart', proof)
         self.report['free_after_tests'] = capacity(root)
         self.passed()
+
+    def prepare_seed_owner(self, db):
+        require(db == self.work / 'seed' / 'test.sqlite' and not db.parent.is_symlink(), 'D2_SEED_PATH_INVALID')
+        try:
+            before = db.lstat()
+        except OSError:
+            raise RuntimeError('D2_SEED_FILE_INVALID') from None
+        require(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and stat.S_IMODE(before.st_mode) == 0o600,
+                'D2_SEED_FILE_INVALID')
+        try:
+            if os.geteuid() == 0:
+                os.chown(db, 0, 0, follow_symlinks=False)
+            else:
+                self.call(['/usr/bin/sudo', '-n', '--', '/usr/bin/chown', '--no-dereference', '0:0', str(db)],
+                          timeout=DIAGNOSTIC_TIMEOUT)
+        except Exception:
+            raise RuntimeError('D2_SEED_OWNER_CHANGE_FAILED') from None
+        try:
+            after = db.lstat()
+        except OSError:
+            raise RuntimeError('D2_SEED_OWNER_VERIFICATION_FAILED') from None
+        require((after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
+                and stat.S_ISREG(after.st_mode) and after.st_nlink == 1
+                and after.st_uid == 0 and after.st_gid == 0 and stat.S_IMODE(after.st_mode) == 0o600,
+                'D2_SEED_OWNER_VERIFICATION_FAILED')
+        self.report['seed_file'] = {'source': 'host_lstat_before_copy', 'size': after.st_size,
+                                    'mode': oct(stat.S_IMODE(after.st_mode)), 'uid': after.st_uid, 'gid': after.st_gid,
+                                    'regular_file': stat.S_ISREG(after.st_mode)}
+
+    def copy_seed(self, directory):
+        require(directory == self.work / 'seed', 'D2_SEED_PATH_INVALID')
+        try:
+            if os.geteuid() == 0:
+                self.docker('cp', str(directory) + '/.', self.state['container'] + ':/data')
+            else:
+                # Only this copy needs root to read the newly root-owned 0600 file.
+                self.call(['/usr/bin/sudo', '-n', '--', '/usr/bin/docker',
+                           '--host=unix:///var/run/docker.sock', '--config=' + self.env['DOCKER_CONFIG'],
+                           'cp', str(directory) + '/.', self.state['container'] + ':/data'], timeout=DIAGNOSTIC_TIMEOUT)
+        except Exception:
+            raise RuntimeError('D2_SEED_COPY_FAILED') from None
+
+    def preflight_seed(self):
+        preflight = {'status': 'UNKNOWN', 'scope': 'copied_seed_permissions_before_application_start'}
+        self.report['seed_preflight'] = preflight
+        try:
+            evidence = self.storage_diagnostics()
+            preflight['evidence'] = evidence
+            measured = evidence.get('measurement', {})
+            db = measured.get('metadata', {}).get('DB', {})
+            require(all(key in db for key in ('uid', 'gid', 'mode', 'type', 'size'))
+                    and all(key in measured for key in ('UID', 'GID', 'checks', 'access_status')),
+                    'D2_SEED_PREFLIGHT_UNKNOWN')
+            require(type(measured['UID']) is int and type(measured['GID']) is int
+                    and measured['UID'] == 0 and measured['GID'] == 0, 'D2_SEED_PREFLIGHT_IDENTITY')
+            require(type(db['uid']) is int and type(db['gid']) is int and db['uid'] == 0 and db['gid'] == 0,
+                    'D2_SEED_PREFLIGHT_OWNER')
+            require(db['mode'] == '600' and db['type'] == 'regular file' and type(db['size']) is int and db['size'] > 0,
+                    'D2_SEED_PREFLIGHT_FILE')
+            checks = measured['checks']
+            require(measured['access_status'] == 'PASS' and all(checks.get(k) == 'PASS' for k in
+                    ('mount_rw', 'file_exists', 'regular_database', 'directory', 'TRAVERSE', 'READ_ACCESS', 'WRITE_ACCESS', 'CREATE', 'REMOVE')),
+                    'D2_SEED_PREFLIGHT_ACCESS')
+            require(evidence.get('database_size_matches_seed') is True, 'D2_SEED_PREFLIGHT_SIZE')
+            # Remove only this finished, owned probe so finally diagnostics can reuse its name.
+            probe = self.state.get('probe')
+            require(probe == self.state['owner'] + '-probe', 'D2_SEED_PREFLIGHT_PROBE_INVALID')
+            item = self.resource('container', probe)
+            require(item is not None and (item.get('Config', {}).get('Labels') or {}).get(LABEL) == self.state['owner']
+                    and item.get('State', {}).get('Running') is False, 'D2_SEED_PREFLIGHT_PROBE_INVALID')
+            self.docker('container', 'rm', probe, timeout=DIAGNOSTIC_TIMEOUT)
+            preflight['status'] = 'PASS'
+        except Exception as error:
+            code = str(error) if re.fullmatch('D2_SEED_PREFLIGHT_[A-Z_]+', str(error)) else 'D2_SEED_PREFLIGHT_FAILED'
+            preflight.update(status='FAIL', error_code=code)
+            raise RuntimeError(code) from None
 
     def cleanup(self):
         state = self.state
