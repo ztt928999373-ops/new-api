@@ -2,6 +2,62 @@
 
 当前交付是**配置和操作准备**，不是部署成功或 D3 结项。仅支持专用 Linux amd64、rootful 本机 Docker Engine、Compose v2、Python 3.12+ 的全新合成 SQLite 环境。没有公网或宿主入口，没有真实用户、管理员默认密码、供应商凭据、支付配置或付费调用。不要使用根目录官方 Compose。
 
+## GitHub Actions 一次性 Runner 入口（尚未真实执行）
+
+主线基准 `92659dabad6c918517778d8d7eae915885f4c19a` 已合并 PR #40。本次只开发手动工作流，不触发它；代码合并也不代表批准 full 动态演练。后文保留持久主机的手工操作参考，**Actions 只调用本目录 `acceptance.py`，不解析或复制执行 Markdown 代码块**。
+
+新增工作流 `.github/workflows/v1-d3-isolated-acceptance.yml` 只有 `workflow_dispatch`，不响应 push、PR、定时或其他工作流。固定 `ubuntu-24.04`、Linux x64、受信任仓库和 `product/v1`，仅项目所有者可发起/重新运行。权限仅 `contents: read`，不引用仓库 Secrets、PAT、packages、OIDC 或发布能力；固定审核过的 checkout/upload-artifact 完整 SHA。不要使用 ubuntu-latest、ubuntu-slim、ARM 或付费 Larger Runner。
+
+### 人工运行方法与审批边界
+
+1. 所有者先审阅 Draft PR，决定是否合并；等待**合并后完整 SHA** 的必需 CI 成功。真实演练仍需所有者另外明确批准。
+2. 在 Actions 选择“D3 固定 Digest 隔离恢复验收（仅手动）”，分支只能为 `product/v1`；`expected_sha` 填写实时主线完整 SHA，不沿用本节历史基准或 PR head。
+3. 默认 `mode=preflight`，`confirmation` 留空。它只检查源码、宿主和 Docker daemon 元数据，不拉镜像、不创建容器/卷、不生成应用密钥；成功结果为 `preflight_pass`，不是 `d3_pass`。
+4. 只有另获批准后才选择 `mode=full`，并填写 `confirmation=D3-SYNTHETIC-ONLY`。这会消耗 Runner/网络/临时磁盘资源；任何缺失或错误确认都会在创建资源前拒绝。本轮开发不执行此步骤。
+5. 查看 Job Summary、Job 最终状态及 Artifact。Artifact 上传失败、Job 被取消或任何必需阶段非 success，均不得认定验收成功。不要通过手动改 JSON 或重新构建镜像修复失败证据。
+
+触发事件 SHA、工作区 HEAD、输入 SHA 和实时主线必须一致；创建探针、seed 和启动应用前还会重查主线。拒绝 PR ref、其他分支、fork、自托管 Runner、其他操作者及过期 SHA。主线移动会阻断后续运行，但不会阻断该任务自身的归属清理。
+
+### 环境硬门禁与预计资源
+
+- 受控 root 子进程通过 `sudo -n env -i` 运行，只传明确允许的运行上下文；不继承 GITHUB_TOKEN、Actions 运行时凭据或其他宿主秘密。随机应用密钥在 root 子进程内生成，不经命令行或 GITHUB_ENV 输出。
+- 本地 `/var/run/docker.sock` 必须为 root 所有的 socket；Docker 必须非 rootless，SecurityOptions 必须可读取。要求 cgroups v2、systemd/cgroupfs 驱动、memory/cpu/pids 控制器及 Docker 对应限额支持标记，Compose v2。未知或缺失立即退出，不安装新 daemon 或降级。
+- 现场读取实际 DockerRootDir 及工作目录所在文件系统的余量。拉取前要求至少 8 GiB（5 GiB 保留量加 3 GiB 保守预算），拉取后至少 7 GiB，备份和回滚后至少 5 GiB；这是合成演练的容量门禁，不是对镜像展开大小的精确预测。不移动 Docker 数据目录或删除预装工具来腾空间。
+- full 模式先匿名拉取既有固定 Digest，核对 RepoDigest、Config Id、原源码 revision、架构和入口，再运行同一镜像的非业务资源探针。直接读取探针内 memory.max、cpu.max、pids.max；请求参数不等于生效证明，实际值不匹配即退出，尚不启动应用。应用启动后再次核对实际 cgroup 限额。
+- 应用最多两个、数据卷两个，探针串行且应用停止时才运行，每次最多一个运行容器。应用 1 GiB / 2 CPU / 256 PID / 128 MiB tmpfs；卷内探针 128 MiB / 0.25 CPU / 32 PID；前置资源探针按应用限额验证。所有容器网络 none、无宿主端口、只读根、cap-drop ALL、no-new-privileges，无真实用户、渠道或支付参数。
+- 全新数据、完整备份及回读快照只位于本次 RUNNER_TEMP 的 root 私有目录；应用 env 文件与数据分别置于 private/keys 和数据子目录，0700/0600，不进入 checkout 或 Artifact。合成数据总量限制 256 MiB，快照拒绝符号链接、硬链接、特殊文件及 supplier ring；出现实际凭据场景须停止，不能直接复制旧 ring 恢复。
+
+### 阶段、证据与失败处理
+
+13 个独立阶段为 source、environment、image、resource_limits、seed、startup、backup、restore、restored_startup、persistence、rollback、diagnostics、cleanup。此列表属于 D3，不是重跑 D2 的 13 阶段。
+
+| 状态 | 含义 |
+| --- | --- |
+| success | 本阶段操作及断言完成 |
+| failure | 操作或硬门禁失败，后续业务阶段保持 not_run |
+| skipped | preflight 明确不请求完整演练阶段，不能视为 D3 通过 |
+| cancelled | 捕获到取消信号或工作流已取消，不能视为通过 |
+| not_run | 尚未执行或被前序失败阻断 |
+| unknown | 阶段已开始但尚无完成证据；硬终止可能保留此状态 |
+
+执行器只复用 D2 的 seed、数据库校验、有界日志采集及脱敏方法，不调用 D2 main、发布流程或 D2 构造器。seed 与全新恢复卷都先通过同身份卷内 UID/GID=0:0、0600、普通文件、O_RDWR 打开、目录随机文件创建/删除验证，再复制回私有目录验证完整清单/摘要与 SQLite；恢复阶段不只检查宿主解包目录。停机备份保存完整 /data，manifest 配对镜像、实际执行 SHA、Compose、备份和原环境文件摘要。原卷保持停止，恢复到新卷后验完整性、健康及重启 proof；最后回读原卷确认未变，使用原镜像和密钥完成配对回滚，最终停机。
+
+资源精确名称和归属在创建前原子写入私有状态文件。执行器 finally 与工作流 always 两层兜底，只处理本轮名称且匹配 Compose project/自有卷标签/固定镜像/挂载的资源；daemon 错误不是“不存在”，归属不符不删除，其他资源仍继续清理。清理不使用全局 prune、通配删除、down -v 或删除镜像。清理不能确认则报告 failure；取消/断网/Runner 硬终止仍可能来不及执行兜底，不能据此虚报已清理。
+
+**临时 Runner 与后文持久主机的留存政策不同**：原卷仅在本 Job 完成恢复/回滚前保留；诊断后清理本次临时容器、卷、备份和密钥，Runner 回收不提供长期保管。失败也只导出脱敏证据，不能指望登录下一台 Runner 找回数据库。这里只证明同一临时环境的合成恢复流程，不证明异地灾备、长期备份保存或跨版本 schema 回滚。
+
+Artifact 只包含 `report.json` 和 `SHA256SUMS`，7 天留存，报告上限 2 MiB。报告包含环境白名单、13 阶段状态、验证摘要、源码/镜像/备份 SHA-256 及每个应用最多 200 行、合计 64 KiB 的脱敏日志。秘密、数据库、tar 包、manifest 环境配对材料、Docker config、完整 inspect 和原始敏感日志均不上传；日志采集错误或截断会使诊断阶段失败。GitHub 日志遮罩不能替代 Artifact 脱敏。root 报告仅在审核过的两个文件路径内导出为 Runner 用户可读，不递归放宽 private 权限。上传失败同样阻断最终验收；SHA-256 用于核对传输完整性，不是来源签名。
+
+当前仓库 Public，标准 Runner 计算预计免费；Artifact 仍受账号存储配额及计费政策约束，不调整预算、不启用付费 Runner。预计 full 约 5–15 分钟，Job 超时 30 分钟，均为计划值，尚非实测。owner 发起的其他工作流通知属于现有流程，本工作流不新增通知或 Secrets。
+
+### 本次开发验证与未验证项目
+
+离线命令：`python3 -B -m unittest discover -s deploy/d3 -p test_acceptance.py -v`。测试只使用标准库、临时文件、SQLite fixture 和外部 Docker/OS 边界 Mock；涵盖默认预检不建资源、权限/空间/限额拒绝、配对损坏、复制损坏、状态传播、脱敏及归属清理，包括完整编排的离线模拟。不能把模拟中的 d3_pass 当成真实容器通过。
+
+本次开发已完成 17 项离线单元测试（含表驱动子用例），全部通过；actionlint 1.7.7 检查此新增工作流通过（未启用额外 shellcheck/pyflakes），另以 YAML 解析、Bash 语法和内嵌 Python 编译核对手动触发、contents-only、默认预检及固定 actions SHA。工具通过官方 SHA-256 校验后临时使用，不引入项目依赖。未执行 Go/Bun 安装、构建或产品全量测试。
+
+本轮没有触发 workflow_dispatch，没有拉镜像、创建 Docker 资源或实际执行启动/备份/恢复/回滚。源码、工作流静态检查及离线回归通过后，仅提交 Draft PR；实际 Runner 的 rootful、限额、空间、匿名拉取、卷内访问及恢复仍须获批准后验证。总体仍为 D2 已完成、D3 自动化待审核及真实演练，C2 不放行。
+
 ## 主线与已有证据
 
 2026-11-15 只读查询 `product/v1`：`a301f89f97fe0e4d07b25793255fee76e7315172`（PR #39）。GitHub API 返回代理 403，改为读取 GitHub Actions 页面；以下运行均对应此完整 SHA，显示 completed/success，相关 Job 页面也已读取。没有触发、重跑或修改 Actions/权限。
