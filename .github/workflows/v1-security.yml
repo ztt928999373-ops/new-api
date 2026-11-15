@@ -55,6 +55,7 @@ jobs:
           go test -json -race -count=1 ./router -run '^TestPasswordLoginFailureAudit' > "$RUNNER_TEMP/v1-security/login-audit.jsonl"
           go test -json -race -count=1 ./middleware -run '^TestDashboardDenialAudit' > "$RUNNER_TEMP/v1-security/denial-audit.jsonl"
           go test -json -race -count=1 ./model -run '^TestOverallChannelStatusIndependentOfCredentials$' > "$RUNNER_TEMP/v1-security/channel-status.jsonl"
+          go test -json -race -count=1 ./model -run '^TestTokenRevocation' > "$RUNNER_TEMP/v1-security/token-revocation.jsonl"
           go test -json -race -count=1 ./service/credentials > "$RUNNER_TEMP/v1-security/credentials.jsonl"
           go test -json -race -count=1 ./router -run '^TestChannelKeySecurity' > "$RUNNER_TEMP/v1-security/channel-key-security.jsonl"
           for database in sqlite mysql postgres; do
