@@ -76,7 +76,7 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           python3 - <<'PY'
-          import collections, os, pathlib, re, statistics
+          import collections, os, pathlib, re, statistics, subprocess
           text = (pathlib.Path(os.environ['RUNNER_TEMP']) / 'v1-security/token-auth-benchmark.txt').read_text()
           groups = collections.defaultdict(list)
           for line in text.splitlines():
@@ -86,13 +86,16 @@ jobs:
                   groups[(match[1], match[2], int(match[3] or 1))].append(metrics)
           if len(groups) != 8 or any(len(samples) != 3 for samples in groups.values()):
               raise SystemExit('Expected eight groups with three benchmark measurements each')
+          environment = [subprocess.check_output(['go', 'version'], text=True).strip()]
+          environment += [line for line in text.splitlines() if line.startswith(('goos:', 'goarch:', 'cpu:'))]
+          print('::notice title=Synthetic benchmark environment::' + '; '.join(environment))
           for (version, mode, cpu), samples in sorted(groups.items()):
               expected = 0 if version == 'before' else 1
               if any(sample.get('sql/op') != expected for sample in samples):
                   raise SystemExit('Unexpected SQL count in hot lookup measurement')
               ns = statistics.median(sample['ns/op'] for sample in samples)
               rate = statistics.median(sample['lookup/s'] for sample in samples)
-              print(f'::notice title=Synthetic lookup {version} {mode} cpu={cpu}::median_of_3 ns/op={ns:.3f}; lookup/s={rate:.3f}; sql/op={expected}; loopback miniredis + memory SQLite, pool=1; not production latency')
+              print(f'::notice title=Synthetic lookup {version} {mode} cpu={cpu}::version={version}; mode={mode}; cpu={cpu}; median_of_3 ns/op={ns:.3f}; lookup/s={rate:.3f}; sql/op={expected}; loopback miniredis + memory SQLite, pool=1; not production latency')
           PY
       - name: Summarize revocation evidence
         if: always()
