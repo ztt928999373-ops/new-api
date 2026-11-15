@@ -103,9 +103,9 @@ func TestTokenRevocationWithOverlappingCachedAuthentication(t *testing.T) {
 	require.ErrorIs(t, err, ErrTokenInvalid, "a new authentication after committed revocation must be denied")
 }
 
-// The assertion is intentionally a security contract, not an assertion that the
-// vulnerable implementation must accept the stale token. Run before and after
-// a fix; the baseline is expected to fail in the injected-failure cases.
+// Assert the security contract instead of making stale authorization an expected
+// result. Execute this test before and after any fix; baseline runtime results
+// have not yet been established.
 func TestTokenRevocationRejectsStaleRedisAuthorization(t *testing.T) {
 	for _, mutation := range []string{"disable", "delete", "batch_delete"} {
 		for _, failure := range []string{"none", "set", "del", "timeout", "outage_recovery", "redis_disabled"} {
