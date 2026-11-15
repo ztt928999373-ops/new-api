@@ -184,7 +184,11 @@ func TestTokenRevocationDatabaseMatrix(t *testing.T) {
 				if kind == "mysql" {
 					dialect = mysql.Open("root:synthetic-test-only@tcp(127.0.0.1:23316)/credential_test?parseTime=true")
 				} else {
-					dialect = postgres.Open("host=127.0.0.1 port=25436 user=postgres password=synthetic-test-only dbname=credential_test sslmode=disable")
+					// Match the production pgx protocol in model/main.go.
+					dialect = postgres.New(postgres.Config{
+						DSN:                  "host=127.0.0.1 port=25436 user=postgres password=synthetic-test-only dbname=credential_test sslmode=disable",
+						PreferSimpleProtocol: true,
+					})
 				}
 			}
 			// Only a uniquely named synthetic Token table is created/dropped.
