@@ -3,6 +3,7 @@ services:
   app:
     image: ghcr.io/ztt928999373-ops/suanjie-api@sha256:725d45a3fe8deb3155950a0935bc9873bf0439ef99a425be2dd5f13cbaa21ddf
     platform: linux/amd64
+    user: '0:0' # 与 D2 已验身份及卷内访问探针一致；保留 cap-drop ALL
     pull_policy: never
     restart: 'no'
     working_dir: /data

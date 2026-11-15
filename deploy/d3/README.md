@@ -27,19 +27,20 @@
 
 ## 人工批准前必须明确的执行范围
 
-以下命令**均为批准后操作方案，当前未执行**。拟用所有者批准的专用临时 Linux Docker 主机，不默认使用生产主机或已有 D1/D2 卷。预计最多两个应用容器（原卷与恢复卷各一个，运行时只允许一个）、两个全新卷、两个私有数据目录和单独的环境秘密目录；每个运行容器上限 1 GiB 内存、2 CPU、256 PID、128 MiB tmpfs，日志上限 10 MiB × 3。
+以下命令**均为批准后操作方案，当前未执行**。拟用所有者批准的专用临时 Linux Docker 主机，不默认使用生产主机或已有 D1/D2 卷。最多两个应用容器、两个全新卷及一个短时卷内探针（应用均停止时才运行，最多一个运行容器）；私有目录还容纳 seed、复制回读、备份和恢复快照，环境秘密另存。应用上限 1 GiB 内存、2 CPU、256 PID、128 MiB tmpfs，日志上限 10 MiB × 3；探针上限 128 MiB、0.25 CPU、32 PID，无秘密或日志持久化。
 
 至少保留 5 GiB 磁盘余量，并额外容纳镜像、原卷、完整备份和恢复卷；按实际 `/data` 大小确认，不能将 5 GiB 当成总容量估算。Docker 管理员等同宿主高权限，可 inspect 环境秘密；停机备份有可用性中断，备份可能包含敏感材料。审批须明确主机、Docker context、本地 socket、私有备份位置、容量、保留期和操作者。禁止远程/生产 Docker context、全机 prune、自动删卷、改权限为 777、买服务器或开放公网。
 
 ## 1. 建立私有合成状态并固定身份
 
-以下示例要求在批准后的专用主机上以受控 root shell 执行，`set -euo pipefail`、`umask 077`，禁止 `set -x`。先 `cd` 到核实后的仓库根目录，核对主线/CI；保留实际批准的完整 SHA。不得把秘密写到仓库、命令输出或 PR。
+以下示例要求在批准后的专用主机上以受控 root shell 执行，`set -Eeuo pipefail`、`umask 077`，禁止 `set -x`。先 `cd` 到核实后的仓库根目录，核对主线/CI；保留实际批准的完整 SHA。不得把秘密写到仓库、命令输出或 PR。
 
 ```bash
-set -euo pipefail
+set -Eeuo pipefail
 umask 077
 test "$(id -u)" = 0
 unset DOCKER_CONTEXT DOCKER_HOST DOCKER_TLS DOCKER_TLS_VERIFY DOCKER_CERT_PATH
+unset PYTHONOPTIMIZE # 本手册的 Python assert 是拒绝关卡，不能优化掉
 export DOCKER_HOST=unix:///var/run/docker.sock
 COMPOSE="$PWD/deploy/d3/compose.yml"
 ROOT=$(mktemp -d /var/tmp/suanjie-d3.XXXXXXXX)
@@ -62,6 +63,63 @@ PY
 ENVFILE="$KEYROOT/app.env"
 set -a; source "$ENVFILE"; set +a
 IMAGE=ghcr.io/ztt928999373-ops/suanjie-api@sha256:725d45a3fe8deb3155950a0935bc9873bf0439ef99a425be2dd5f13cbaa21ddf
+# 只捕获需要的字段在内存中比较，不打印环境秘密或完整 inspect。
+check_target() {
+  D3_EXPECTED_STATE="$1" D3_CID="$CID" D3_ENVFILE="$ENVFILE" python3 - <<'PY'
+import json,os,pathlib,re,subprocess
+saved=dict(line.split('=',1) for line in pathlib.Path(os.environ['D3_ENVFILE']).read_text().splitlines())
+for key in ('D3_SESSION_SECRET','D3_CRYPTO_SECRET'):
+ assert re.fullmatch('[0-9a-f]{64}',saved[key]) and os.environ[key]==saved[key]
+assert saved['D3_SESSION_SECRET']!=saved['D3_CRYPTO_SECRET']
+project=os.environ['D3_PROJECT']; volume=os.environ['D3_DATA_VOLUME']
+assert (project,volume) in [(saved['D3_PROJECT'],saved['D3_DATA_VOLUME']),
+ (saved['D3_PROJECT']+'-restore',saved['D3_DATA_VOLUME']+'-restore')]
+fmt='''{"state":{{json .State.Status}},"image":{{json .Image}},"user":{{json .Config.User}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"environment":{{json .Config.Env}},"mount":{{range .Mounts}}{{if eq .Destination "/data"}}{"name":{{json .Name}},"type":{{json .Type}},"rw":{{json .RW}}}{{end}}{{end}},"userns":{{json .HostConfig.UsernsMode}},"network":{{json .HostConfig.NetworkMode}},"readonly":{{json .HostConfig.ReadonlyRootfs}},"ports":{{json .HostConfig.PortBindings}}}'''
+def docker(*args):
+ return subprocess.run(['docker',*args],check=True,capture_output=True,text=True).stdout
+c=json.loads(docker('inspect','--format',fmt,os.environ['D3_CID']))
+assert c['state']==os.environ['D3_EXPECTED_STATE'] and c['user']=='0:0'
+assert c['project']==project and c['service']=='app'
+assert c['image']=='sha256:a0cc42d43e45ee9ccf69bc12fad8e7c150df78867817dfc727e155e7b186f66a'
+assert c['mount']==dict(name=volume,type='volume',rw=True)
+assert c['userns']=='' and c['network']=='none' and c['readonly'] is True and not c['ports']
+actual=dict(x.split('=',1) for x in c['environment'])
+assert actual['SESSION_SECRET']==saved['D3_SESSION_SECRET'] and actual['CRYPTO_SECRET']==saved['D3_CRYPTO_SECRET']
+assert actual['SQL_DSN']=='local' and actual['SQLITE_PATH']=='/data/test.sqlite'
+assert actual['LOG_SQL_DSN']==actual['REDIS_CONN_STRING']==''
+labels=json.loads(docker('volume','inspect','--format','{{json .Labels}}',volume))
+assert labels['io.suanjie.d3.owner']==project
+other=saved['D3_PROJECT']+'-restore' if project==saved['D3_PROJECT'] else saved['D3_PROJECT']
+assert not docker('ps','-q','--filter','label=com.docker.compose.project='+other).strip()
+PY
+}
+check_volume() {
+  check_target "$1"
+  # 与应用相同镜像、0:0、默认 userns、cap-drop 和挂载模式；仅在应用未运行时执行。
+  docker run --rm --name "${D3_PROJECT}-volume-check" \
+    --label "io.suanjie.d3.owner=$D3_PROJECT" --label io.suanjie.d3.role=volume-probe \
+    --pull=never --network none --read-only --user 0:0 \
+    --cap-drop ALL --security-opt no-new-privileges:true --log-driver none \
+    --memory 128m --cpus 0.25 --pids-limit 32 \
+    --mount "type=volume,src=$D3_DATA_VOLUME,dst=/data,volume-nocopy" \
+    --entrypoint /bin/sh "$IMAGE" -eu -c '
+      export LC_ALL=C
+      umask 077
+      test "$(id -u):$(id -g)" = 0:0
+      test -d /data && test ! -L /data && test -x /data
+      test -f /data/test.sqlite && test ! -L /data/test.sqlite
+      test "$(stat -c "%u:%g:%a:%F" /data/test.sqlite)" = "0:0:600:regular file"
+      test -r /data/test.sqlite && test -w /data/test.sqlite
+      exec 3<>/data/test.sqlite
+      exec 3>&-
+      probe=$(mktemp /data/.d3-access.XXXXXXXX)
+      trap '\''rm -f -- "$probe"'\'' EXIT
+      test -f "$probe"
+      rm -- "$probe"
+      trap - EXIT
+      echo D3_VOLUME_ACCESS_PASS
+    '
+}
 EXISTING=$(docker ps -aq --filter "label=com.docker.compose.project=$D3_PROJECT")
 test -z "$EXISTING"
 VOLUMES=$(docker volume ls --format '{{.Name}}')
@@ -79,6 +137,7 @@ CID=$(docker compose --env-file "$ENVFILE" -f "$COMPOSE" ps -aq app)
 test -n "$CID"
 test "$(docker inspect --format '{{.State.Status}}' "$CID")" = created
 docker cp "$ROOT/seed/." "$CID:/data"
+check_volume created
 mkdir -m 700 "$ROOT/seed-check"
 docker cp -a "$CID:/data/." "$ROOT/seed-check"
 python3 - <<'PY'
@@ -94,14 +153,36 @@ with sqlite3.connect(p.as_uri()+'?mode=ro',uri=True) as c:
 PY
 ```
 
-`seed` 使用 root 生成的 0600 数据库，遵守 D2 #38 的属主修复。上述复制回读使用 `docker cp -a` 保留卷内 UID/GID，核对字节、权限、选项与 proof；不执行 D2 验收工作流。任何证据未知即停止，不猜测 chown。Compose 本身不初始化数据库，不能跳过 seed 直接 up，也不能挂载既有卷。外部卷要求只防止隐式创建，不代替操作者核对新卷、空卷和归属。
+`seed` 使用 root 生成的 0600 数据库，遵守 D2 #38 的属主修复。`check_volume` 在实际命名卷内检查 UID/GID、0600、普通文件/非符号链接、目录遍历、数据库 O_RDWR 打开及随机零字节文件创建/删除；不会向数据库写入内容。此辅助进程证明访问能力，不冒充应用 SQLite 事务成功，后者仍须后续健康和数据库检查。复制回读使用 `docker cp -a` 保留卷内 UID/GID，核对字节、选项与 proof。不执行 D2 验收工作流。任何证据未知即停止，不猜测 chown。Compose 本身不初始化数据库，不能跳过 seed 直接 up，也不能挂载既有卷。
+
+`check_target` 在首次 seed、恢复、启动、停机备份及回滚关卡核对实际容器身份、project、卷名/归属/RW、网络和环境配对。Shell 导出的变量优先于 `--env-file`；恢复时只允许项目名和卷名追加 `-restore`，秘密必须仍与原 0600 env 文件一致，并与容器实际注入值比较。不要重新 source 原 env 文件覆盖恢复项目名，不要使用 Compose `-p`、额外 override 或修改 userns。默认 userns 与同一 daemon 保持一致，若非空则拒绝。外部卷配置不代替这些核对。
+
+探针名称固定为当前唯一项目的 `-volume-check`，带本轮归属标签；同名存在时 Docker 拒绝创建，不删除已有容器。正常结束由 `--rm` 清理自己的探针；硬终止后若仍存在，先核对精确名称及归属再人工停止，不能启动应用与其并发访问卷。
 
 `SESSION_SECRET` / `CRYPTO_SECRET` 在单独私有目录安全保留，原容器重建与配对恢复复用该对秘密，不输出完整 compose config、inspect 或 env。这里只做零渠道普通 SQLite；若出现供应商 ring、渠道、真实数据或需恢复的活动凭据，停止此流程，改用原有 ops 的配对备份与新 KEK 轮换流程，另行审批，不能通过复制旧 ring 后继续加密。
 
 ## 2. 健康检查与隔离边界
 
 ```bash
+check_volume created # 首次启动或恢复首次启动；同一 shell 中复用上文函数
+# 从可能启动应用的关卡起，任何错误仅尽力停下精确当前容器，不删除、不自动回滚。
+stop_on_error() {
+  rc=$?
+  trap - ERR
+  set +e
+  owner=$(docker inspect --format '{{index .Config.Labels "com.docker.compose.project"}}' "$CID" 2>/dev/null)
+  if [ "$owner" = "$D3_PROJECT" ]; then
+    docker stop --time 30 "$CID" >/dev/null 2>&1
+    state=$(docker inspect --format '{{.State.Status}}' "$CID" 2>/dev/null)
+    [ "$state" = exited ] || echo D3_STOP_UNCONFIRMED >&2
+  else
+    echo D3_STOP_OWNERSHIP_UNCONFIRMED >&2
+  fi
+  exit "$rc"
+}
+trap stop_on_error ERR
 docker compose --env-file "$ENVFILE" -f "$COMPOSE" up -d --no-build --no-recreate --pull never --wait --wait-timeout 180 app
+check_target running
 test "$(docker inspect --format '{{.State.Health.Status}}' "$CID")" = healthy
 docker exec "$CID" wget -q -T 5 -O - http://127.0.0.1:3000/api/status \
   | python3 -c 'import json,sys; assert json.load(sys.stdin)["success"] is True'
@@ -116,13 +197,15 @@ test "$(docker inspect --format '{{len .HostConfig.PortBindings}}' "$CID")" = 0
 先停止并确认退出，保持操作者对 Docker 的排他控制，直到复制完成；不能有人并发启动或替换容器。不要复制运行中的 SQLite，不仅复制主数据库，也保留完整 `/data`（含 WAL/SHM 等若存在）。
 
 ```bash
+check_target running
 docker compose --env-file "$ENVFILE" -f "$COMPOSE" stop --timeout 30 app
+check_volume exited
 test "$(docker inspect --format '{{.State.Status}}' "$CID")" = exited
 test "$(docker inspect --format '{{.State.ExitCode}}' "$CID")" = 0
 BACKUP=$(mktemp -d "$ROOT/backup.XXXXXXXX")
 export BACKUP
 mkdir -m 700 "$BACKUP/data"
-docker cp "$CID:/data/." "$BACKUP/data"
+docker cp -a "$CID:/data/." "$BACKUP/data"
 python3 - <<'PY'
 import importlib.util, os, pathlib, sqlite3, stat
 spec = importlib.util.spec_from_file_location('d2', '.github/automation/d2_container_acceptance.py')
@@ -167,6 +250,7 @@ assert m['format']==1 and m['synthetic_only'] is True
 assert m['image']=='ghcr.io/ztt928999373-ops/suanjie-api@sha256:725d45a3fe8deb3155950a0935bc9873bf0439ef99a425be2dd5f13cbaa21ddf'
 assert m['config_digest']=='sha256:a0cc42d43e45ee9ccf69bc12fad8e7c150df78867817dfc727e155e7b186f66a'
 assert m['image_revision']=='cd8937c602640fc31c0144994a73266c3d792782'
+assert m['source_project']==os.environ['D3_PROJECT'] and m['source_volume']==os.environ['D3_DATA_VOLUME']
 assert hashlib.sha256((b/'data.tar').read_bytes()).hexdigest()==m['data_sha256']
 assert hashlib.sha256((pathlib.Path(os.environ['KEYROOT'])/'app.env').read_bytes()).hexdigest()==m['environment_sha256']
 target=b/'restore-data'; target.mkdir(mode=0o700,exist_ok=False)
@@ -190,26 +274,101 @@ CID=$(docker compose --env-file "$ENVFILE" -f "$COMPOSE" ps -aq app)
 test -n "$CID"
 test "$(docker inspect --format '{{.State.Status}}' "$CID")" = created
 docker cp "$BACKUP/restore-data/." "$CID:/data"
+check_volume created
+mkdir -m 700 "$ROOT/restore-check"
+docker cp -a "$CID:/data/." "$ROOT/restore-check"
 python3 - <<'PY'
-import importlib.util,os,pathlib,sqlite3,stat
+import hashlib,importlib.util,os,pathlib,sqlite3,stat
 spec=importlib.util.spec_from_file_location('d2','.github/automation/d2_container_acceptance.py')
 d2=importlib.util.module_from_spec(spec);spec.loader.exec_module(d2)
-data=pathlib.Path(os.environ['BACKUP'])/'restore-data'
+data=pathlib.Path(os.environ['ROOT'])/'restore-check'
+source=pathlib.Path(os.environ['BACKUP'])/'restore-data'
+def files(root):
+ result={}
+ for p in root.rglob('*'):
+  assert not p.is_symlink()
+  if p.is_file():
+   assert p.stat().st_nlink==1
+   result[str(p.relative_to(root))]=hashlib.sha256(p.read_bytes()).hexdigest()
+  else: assert p.is_dir()
+ return result
+assert files(data)==files(source)
 d2.database(data,(pathlib.Path(os.environ['ROOT'])/'seed/d2-proof').read_text())
-assert stat.S_IMODE((data/'test.sqlite').stat().st_mode)==0o600
+s=(data/'test.sqlite').lstat()
+assert stat.S_ISREG(s.st_mode) and s.st_uid==s.st_gid==0 and stat.S_IMODE(s.st_mode)==0o600
 with sqlite3.connect((data/'test.sqlite').as_uri()+'?mode=ro',uri=True) as c:
  assert c.execute('SELECT count(*) FROM users').fetchone()==(0,)
 PY
 ```
 
-在启动恢复容器前，对 `restore-data` 再运行第 3 节的 `d2.database` 校验（路径改为 `restore-data`），核对 proof、integrity_check、关闭选项、零渠道及文件权限。然后执行第 2 节健康/隔离检查；再次停机复制恢复卷到另一个从未存在的目录，再运行相同数据库检查。恢复前后须记录同一 proof、两轮数据库完整性、健康和配置边界。此处完整流程**未动态验证**，不以 D2 的同卷重启成功代替“从备份恢复到全新卷”成功。
+启动恢复容器前，上述检查针对真实恢复卷执行访问探针，并复制回全新 `restore-check` 校验完整文件清单/摘要、proof、integrity_check、关闭选项、零渠道与权限；不是只检查宿主 restore-data。然后执行第 2 节首次启动/健康检查。恢复后再执行以下停机、重启持久化和数据库验证，原项目始终保持停止：
+
+```bash
+check_target running
+docker compose --env-file "$ENVFILE" -f "$COMPOSE" stop --timeout 30 app
+check_volume exited
+test "$(docker inspect --format '{{.State.ExitCode}}' "$CID")" = 0
+docker compose --env-file "$ENVFILE" -f "$COMPOSE" up -d --no-build --no-recreate --pull never --wait --wait-timeout 180 app
+check_target running
+test "$(docker exec "$CID" cat /data/d2-proof)" = "$(cat "$ROOT/seed/d2-proof")"
+docker exec "$CID" wget -q -T 5 -O - http://127.0.0.1:3000/api/status \
+  | python3 -c 'import json,sys; assert json.load(sys.stdin)["success"] is True'
+docker compose --env-file "$ENVFILE" -f "$COMPOSE" stop --timeout 30 app
+check_volume exited
+test "$(docker inspect --format '{{.State.ExitCode}}' "$CID")" = 0
+FINAL_CHECK=$(mktemp -d "$ROOT/restored-final.XXXXXXXX")
+export FINAL_CHECK
+docker cp -a "$CID:/data/." "$FINAL_CHECK"
+python3 - <<'PY'
+import importlib.util,os,pathlib,sqlite3
+spec=importlib.util.spec_from_file_location('d2','.github/automation/d2_container_acceptance.py')
+d2=importlib.util.module_from_spec(spec);spec.loader.exec_module(d2)
+data=pathlib.Path(os.environ['FINAL_CHECK'])
+d2.database(data,(pathlib.Path(os.environ['ROOT'])/'seed/d2-proof').read_text())
+with sqlite3.connect((data/'test.sqlite').as_uri()+'?mode=ro',uri=True) as c:
+ assert c.execute('SELECT count(*) FROM users').fetchone()==(0,)
+print('D3_RESTORED_DATABASE_PASS')
+PY
+```
+
+必须记录复制前后文件摘要、卷内访问关卡、恢复启动健康、重启 proof、最终完整性与回滚结果。任一步失败使当前 `set -e` shell 终止，ERR trap 尽力停止归属匹配的精确当前容器，不自动启动原项目。硬终止、daemon 不可用或归属不明可能使停止无法确认；出现 `D3_STOP_UNCONFIRMED` / `D3_STOP_OWNERSHIP_UNCONFIRMED` 时由操作者核实，不能据此认定已停机或开始回滚。保留原卷、失败卷、备份和配对 env；不得继续后续步骤。此处完整流程**未动态验证**，不以 D2 同卷重启成功替代全新卷恢复成功。
 
 ## 5. 配对回滚与失败处理
 
 - 当前只有一个已验证 Digest，回滚准备是“该 Digest + 对应停机完整数据 + 原环境秘密 + manifest”的配对；不是声称已验证两个应用版本间的 schema 降级。
-- 恢复失败：停止恢复项目，确认所有进程退出，保留失败卷/目录与安全错误信息；不覆盖原卷、不自动删除任何资源。恢复项目停止后才允许切回原项目。重新设置 `D3_PROJECT="$ORIGINAL_PROJECT"`、`D3_DATA_VOLUME="$ORIGINAL_VOLUME"`、`CID="$ORIGINAL_CID"`，核对原卷未被改写和固定镜像身份，按第 2 节启动原实例。
+- 恢复失败：停止恢复项目，确认所有进程退出，保留失败卷/目录与安全错误信息；不覆盖原卷、不自动删除任何资源。恢复项目停止后才允许切回原项目。原项目是 exited 状态，不能套用第 2 节的 `check_volume created`；按以下配对回滚关卡执行。
 - 未来升级：先记录旧 Digest 和旧停机备份；候选镜像必须另经发布与验收、另行批准。候选迁移不能覆盖旧卷。失败时停候选，用旧 Digest 在新卷恢复旧备份和配对秘密；不能只换回旧镜像读取新 schema。
 - 默认全部保留。所有者确认备份可恢复及保留期后，才可按精确容器/卷名和 `io.suanjie.d3.owner` 标签人工清理；不用 `down -v`、全机 prune、通配删除或删除镜像。原项目和恢复项目不同时承接请求。
+
+```bash
+# 仅在恢复项目已按精确 CID 停止并确认退出后执行。变量丢失时先从私有记录恢复，不猜测名称。
+test "$(docker inspect --format '{{.State.Status}}' "$CID")" = exited
+export D3_PROJECT="$ORIGINAL_PROJECT" D3_DATA_VOLUME="$ORIGINAL_VOLUME"
+CID="$ORIGINAL_CID"
+check_volume exited
+# 原卷应仍与停机备份逐文件一致；回读到新的 rollback-check，复用上文 files() 摘要比较后才能启动。
+mkdir -m 700 "$ROOT/rollback-check"
+docker cp -a "$CID:/data/." "$ROOT/rollback-check"
+python3 - <<'PY'
+import hashlib,os,pathlib
+def hashes(root):
+ result={}
+ for p in root.rglob('*'):
+  assert not p.is_symlink() and (p.is_dir() or p.is_file())
+  if p.is_file(): result[str(p.relative_to(root))]=hashlib.sha256(p.read_bytes()).hexdigest()
+ return result
+assert hashes(pathlib.Path(os.environ['ROOT'])/'rollback-check')==hashes(pathlib.Path(os.environ['BACKUP'])/'data')
+PY
+docker compose --env-file "$ENVFILE" -f "$COMPOSE" up -d --no-build --no-recreate --pull never --wait --wait-timeout 180 app
+check_target running
+test "$(docker exec "$CID" cat /data/d2-proof)" = "$(cat "$ROOT/seed/d2-proof")"
+docker exec "$CID" wget -q -T 5 -O - http://127.0.0.1:3000/api/status \
+  | python3 -c 'import json,sys; assert json.load(sys.stdin)["success"] is True'
+# 记录配对回滚健康与 proof 结果，演练结束保持停机；不删除原卷或失败卷。
+docker compose --env-file "$ENVFILE" -f "$COMPOSE" stop --timeout 30 app
+check_target exited
+test "$(docker inspect --format '{{.State.ExitCode}}' "$CID")" = 0
+```
 
 ## 验证状态、产品进度与 C2
 
@@ -220,3 +379,21 @@ PY
 进度按门禁描述，不虚构整体百分比：D2 镜像发布与 Run #4 已有证据，PR #39 原始归档已合并；D3 为准备阶段，静态结果与动态结果分开；生产可用性、真实管理员业务、备份保管及恢复演练仍需逐项完成。当前具备提交隔离部署方案供批准的基础，**尚不具备宣称 D3 部署/恢复已通过或可公网运营的条件**。
 
 C2 不因本次配置自动放行，也不新增 C2 工作流或供应商接入。此轮保持注册、支付和真实 API 禁用；C2 的具体范围及门禁仍由所有者确认。下一步仅申请一次专用临时环境的 D3 部署/恢复/回滚演练，记录结果后决定是否推进。最终合并、真实部署与阶段结项均由项目所有者决定。
+
+## PR #40 专项静态复核
+
+复核前 HEAD 为 `4e073933fe9e1cbb48f564b72ec181f1f863b672`，主线仍为上文 PR #39 SHA。只读查询该 HEAD 的运行，未手动重跑成功检查：
+
+| 状态 | 检查与证据 |
+| --- | --- |
+| success | [CI 43712319753](https://github.com/ztt928999373-ops/new-api/actions/runs/43712319753)：后端、前端；[43712319711](https://github.com/ztt928999373-ops/new-api/actions/runs/43712319711)：三数据库安全回归 |
+| success | [43712319841](https://github.com/ztt928999373-ops/new-api/actions/runs/43712319841)：技术主管 manager；这是流程检查，不替代人工批准或动态恢复 |
+| skipped | F1、F1.1、F2 系列及 Local recovery 共 9 个分支限定工作流，现有 `jobs.if` 不匹配 D3 分支；不能记成通过 |
+| not_run | D2 专项及 automation safety：本次两个 D3 路径不匹配其 PR paths 触发条件；D2 真实容器手动工作流也未触发 |
+| failure / cancelled / in_progress | 此复核前 HEAD 的已列运行中均未观察到；不将此结论沿用为修复后 HEAD 的结果 |
+
+确认并修复：首次 seed 缺少真实卷内访问验证；恢复检查错误地只看宿主 restore-data；未核对实际容器注入密钥/挂载与 env 配对；恢复后验证和失败回滚只给了概述。现在加入同身份卷内关卡、恢复卷回读/清单比较、配对与互斥检查、恢复重启/完整性证据步骤和失败停机 ERR trap；回滚显式接受 exited 原容器，而不是误用 created 关卡。只修改本目录原有两个文件，不动产品或工作流。
+
+已执行的专项验证：Compose 解析确认原/恢复项目、卷名独立，密钥保持配对；6 个 Bash 块和 9 个内嵌 Python 块语法通过；实际 `check_target` 代码的 13 个 Mock 用例（2 个接受、11 个拒绝）通过，覆盖错身份/卷/密钥/归属/状态/userns/隔离与另一项目仍运行；ERR trap 的归属拒绝和停止路径 Mock 通过；探针实际参数与 `/bin/sh -n` 通过。Mock 没有访问 Docker daemon、创建容器或验证真实卷内文件，不能将它记为真实部署通过。
+
+修复推送会由现有 CI 自然检查新 HEAD；最新状态以交付时查询为准，旧 HEAD 成功不能覆盖新 HEAD 的 failure、cancelled、in_progress 或 not_run。人工合并仅表示接受准备配置/手册；仍须所有者单独批准专用主机、容量和秘密/备份保管方案，才能执行卷内权限、健康、冷备份、全新卷恢复与配对回滚演练。D2 无需返工，D3 保持待动态验证，整体计划只补齐这次演练关卡，不启动 C2。
