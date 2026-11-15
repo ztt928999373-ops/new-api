@@ -65,6 +65,46 @@ jobs:
           go test -json -race -count=1 ./router -run '^(TestUpstreamBudget|TestSupplierCost|TestAggregateCostPublication|TestMockCost|TestMergedMockCost)' > "$RUNNER_TEMP/v1-security/costs-routing.jsonl"
           go test -json -race -count=1 ./service -run '^(TestReadOnlyCostSnapshot|TestMockHTTP)' > "$RUNNER_TEMP/v1-security/http-snapshot.jsonl"
           go test -json -count=1 ./internal/localops > "$RUNNER_TEMP/v1-security/localops.jsonl"
+      - name: Synthetic hot lookup comparison
+        run: |
+          go test -run '^$' -bench '^BenchmarkTokenHotLookup$' -benchtime=1s -count=3 -cpu=1,2 -benchmem ./model > "$RUNNER_TEMP/v1-security/token-auth-benchmark.txt"
+          {
+            echo '### Synthetic hot Token lookup: baseline vs candidate'
+            echo 'Loopback miniredis and in-memory SQLite, SQL pool max=1. Lookup phase only; no HTTP, real upstream or production latency claim. ns/op in parallel is throughput-normalized wall time, not request latency percentiles.'
+            echo '```text'
+            cat "$RUNNER_TEMP/v1-security/token-auth-benchmark.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Summarize revocation evidence
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import collections, json, os, pathlib, re
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'v1-security'
+          rows, versions = [], set()
+          source = root / 'token-revocation.jsonl'
+          if source.exists():
+              for line in source.read_text().splitlines():
+                  try:
+                      event = json.loads(line)
+                  except ValueError:
+                      continue
+                  if event.get('Test') and event.get('Action') in ('pass', 'fail', 'skip'):
+                      rows.append((event['Test'], event['Action']))
+                  match = re.search(r'synthetic revocation database=(sqlite|mysql|postgres) version=([^\r\n]+)', event.get('Output', ''))
+                  if match:
+                      versions.add(match.group(0))
+          counts = dict(collections.Counter(status for _, status in rows))
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
+              out.write('\n### Revocation JSON event summary\n')
+              out.write('Counts include parent tests and subtests; absence of events is not success.\n\n')
+              out.write(f'Observed test events: {counts}\n\n')
+              for version in sorted(versions):
+                  out.write(version + '\n\n')
+              out.write('| Test | Result |\n| --- | --- |\n')
+              for name, status in rows:
+                  out.write(f'| {name.replace("|", "&#124;")} | {status} |\n')
+          PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
