@@ -1,0 +1,49 @@
+name: ${D3_PROJECT:?必须使用全新且唯一的 D3 项目名}
+services:
+  app:
+    image: ghcr.io/ztt928999373-ops/suanjie-api@sha256:725d45a3fe8deb3155950a0935bc9873bf0439ef99a425be2dd5f13cbaa21ddf
+    platform: linux/amd64
+    user: '0:0' # 与 D2 已验身份及卷内访问探针一致；保留 cap-drop ALL
+    pull_policy: never
+    restart: 'no'
+    working_dir: /data
+    command: ['--log-dir', '/data/logs']
+    environment:
+      SESSION_SECRET: ${D3_SESSION_SECRET:?必须提供独立安全随机密钥}
+      CRYPTO_SECRET: ${D3_CRYPTO_SECRET:?必须提供另一个独立安全随机密钥}
+      SQL_DSN: local
+      LOG_SQL_DSN: ''
+      SQLITE_PATH: /data/test.sqlite
+      REDIS_CONN_STRING: ''
+      BIND_ADDRESS: 127.0.0.1
+      PORT: '3000'
+      TRUSTED_PROXIES: none
+      SESSION_COOKIE_SECURE: 'false' # 仅容器内 loopback，无宿主端口
+      DEBUG: 'false'
+      ENABLE_PPROF: 'false'
+      BATCH_UPDATE_ENABLED: 'false'
+      DEFAULT_LANGUAGE: zh-CN
+      TZ: Asia/Shanghai
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    mem_limit: 1g
+    cpus: 2
+    pids_limit: 256
+    tmpfs: ['/tmp:rw,noexec,nosuid,size=128m']
+    volumes:
+      - data:/data
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q -T 5 -O - http://127.0.0.1:3000/api/status | grep -q ''"success":true''']
+      start_period: 30s
+      interval: 5s
+      timeout: 5s
+      retries: 6
+    logging:
+      driver: json-file
+      options: {max-size: '10m', max-file: '3'}
+volumes:
+  data:
+    external: true
+    name: ${D3_DATA_VOLUME:?必须显式创建全新 D3 数据卷}
