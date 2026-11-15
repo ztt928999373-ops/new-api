@@ -8,12 +8,12 @@
 
 ### 核查顺序
 
-| 关卡 | 最小验收证据 | 当前已知状态（2026-11-15） | 放行要求 |
+| 关卡 | 最小验收证据 | 当前已知状态（G0 更新于 2026-11-16，其余保留原审阅边界） | 放行要求 |
 | --- | --- | --- | --- |
-| G0.1 最新主线身份 | 读取当前 `product/v1` SHA，区分 PR head、合并 SHA、镜像源码 SHA | 编写时主线 e74457b34ee226bf422793b609f8a4571605fb6d | 当次一致、无未经审查的主线移动 |
-| G0.2 关键 CI | 同 SHA 的前后端测试、三数据库安全回归、依赖/发布契约（如适用）；单独记录每个 job 成功/失败/跳过 | 历史运行有通过证据；本文件不声称当前 SHA 的所有必需检查已复核 | 所有被要求的 Job 实际完成成功，证据可查 |
+| G0.1 最新主线身份 | 读取当前 `product/v1` SHA，区分 PR head、合并 SHA、镜像源码 SHA | 本次核验实时主线 7dc9da0372b7dbd3ebc6a273346523219680ff8e；镜像 Revision 单独保留 | 当次一致、无未经审查的主线移动 |
+| G0.2 关键 CI | 同 SHA 的前后端测试、三数据库安全回归、依赖/发布契约（如适用）；单独记录每个 job 成功/失败/跳过 | 上述 SHA 的 [CI](https://github.com/ztt928999373-ops/new-api/actions/runs/43731233824)、[三数据库](https://github.com/ztt928999373-ops/new-api/actions/runs/43731233856)、[D2 专项](https://github.com/ztt928999373-ops/new-api/actions/runs/43731233906) 均 success；不沿用到未来 SHA | 所有被要求的 Job 实际完成成功，证据可查 |
 | G0.3 D3 Preflight | GitHub Actions Run 43726606723 / Artifact d3-43726606723-1 | PASS：仅预检，`preflight_pass`；`limits_verified=false` | 仅允许进入动态验收准备 |
-| G0.4 D3 Full | 所有者单独批准；受控 Runner 下 13 阶段、真实容器限额、SQLite 卷权限、冷备份、全新卷恢复、持久化、回滚、清理、Job 和 Artifact | NOT_RUN：当前无确认的 `d3_pass` 证据 | 13 阶段全成功、`limits_verified=true`、`outcome=d3_pass`、Job/Artifact 成功，无 UNKNOWN |
+| G0.4 D3 Full | 所有者单独批准；受控 Runner 下 13 阶段、真实容器限额、SQLite 卷权限、冷备份、全新卷恢复、持久化、回滚、清理、Job 和 Artifact | PASS：[Run 43733570539](https://github.com/ztt928999373-ops/new-api/actions/runs/43733570539)，13 阶段 success、limits_verified=true、outcome=d3_pass；原始 ZIP/报告校验通过，[核验归档](../../deploy/d3/acceptance/run-43733570539/README.md)；结项记录待所有者审阅，不等于生产放行 | 13 阶段全成功、`limits_verified=true`、`outcome=d3_pass`、Job/Artifact 成功，无 UNKNOWN |
 | G1.1 模型 API | 明确支持的文本模型、能力/地区/价格来源、渠道禁用、Mock 成功与失败、超时、SSE、usage、故障切换 | 已有 #2/#3/#4/#9/#10 等历史成果 | 当前主线测试 + 实际页面/API 证据，未覆盖场景要明示 |
 | G1.2 密钥及授权 | Root/管理员/普通用户/匿名，凭据加密/轮换/撤销、禁用零出站、旧明文迁移边界、TLS 限制 | 已有 #5/#6/#11/#12/#21；#21 仅首批 OpenAI 范围 | 各支持渠道无明文回退、权限矩阵无回归、历史迁移风险已处置或隔离 |
 | G1.3 费用、路由与预算 | 钱包/Token/消费日志一致；供应商责任预留/冻结/核销；失败/超时/重试不会重复或无授权扣费 | #13～#18、#22、#28 提供合成测试证据 | 运行支持数据库的回归，账单来源/未知费用明确区分 |
