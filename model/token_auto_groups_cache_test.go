@@ -1,12 +1,474 @@
 package model
 
 import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/alicebob/miniredis/v2"
+	"github.com/bytedance/gopkg/util/gopool"
+	"github.com/gin-gonic/gin"
+	"github.com/glebarez/sqlite"
+	"github.com/go-redis/redis/v8"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/driver/mysql"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
+	"gorm.io/gorm/schema"
 )
+
+// Reads remain available while a selected invalidation command fails. This
+// models partial Redis failure without hiding the stale entry behind an outage.
+type tokenInvalidationFailureHook struct {
+	command string
+	err     error
+}
+
+func (h tokenInvalidationFailureHook) BeforeProcess(ctx context.Context, cmd redis.Cmder) (context.Context, error) {
+	if cmd.Name() == h.command {
+		return ctx, h.err
+	}
+	return ctx, nil
+}
+
+func (tokenInvalidationFailureHook) AfterProcess(context.Context, redis.Cmder) error {
+	return nil
+}
+
+func (tokenInvalidationFailureHook) BeforeProcessPipeline(ctx context.Context, _ []redis.Cmder) (context.Context, error) {
+	return ctx, nil
+}
+
+func (tokenInvalidationFailureHook) AfterProcessPipeline(context.Context, []redis.Cmder) error {
+	return nil
+}
+
+type tokenAuthorizationReadBarrier struct {
+	tokenInvalidationFailureHook
+	started chan struct{}
+	release chan struct{}
+	blocked atomic.Bool
+}
+
+func (h *tokenAuthorizationReadBarrier) AfterProcess(_ context.Context, cmd redis.Cmder) error {
+	if cmd.Name() == "hgetall" && h.blocked.CompareAndSwap(false, true) {
+		close(h.started)
+		<-h.release
+	}
+	return nil
+}
+
+func TestTokenRevocationWithOverlappingCachedAuthentication(t *testing.T) {
+	useUserCacheMiniRedis(t)
+	token := Token{UserId: 7, Key: "synthetic-overlapping-revocation", Name: "overlapping-revocation", Status: common.TokenStatusEnabled, ExpiredTime: -1, UnlimitedQuota: true}
+	require.NoError(t, token.Insert())
+	db := DB
+	t.Cleanup(func() { require.NoError(t, db.Unscoped().Delete(&token).Error) })
+	require.NoError(t, cacheSetTokenForTest(token))
+	hook := &tokenAuthorizationReadBarrier{
+		tokenInvalidationFailureHook: tokenInvalidationFailureHook{command: "del", err: errors.New("synthetic invalidation failure")},
+		started:                      make(chan struct{}), release: make(chan struct{}),
+	}
+	common.RDB.AddHook(hook)
+	var release sync.Once
+	done := make(chan struct{})
+	t.Cleanup(func() {
+		release.Do(func() { close(hook.release) })
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("synthetic authentication worker did not stop")
+		}
+	})
+	finished := make(chan error, 1)
+	go func() {
+		defer close(done)
+		_, err := ValidateUserToken(token.Key)
+		finished <- err
+	}()
+	select {
+	case <-hook.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("synthetic authentication did not reach the Redis read barrier")
+	}
+	token.Status = common.TokenStatusDisabled
+	require.NoError(t, token.Update())
+	release.Do(func() { close(hook.release) })
+	select {
+	case <-finished:
+		// A request which began before revocation is in flight. Its outcome is
+		// deliberately not used as evidence about new authorization decisions.
+	case <-time.After(5 * time.Second):
+		t.Fatal("overlapping synthetic authentication did not complete")
+	}
+	_, err := ValidateUserToken(token.Key)
+	require.ErrorIs(t, err, ErrTokenInvalid, "a new authentication after committed revocation must be denied")
+}
+
+// Assert the security contract instead of making stale authorization an expected
+// result. Execute this test before and after any fix; baseline runtime results
+// have not yet been established.
+func TestTokenRevocationRejectsStaleRedisAuthorization(t *testing.T) {
+	for _, mutation := range []string{"disable", "delete", "batch_delete"} {
+		for _, failure := range []string{"none", "set", "del", "timeout", "outage_recovery", "redis_disabled"} {
+			t.Run(mutation+"/"+failure, func(t *testing.T) {
+				server := useUserCacheMiniRedis(t)
+				token := Token{
+					UserId: 7, Key: fmt.Sprintf("synthetic-revoke-%s-%s", mutation, failure),
+					Name: "synthetic-revocation", Status: common.TokenStatusEnabled,
+					ExpiredTime: -1, UnlimitedQuota: true,
+				}
+				require.NoError(t, token.Insert())
+				db := DB
+				t.Cleanup(func() { require.NoError(t, db.Unscoped().Delete(&token).Error) })
+				require.NoError(t, cacheSetTokenForTest(token))
+				_, err := ValidateUserToken(token.Key)
+				require.NoError(t, err, "a valid synthetic key must authenticate before revocation")
+				switch failure {
+				case "set", "del":
+					common.RDB.AddHook(tokenInvalidationFailureHook{command: failure, err: errors.New("synthetic invalidation failure")})
+				case "timeout":
+					common.RDB.AddHook(tokenInvalidationFailureHook{command: "set", err: context.DeadlineExceeded})
+				case "outage_recovery":
+					server.SetError("ERR synthetic Redis unavailable")
+				case "redis_disabled":
+					common.RedisEnabled = false
+				}
+				switch mutation {
+				case "disable":
+					token.Status = common.TokenStatusDisabled
+					err = token.Update()
+				case "delete":
+					err = token.Delete()
+				case "batch_delete":
+					var count int
+					count, err = BatchDeleteTokens([]int{token.Id}, token.UserId)
+					if err == nil {
+						require.Equal(t, 1, count)
+					}
+				}
+				require.NoError(t, err, "only successfully committed revocations are tested here")
+				server.SetError("")
+				stored, dbErr := GetTokenByIds(token.Id, token.UserId)
+				if mutation == "disable" {
+					require.NoError(t, dbErr)
+					require.Equal(t, common.TokenStatusDisabled, stored.Status)
+				} else {
+					require.ErrorIs(t, dbErr, gorm.ErrRecordNotFound)
+				}
+				_, err = ValidateUserToken(token.Key)
+				require.ErrorIs(t, err, ErrTokenInvalid, "committed revocation must deny a new authentication even with a stale Redis entry")
+			})
+		}
+	}
+}
+
+func TestTokenRevocationDatabaseMatrix(t *testing.T) {
+	for _, kind := range []string{"sqlite", "mysql", "postgres"} {
+		t.Run(kind, func(t *testing.T) {
+			var dialect gorm.Dialector = sqlite.Open(filepath.Join(t.TempDir(), "revocation.sqlite"))
+			if kind != "sqlite" {
+				if os.Getenv("SUANJIE_TEST_DATABASES") != "local-synthetic" {
+					t.Skip("isolated synthetic databases not configured")
+				}
+				if kind == "mysql" {
+					dialect = mysql.Open("root:synthetic-test-only@tcp(127.0.0.1:23316)/credential_test?parseTime=true")
+				} else {
+					// Match the production pgx protocol in model/main.go.
+					dialect = postgres.New(postgres.Config{
+						DSN:                  "host=127.0.0.1 port=25436 user=postgres password=synthetic-test-only dbname=credential_test sslmode=disable",
+						PreferSimpleProtocol: true,
+					})
+				}
+			}
+			// Only a uniquely named synthetic Token table is created/dropped.
+			db, err := gorm.Open(dialect, &gorm.Config{NamingStrategy: schema.NamingStrategy{TablePrefix: fmt.Sprintf("p101_%x_", time.Now().UnixNano())}})
+			require.NoError(t, err)
+			connection, err := db.DB()
+			require.NoError(t, err)
+			connection.SetMaxOpenConns(1)
+			previous := DB
+			DB = db
+			t.Cleanup(func() {
+				DB = previous
+				require.NoError(t, db.Migrator().DropTable(&Token{}))
+				require.NoError(t, db.Migrator().DropTable(&User{}))
+				require.NoError(t, connection.Close())
+			})
+			require.NoError(t, db.AutoMigrate(&User{}, &Token{}))
+			var version string
+			query := "SELECT version()"
+			if kind == "sqlite" {
+				query = "SELECT sqlite_version()"
+			}
+			require.NoError(t, db.Raw(query).Scan(&version).Error)
+			t.Logf("synthetic revocation database=%s version=%s", kind, version)
+			t.Run("faults", TestTokenRevocationRejectsStaleRedisAuthorization)
+			t.Run("overlap", TestTokenRevocationWithOverlappingCachedAuthentication)
+			t.Run("quota_recovery", TestTokenRevocationQuotaRecovery)
+			t.Run("quota_concurrency_wallet", TestTokenRevocationQuotaConcurrentReservationAndWalletCredit)
+		})
+	}
+}
+
+func TestTokenRevocationDatabaseFailureNeverUsesCachedAuthority(t *testing.T) {
+	useUserCacheMiniRedis(t)
+	token := Token{UserId: 7, Key: "synthetic-db-failure-credential", Name: "db-failure", Status: common.TokenStatusEnabled, ExpiredTime: -1, UnlimitedQuota: true}
+	require.NoError(t, token.Insert())
+	db := DB
+	t.Cleanup(func() { require.NoError(t, db.Unscoped().Delete(&token).Error) })
+	require.NoError(t, cacheSetTokenForTest(token))
+	var logs bytes.Buffer
+	previousDB, previousDebug := DB, common.DebugEnabled
+	DB = DB.Session(&gorm.Session{Logger: newGormLogger(&logs)})
+	common.DebugEnabled = true
+	common.LogWriterMu.Lock()
+	previousWriter := gin.DefaultWriter
+	gin.DefaultWriter = &logs
+	common.LogWriterMu.Unlock()
+	t.Cleanup(func() {
+		DB, common.DebugEnabled = previousDB, previousDebug
+		common.LogWriterMu.Lock()
+		gin.DefaultWriter = previousWriter
+		common.LogWriterMu.Unlock()
+	})
+	const callback = "synthetic:token_authorization_failure"
+	require.NoError(t, DB.Callback().Query().Before("gorm:query").Register(callback, func(tx *gorm.DB) {
+		tx.AddError(fmt.Errorf("synthetic driver error containing %s", token.Key))
+	}))
+	t.Cleanup(func() { require.NoError(t, db.Callback().Query().Remove(callback)) })
+	for _, enabled := range []bool{true, false} {
+		common.RedisEnabled = enabled
+		_, err := ValidateUserToken(token.Key)
+		require.ErrorIs(t, err, ErrDatabase)
+		assert.NotContains(t, err.Error(), token.Key)
+	}
+	assert.NotContains(t, logs.String(), token.Key)
+}
+
+func TestTokenRevocationStaleCacheCannotWidenPermissions(t *testing.T) {
+	useUserCacheMiniRedis(t)
+	token := Token{UserId: 7, Key: "synthetic-stale-permissions", Name: "stale-permissions", Status: common.TokenStatusEnabled, ExpiredTime: -1, UnlimitedQuota: true, RemainQuota: 100, Group: "auto", CrossGroupRetry: true, AutoGroups: `["default","vip"]`, AllowUserQuotaQuery: true}
+	require.NoError(t, token.Insert())
+	db := DB
+	t.Cleanup(func() { require.NoError(t, db.Unscoped().Delete(&token).Error) })
+	require.NoError(t, cacheSetTokenForTest(token))
+	// A second writer bypasses this process's invalidation entirely. New reads
+	// must still observe committed restrictions rather than the shared hash.
+	require.NoError(t, DB.Model(&token).Updates(map[string]any{
+		"unlimited_quota": false, "remain_quota": 20, "group": "restricted",
+		"model_limits_enabled": true, "model_limits": "synthetic-model", "allow_ips": "192.0.2.1",
+		"cross_group_retry": false, "auto_groups": "", "allow_user_quota_query": false,
+	}).Error)
+	loaded, err := ValidateUserToken(token.Key)
+	require.NoError(t, err)
+	assert.False(t, loaded.UnlimitedQuota)
+	assert.Equal(t, 20, loaded.RemainQuota)
+	assert.Equal(t, "restricted", loaded.Group)
+	assert.True(t, loaded.ModelLimitsEnabled)
+	assert.Equal(t, "synthetic-model", loaded.ModelLimits)
+	require.NotNil(t, loaded.AllowIps)
+	assert.Equal(t, "192.0.2.1", *loaded.AllowIps)
+	assert.False(t, loaded.CrossGroupRetry)
+	assert.Empty(t, loaded.AutoGroups)
+	assert.False(t, loaded.AllowUserQuotaQuery)
+	// Existing atomic reservations must not be reset to a larger DB balance.
+	require.NoError(t, common.RDB.HSet(context.Background(), getTokenCacheKey(token.Key), "RemainQuota", 3).Err())
+	loaded, err = ValidateUserToken(token.Key)
+	require.NoError(t, err)
+	assert.Equal(t, 3, loaded.RemainQuota)
+}
+
+func TestTokenRevocationQuotaRecovery(t *testing.T) {
+	for _, mode := range []string{"refund", "batch_refund", "admin_increase_with_failed_invalidation", "refund_with_failed_cache_update"} {
+		t.Run(mode, func(t *testing.T) {
+			resetBatchUpdateTestState(t)
+			server := useUserCacheMiniRedis(t)
+			token := createReserveTestToken(t, 100)
+			db := DB
+			t.Cleanup(func() { require.NoError(t, db.Unscoped().Delete(&token).Error) })
+			require.NoError(t, cacheSetTokenForTest(token))
+			common.BatchUpdateEnabled = mode == "batch_refund"
+			reserved, err := TryReserveTokenQuota(token.Id, token.Key, 100, false)
+			require.NoError(t, err)
+			require.True(t, reserved)
+			if common.BatchUpdateEnabled {
+				batchUpdate()
+			}
+			require.Zero(t, getTokenFromDB(t, token.Id).RemainQuota)
+			_, err = ValidateUserToken(token.Key)
+			require.ErrorIs(t, err, ErrTokenInvalid)
+			if mode == "admin_increase_with_failed_invalidation" {
+				common.RDB.AddHook(tokenInvalidationFailureHook{command: "set", err: errors.New("synthetic invalidation failure")})
+				token.RemainQuota = 40
+				require.NoError(t, token.Update())
+			} else {
+				if mode == "refund_with_failed_cache_update" {
+					common.RDB.AddHook(tokenInvalidationFailureHook{command: "eval", err: errors.New("synthetic cache update failure")})
+				}
+				require.NoError(t, IncreaseTokenQuota(token.Id, token.Key, 40))
+				require.Eventually(t, func() bool { return gopool.WorkerCount() == 0 }, 5*time.Second, time.Millisecond)
+			}
+			if mode == "batch_refund" {
+				_, err = ValidateUserToken(token.Key)
+				require.ErrorIs(t, err, ErrTokenInvalid, "uncommitted batch credit must not override the DB allowance")
+				batchUpdate()
+			}
+			if mode == "admin_increase_with_failed_invalidation" || mode == "refund_with_failed_cache_update" {
+				_, err = ValidateUserToken(token.Key)
+				require.ErrorIs(t, err, ErrTokenInvalid, "a stale zero cache may conservatively deny until expiry")
+				ttl := server.TTL(getTokenCacheKey(token.Key))
+				require.Positive(t, ttl)
+				server.FastForward(ttl / 2)
+				_, err = ValidateUserToken(token.Key)
+				require.ErrorIs(t, err, ErrTokenInvalid)
+				require.LessOrEqual(t, server.TTL(getTokenCacheKey(token.Key)), ttl/2, "repeated denial must not extend the stale entry's lifetime")
+				server.FastForward(ttl + time.Second)
+			}
+			loaded, err := ValidateUserToken(token.Key)
+			require.NoError(t, err, "a committed allowance must recover without manual re-enabling")
+			assert.Equal(t, 40, loaded.RemainQuota)
+			stored := getTokenFromDB(t, token.Id)
+			assert.Equal(t, 40, stored.RemainQuota)
+			wantUsed := 60
+			if mode == "admin_increase_with_failed_invalidation" {
+				wantUsed = 100 // Changing the limit is not a refund of consumed usage.
+			}
+			assert.Equal(t, wantUsed, stored.UsedQuota)
+		})
+	}
+}
+
+func TestTokenRevocationQuotaConcurrentReservationAndWalletCredit(t *testing.T) {
+	resetBatchUpdateTestState(t)
+	useUserCacheMiniRedis(t)
+	user := createReserveTestUser(t, 0)
+	token := Token{UserId: user.Id, Key: "synthetic-wallet-independent-key", Name: "wallet-independent", Status: common.TokenStatusEnabled, ExpiredTime: -1, RemainQuota: 100}
+	require.NoError(t, token.Insert())
+	db := DB
+	t.Cleanup(func() {
+		require.NoError(t, db.Unscoped().Delete(&token).Error)
+		require.NoError(t, db.Unscoped().Delete(&user).Error)
+	})
+	require.NoError(t, cacheSetTokenForTest(token))
+	start := make(chan struct{})
+	results := make(chan bool, 2)
+	errResults := make(chan error, 2)
+	var workers sync.WaitGroup
+	for range 2 {
+		workers.Go(func() {
+			<-start
+			ok, err := TryReserveTokenQuota(token.Id, token.Key, 60, false)
+			results <- ok
+			errResults <- err
+		})
+	}
+	close(start)
+	workers.Wait()
+	successes := 0
+	for range 2 {
+		require.NoError(t, <-errResults)
+		if <-results {
+			successes++
+		}
+	}
+	assert.Equal(t, 1, successes)
+	assert.Equal(t, 40, getTokenFromDB(t, token.Id).RemainQuota)
+	loaded, err := ValidateUserToken(token.Key)
+	require.NoError(t, err)
+	assert.Equal(t, 40, loaded.RemainQuota)
+	// A wallet grant is synthetic and does not alter an independent API Key limit.
+	require.NoError(t, IncreaseUserQuota(user.Id, 100, true))
+	require.Eventually(t, func() bool { return gopool.WorkerCount() == 0 }, 5*time.Second, time.Millisecond)
+	assert.Equal(t, 100, getUserQuotaFromDB(t, user.Id))
+	assert.Equal(t, 40, getTokenFromDB(t, token.Id).RemainQuota)
+}
+
+// The baseline is the pre-fix GetTokenByKey implementation from product/v1
+// 37cce2b. It is benchmark-only and must never be used for authorization.
+func benchmarkLegacyTokenLookup(key string) (*Token, error) {
+	if common.RedisEnabled {
+		if token, err := cacheGetTokenByKey(key); err == nil {
+			return token, nil
+		}
+	}
+	token := &Token{}
+	if err := DB.Where(commonKeyCol+" = ?", key).First(token).Error; err != nil {
+		return nil, err
+	}
+	if common.RedisEnabled {
+		if _, err := cacheInitToken(*token); err != nil {
+			common.SysLog(common.LogText("failed to init token cache: %s", err.Error()))
+		}
+	}
+	return token, nil
+}
+
+func BenchmarkTokenHotLookup(b *testing.B) {
+	server := miniredis.RunT(b)
+	previousRedis, previousClient := common.RedisEnabled, common.RDB
+	common.RedisEnabled = true
+	common.RDB = redis.NewClient(&redis.Options{Addr: server.Addr()})
+	b.Cleanup(func() {
+		_ = common.RDB.Close()
+		common.RedisEnabled, common.RDB = previousRedis, previousClient
+	})
+	token := Token{UserId: 7, Key: "synthetic-benchmark-only", Name: "benchmark", Status: common.TokenStatusEnabled, ExpiredTime: -1, UnlimitedQuota: true, RemainQuota: 100}
+	require.NoError(b, token.Insert())
+	b.Cleanup(func() { require.NoError(b, DB.Unscoped().Delete(&token).Error) })
+	require.NoError(b, cacheSetTokenForTest(token))
+	var queries atomic.Uint64
+	const callback = "synthetic:benchmark_query_count"
+	require.NoError(b, DB.Callback().Query().Before("gorm:query").Register(callback, func(*gorm.DB) { queries.Add(1) }))
+	b.Cleanup(func() { require.NoError(b, DB.Callback().Query().Remove(callback)) })
+	b.Logf("synthetic loopback miniredis + in-memory SQLite; Go=%s GOMAXPROCS=%d; lookup only, no HTTP/relay; SQL pool max=1", runtime.Version(), runtime.GOMAXPROCS(0))
+	for _, version := range []string{"before", "after"} {
+		for _, parallel := range []bool{false, true} {
+			mode := "serial"
+			if parallel {
+				mode = "parallel"
+			}
+			b.Run(version+"/"+mode, func(b *testing.B) {
+				lookup := benchmarkLegacyTokenLookup
+				if version == "after" {
+					lookup = func(key string) (*Token, error) { return GetTokenByKey(key, false) }
+				}
+				var failures atomic.Uint64
+				queries.Store(0)
+				b.ResetTimer()
+				if parallel {
+					b.RunParallel(func(pb *testing.PB) {
+						for pb.Next() {
+							if _, err := lookup(token.Key); err != nil {
+								failures.Add(1)
+							}
+						}
+					})
+				} else {
+					for range b.N {
+						if _, err := lookup(token.Key); err != nil {
+							failures.Add(1)
+						}
+					}
+				}
+				b.StopTimer()
+				require.Zero(b, failures.Load())
+				b.ReportMetric(float64(queries.Load())/float64(b.N), "sql/op")
+				b.ReportMetric(float64(b.N)/b.Elapsed().Seconds(), "lookup/s")
+			})
+		}
+	}
+}
 
 func TestTokenAutoGroupsRoundTripThroughRedisHashCache(t *testing.T) {
 	useUserCacheMiniRedis(t)

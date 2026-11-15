@@ -9,6 +9,7 @@ import (
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/bytedance/gopkg/util/gopool"
 	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
 )
 
 type Token struct {
@@ -280,17 +281,31 @@ func GetTokenById(id int) (*Token, error) {
 }
 
 func GetTokenByKey(key string, fromDB bool) (token *Token, err error) {
+	var cached *Token
 	if !fromDB && common.RedisEnabled {
-		// Try Redis first
-		token, err := cacheGetTokenByKey(key)
-		if err == nil {
-			return token, nil
-		}
-		// Don't return error - fall through to DB
+		cached, _ = cacheGetTokenByKey(key)
 	}
+	// Authorization is linearized at this primary-database read, AFTER the
+	// cache read. Redis invalidation cannot be atomic with a database commit;
+	// stale/recovered cache entries must never grant revoked permissions.
+	// Never log this lookup's bound credential, even in SQL debug mode.
 	token = &Token{}
-	if err = DB.Where(commonKeyCol+" = ?", key).First(token).Error; err != nil {
-		return nil, err
+	lookup := DB.Session(&gorm.Session{Logger: DB.Logger.LogMode(gormlogger.Silent)})
+	if err = lookup.Where(map[string]any{"key": key}).First(token).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, gorm.ErrRecordNotFound
+		}
+		// Driver errors can contain the credential. Callers log only this fixed
+		// reason and fail closed instead of falling back to cached authority.
+		return nil, ErrDatabase
+	}
+	if cached != nil && cached.Id == token.Id && cached.UserId == token.UserId {
+		// Keep live atomic reservations visible without letting stale cache
+		// enlarge the database's current allowance. All permissions, including
+		// UnlimitedQuota, remain from the authoritative database snapshot.
+		token.RemainQuota = min(token.RemainQuota, cached.RemainQuota)
+		token.UsedQuota = cached.UsedQuota
+		return token, nil
 	}
 	if common.RedisEnabled {
 		// 冷缓存时用数据库快照初始化；已存在的哈希只刷新 TTL，

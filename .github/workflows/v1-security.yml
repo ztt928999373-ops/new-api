@@ -55,6 +55,7 @@ jobs:
           go test -json -race -count=1 ./router -run '^TestPasswordLoginFailureAudit' > "$RUNNER_TEMP/v1-security/login-audit.jsonl"
           go test -json -race -count=1 ./middleware -run '^TestDashboardDenialAudit' > "$RUNNER_TEMP/v1-security/denial-audit.jsonl"
           go test -json -race -count=1 ./model -run '^TestOverallChannelStatusIndependentOfCredentials$' > "$RUNNER_TEMP/v1-security/channel-status.jsonl"
+          go test -json -race -count=1 ./model -run '^TestTokenRevocation' > "$RUNNER_TEMP/v1-security/token-revocation.jsonl"
           go test -json -race -count=1 ./service/credentials > "$RUNNER_TEMP/v1-security/credentials.jsonl"
           go test -json -race -count=1 ./router -run '^TestChannelKeySecurity' > "$RUNNER_TEMP/v1-security/channel-key-security.jsonl"
           for database in sqlite mysql postgres; do
@@ -64,6 +65,71 @@ jobs:
           go test -json -race -count=1 ./router -run '^(TestUpstreamBudget|TestSupplierCost|TestAggregateCostPublication|TestMockCost|TestMergedMockCost)' > "$RUNNER_TEMP/v1-security/costs-routing.jsonl"
           go test -json -race -count=1 ./service -run '^(TestReadOnlyCostSnapshot|TestMockHTTP)' > "$RUNNER_TEMP/v1-security/http-snapshot.jsonl"
           go test -json -count=1 ./internal/localops > "$RUNNER_TEMP/v1-security/localops.jsonl"
+      - name: Synthetic hot lookup comparison
+        run: |
+          go test -run '^$' -bench '^BenchmarkTokenHotLookup$' -benchtime=1s -count=3 -cpu=1,2 -benchmem ./model > "$RUNNER_TEMP/v1-security/token-auth-benchmark.txt"
+          {
+            echo '### Synthetic hot Token lookup: baseline vs candidate'
+            echo 'Loopback miniredis and in-memory SQLite, SQL pool max=1. Lookup phase only; no HTTP, real upstream or production latency claim. ns/op in parallel is throughput-normalized wall time, not request latency percentiles.'
+            echo '```text'
+            cat "$RUNNER_TEMP/v1-security/token-auth-benchmark.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          python3 - <<'PY'
+          import collections, os, pathlib, re, statistics, subprocess
+          text = (pathlib.Path(os.environ['RUNNER_TEMP']) / 'v1-security/token-auth-benchmark.txt').read_text()
+          groups = collections.defaultdict(list)
+          for line in text.splitlines():
+              match = re.match(r'BenchmarkTokenHotLookup/(before|after)/(serial|parallel)(?:-(\d+))?\s+\d+\s+', line)
+              if match:
+                  metrics = {unit: float(value) for value, unit in re.findall(r'([\d.eE+-]+)\s+(ns/op|lookup/s|sql/op)\b', line)}
+                  groups[(match[1], match[2], int(match[3] or 1))].append(metrics)
+          if len(groups) != 8 or any(len(samples) != 3 for samples in groups.values()):
+              raise SystemExit('Expected eight groups with three benchmark measurements each')
+          environment = [subprocess.check_output(['go', 'version'], text=True).strip()]
+          environment += [line for line in text.splitlines() if line.startswith(('goos:', 'goarch:', 'cpu:'))]
+          print('::notice title=Synthetic benchmark environment::' + '; '.join(environment))
+          for (version, mode, cpu), samples in sorted(groups.items()):
+              expected = 0 if version == 'before' else 1
+              if any(sample.get('sql/op') != expected for sample in samples):
+                  raise SystemExit('Unexpected SQL count in hot lookup measurement')
+              ns = statistics.median(sample['ns/op'] for sample in samples)
+              rate = statistics.median(sample['lookup/s'] for sample in samples)
+              print(f'::notice title=Synthetic lookup {version} {mode} cpu={cpu}::version={version}; mode={mode}; cpu={cpu}; median_of_3 ns/op={ns:.3f}; lookup/s={rate:.3f}; sql/op={expected}; loopback miniredis + memory SQLite, pool=1; not production latency')
+          PY
+      - name: Summarize revocation evidence
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import collections, json, os, pathlib, re
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'v1-security'
+          rows, versions = [], set()
+          source = root / 'token-revocation.jsonl'
+          if source.exists():
+              for line in source.read_text().splitlines():
+                  try:
+                      event = json.loads(line)
+                  except ValueError:
+                      continue
+                  if event.get('Test') and event.get('Action') in ('pass', 'fail', 'skip'):
+                      rows.append((event['Test'], event['Action']))
+                  match = re.search(r'synthetic revocation database=(sqlite|mysql|postgres) version=([^\r\n]+)', event.get('Output', ''))
+                  if match:
+                      versions.add(match.group(0))
+          counts = dict(collections.Counter(status for _, status in rows))
+          print(f'::notice title=Revocation JSON event counts::{json.dumps(counts, sort_keys=True)}; counts include parent tests and subtests')
+          for version in sorted(versions):
+              print(f'::notice title=Synthetic database version::{version}')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
+              out.write('\n### Revocation JSON event summary\n')
+              out.write('Counts include parent tests and subtests; absence of events is not success.\n\n')
+              out.write(f'Observed test events: {counts}\n\n')
+              for version in sorted(versions):
+                  out.write(version + '\n\n')
+              out.write('| Test | Result |\n| --- | --- |\n')
+              for name, status in rows:
+                  out.write(f'| {name.replace("|", "&#124;")} | {status} |\n')
+          PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
