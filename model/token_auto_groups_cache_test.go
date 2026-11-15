@@ -198,9 +198,10 @@ func TestTokenRevocationDatabaseMatrix(t *testing.T) {
 			t.Cleanup(func() {
 				DB = previous
 				require.NoError(t, db.Migrator().DropTable(&Token{}))
+				require.NoError(t, db.Migrator().DropTable(&User{}))
 				require.NoError(t, connection.Close())
 			})
-			require.NoError(t, db.AutoMigrate(&Token{}))
+			require.NoError(t, db.AutoMigrate(&User{}, &Token{}))
 			var version string
 			query := "SELECT version()"
 			if kind == "sqlite" {
@@ -210,6 +211,8 @@ func TestTokenRevocationDatabaseMatrix(t *testing.T) {
 			t.Logf("synthetic revocation database=%s version=%s", kind, version)
 			t.Run("faults", TestTokenRevocationRejectsStaleRedisAuthorization)
 			t.Run("overlap", TestTokenRevocationWithOverlappingCachedAuthentication)
+			t.Run("quota_recovery", TestTokenRevocationQuotaRecovery)
+			t.Run("quota_concurrency_wallet", TestTokenRevocationQuotaConcurrentReservationAndWalletCredit)
 		})
 	}
 }
