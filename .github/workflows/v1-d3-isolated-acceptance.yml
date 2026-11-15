@@ -1,0 +1,131 @@
+name: D3 固定 Digest 隔离恢复验收（仅手动）
+run-name: D3 ${{ inputs.mode }} ${{ github.sha }}
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: 当前 product/v1 完整 SHA（必须与事件及实时主线一致）
+        required: true
+        type: string
+      mode:
+        description: 默认仅预检；full 必须先获所有者明确批准
+        type: choice
+        options: [preflight, full]
+        default: preflight
+      confirmation:
+        description: full 获批准后填写 D3-SYNTHETIC-ONLY；预检留空
+        type: string
+        default: ''
+permissions:
+  contents: read
+concurrency:
+  group: d3-isolated-acceptance
+  cancel-in-progress: false
+jobs:
+  acceptance:
+    if: >-
+      github.repository == 'ztt928999373-ops/new-api' &&
+      github.ref == 'refs/heads/product/v1' &&
+      github.event_name == 'workflow_dispatch' &&
+      github.actor == github.repository_owner &&
+      github.triggering_actor == github.repository_owner
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      D3_EXPECTED_SHA: ${{ inputs.expected_sha }}
+      D3_MODE: ${{ inputs.mode }}
+      D3_CONFIRMATION: ${{ inputs.confirmation }}
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: 标准库离线回归，不接触 Docker daemon
+        run: python3 -B -m unittest discover -s deploy/d3 -p test_acceptance.py -v
+      - name: 初始化保守证据，执行器未完成不能显示通过
+        run: |
+          set -euo pipefail
+          mkdir -m 700 "$RUNNER_TEMP/d3-evidence"
+          python3 -B - <<'PY'
+          import json,os,sys
+          from pathlib import Path
+          sys.path.insert(0, 'deploy/d3')
+          from acceptance import PHASES
+          report={'outcome':'unknown','phases':dict.fromkeys(PHASES,'not_run'),
+                  'error_code':'D3_EXECUTOR_NOT_COMPLETED'}
+          (Path(os.environ['RUNNER_TEMP'])/'d3-evidence/report.json').write_text(json.dumps(report,indent=2))
+          PY
+      - name: 仅按明确选择执行，root 子进程不继承 Token 或 Actions 凭据
+        run: |
+          set -euo pipefail
+          sudo -n env -i PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin LC_ALL=C \
+            GITHUB_REPOSITORY="$GITHUB_REPOSITORY" GITHUB_REF="$GITHUB_REF" \
+            GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" GITHUB_SHA="$GITHUB_SHA" \
+            GITHUB_ACTOR="$GITHUB_ACTOR" GITHUB_TRIGGERING_ACTOR="$GITHUB_TRIGGERING_ACTOR" \
+            GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+            RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" RUNNER_OS="$RUNNER_OS" RUNNER_ARCH="$RUNNER_ARCH" \
+            RUNNER_TEMP="$RUNNER_TEMP" \
+            python3 -B deploy/d3/acceptance.py --mode "$D3_MODE" \
+              --expected-sha "$D3_EXPECTED_SHA" --confirmation "$D3_CONFIRMATION"
+      - name: 兜底清理，仅使用本次私有状态与匹配归属
+        if: always()
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/d3-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          present=$(sudo -n python3 -B -c 'import pathlib,sys; print("present" if pathlib.Path(sys.argv[1]).is_file() else "absent")' "$work/state.json")
+          if [ "$present" = present ]; then
+            sudo -n env -i PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin LC_ALL=C \
+              GITHUB_REPOSITORY="$GITHUB_REPOSITORY" GITHUB_REF="$GITHUB_REF" \
+              GITHUB_EVENT_NAME="$GITHUB_EVENT_NAME" GITHUB_SHA="$GITHUB_SHA" \
+              GITHUB_ACTOR="$GITHUB_ACTOR" GITHUB_TRIGGERING_ACTOR="$GITHUB_TRIGGERING_ACTOR" \
+              GITHUB_RUN_ID="$GITHUB_RUN_ID" GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+              RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" RUNNER_OS="$RUNNER_OS" RUNNER_ARCH="$RUNNER_ARCH" \
+              RUNNER_TEMP="$RUNNER_TEMP" \
+              python3 -B deploy/d3/acceptance.py --cleanup --expected-sha "$D3_EXPECTED_SHA"
+          fi
+      - name: 仅导出脱敏报告与 SHA-256，不导出数据库、备份、环境或状态文件
+        if: always()
+        env:
+          D3_JOB_STATUS: ${{ job.status }}
+        run: |
+          set -euo pipefail
+          destination="$RUNNER_TEMP/d3-evidence"
+          mkdir -p "$destination"
+          source="$RUNNER_TEMP/d3-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/report.json"
+          present=$(sudo -n python3 -B -c 'import pathlib,sys; print("present" if pathlib.Path(sys.argv[1]).is_file() else "absent")' "$source")
+          if [ "$present" = present ]; then
+            sudo -n install -m 600 -o "$(id -u)" -g "$(id -g)" "$source" "$destination/report.json"
+          fi
+          python3 -B - <<'PY'
+          import hashlib,json,os
+          from pathlib import Path
+          root=Path(os.environ['RUNNER_TEMP'])/'d3-evidence'
+          report_path=root/'report.json'
+          if not report_path.exists():
+              phases='source environment image resource_limits seed startup backup restore restored_startup persistence rollback diagnostics cleanup'.split()
+              report_path.write_text(json.dumps({'outcome':'unknown','phases':dict.fromkeys(phases,'not_run'),
+                                                'error_code':'D3_EVIDENCE_MISSING'}))
+          report=json.loads(report_path.read_text())
+          status=os.environ['D3_JOB_STATUS']
+          report['workflow_status_before_upload']=status
+          if status!='success':
+              report['outcome']='cancelled' if status=='cancelled' else 'failure'
+          report_path.write_text(json.dumps(report,ensure_ascii=False,indent=2))
+          assert report_path.stat().st_size<=2*1024*1024
+          (root/'SHA256SUMS').write_text(hashlib.sha256(report_path.read_bytes()).hexdigest()+'  report.json\n')
+          with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as summary:
+              summary.write('## D3 '+report['outcome']+'\n\n')
+              for phase,state in report.get('phases',{}).items(): summary.write('- '+phase+': '+state+'\n')
+              summary.write('\n仅预检成功不代表真实 D3 通过；Artifact 上传也必须成功。\n')
+          PY
+      - name: 保存脱敏证据，缺失文件或上传失败阻断验收
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: d3-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/d3-evidence/report.json
+            ${{ runner.temp }}/d3-evidence/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
