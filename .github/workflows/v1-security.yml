@@ -75,6 +75,25 @@ jobs:
             cat "$RUNNER_TEMP/v1-security/token-auth-benchmark.txt"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+          python3 - <<'PY'
+          import collections, os, pathlib, re, statistics
+          text = (pathlib.Path(os.environ['RUNNER_TEMP']) / 'v1-security/token-auth-benchmark.txt').read_text()
+          groups = collections.defaultdict(list)
+          for line in text.splitlines():
+              match = re.match(r'BenchmarkTokenHotLookup/(before|after)/(serial|parallel)(?:-(\d+))?\s+\d+\s+', line)
+              if match:
+                  metrics = {unit: float(value) for value, unit in re.findall(r'([\d.eE+-]+)\s+(ns/op|lookup/s|sql/op)\b', line)}
+                  groups[(match[1], match[2], int(match[3] or 1))].append(metrics)
+          if len(groups) != 8 or any(len(samples) != 3 for samples in groups.values()):
+              raise SystemExit('Expected eight groups with three benchmark measurements each')
+          for (version, mode, cpu), samples in sorted(groups.items()):
+              expected = 0 if version == 'before' else 1
+              if any(sample.get('sql/op') != expected for sample in samples):
+                  raise SystemExit('Unexpected SQL count in hot lookup measurement')
+              ns = statistics.median(sample['ns/op'] for sample in samples)
+              rate = statistics.median(sample['lookup/s'] for sample in samples)
+              print(f'::notice title=Synthetic lookup {version} {mode} cpu={cpu}::median_of_3 ns/op={ns:.3f}; lookup/s={rate:.3f}; sql/op={expected}; loopback miniredis + memory SQLite, pool=1; not production latency')
+          PY
       - name: Summarize revocation evidence
         if: always()
         run: |
@@ -95,6 +114,9 @@ jobs:
                   if match:
                       versions.add(match.group(0))
           counts = dict(collections.Counter(status for _, status in rows))
+          print(f'::notice title=Revocation JSON event counts::{json.dumps(counts, sort_keys=True)}; counts include parent tests and subtests')
+          for version in sorted(versions):
+              print(f'::notice title=Synthetic database version::{version}')
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
               out.write('\n### Revocation JSON event summary\n')
               out.write('Counts include parent tests and subtests; absence of events is not success.\n\n')
