@@ -81,6 +81,8 @@ NODE_USE_ENV_PROXY=1 node -e "require('./.github/automation/ghcr-release.cjs').v
 
 ## 已发布镜像的手动隔离容器验收（不发布）
 
+用户提供的 D2 Run #4 原始 JSON、SHA-256、13 项结果核对及诊断限制见[文档归档](acceptance/run-4/README.md)。该归档不代表本次重跑验收或独立认证 Actions 运行来源，`incomplete` / `UNKNOWN` 诊断状态保持原样。
+
 `v1-d2-image-acceptance.yml` 是独立的 `workflow_dispatch` 工作流；无 push/PR/定时触发，无输入可替换镜像，仅 GitHub 托管 Ubuntu 24.04，权限仅 `contents:read`。仓库、事件和 `refs/heads/product/v1` 同时满足才启动 Job；检出事件完整 SHA，并用只读 Git ref 查询确认仍是当前主线。不会运行 PR checkout。不要把离线测试或其他 ref 的 skipped Job 记为容器通过。
 
 人工合并本工作流后，在 Actions 选择“D2 已发布 Digest 隔离容器验收（仅手动）”，分支选 `product/v1`，核实主线 SHA 后手动运行一次。本次开发不触发它，也不重跑 GHCR publish。实际容器流程由 `.github/automation/d2_container_acceptance.py` 执行，先运行同目录离线安全回归；静态/Mock 通过不代替后续真实流程。

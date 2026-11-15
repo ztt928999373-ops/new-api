@@ -1,0 +1,319 @@
+{
+  "image": "ghcr.io/ztt928999373-ops/suanjie-api@sha256:725d45a3fe8deb3155950a0935bc9873bf0439ef99a425be2dd5f13cbaa21ddf",
+  "image_revision": "cd8937c602640fc31c0144994a73266c3d792782",
+  "verifier_sha": "28c752c7b5a141745ac9434d91ccd0cce31442ab",
+  "phases": {
+    "capacity": "success",
+    "pull": "success",
+    "identity": "success",
+    "seed": "success",
+    "licenses": "success",
+    "startup": "success",
+    "health": "success",
+    "network": "success",
+    "policy": "success",
+    "stopped_database": "success",
+    "restart_persistence": "success",
+    "final_database": "success",
+    "cleanup": "success"
+  },
+  "free_before": 94939852800,
+  "free_after_pull": 94692970496,
+  "image_size": 231903548,
+  "local_config_digest": "sha256:a0cc42d43e45ee9ccf69bc12fad8e7c150df78867817dfc727e155e7b186f66a",
+  "platform": "linux/amd64",
+  "seed_file": {
+    "source": "host_lstat_before_copy",
+    "size": 12288,
+    "mode": "0o600",
+    "uid": 0,
+    "gid": 0,
+    "regular_file": true
+  },
+  "seed_preflight": {
+    "status": "PASS",
+    "scope": "copied_seed_permissions_before_application_start",
+    "evidence": {
+      "status": "UNKNOWN",
+      "primary_process_identity": {
+        "status": "UNKNOWN"
+      },
+      "source": "docker_inspect_configuration_and_auxiliary_process_measurement",
+      "container_config": {
+        "User": "",
+        "WorkingDir": "/data",
+        "UsernsMode": "",
+        "CapDrop": [
+          "ALL"
+        ],
+        "CapAdd": null,
+        "Privileged": false,
+        "GroupAdd": null,
+        "SecurityOpt": [
+          "no-new-privileges:true"
+        ],
+        "ReadonlyRootfs": true,
+        "NetworkMode": "none"
+      },
+      "image_config_user": "",
+      "mount": {
+        "Type": "volume",
+        "Name": "d2-accept-38c57a699e9304312193e5b7-data",
+        "Destination": "/data",
+        "RW": true
+      },
+      "capabilities": {
+        "/bin/sh": "EXECUTABLE_METADATA_PRESENT",
+        "/usr/bin/id": "EXECUTABLE_METADATA_PRESENT",
+        "/usr/bin/stat": "EXECUTABLE_METADATA_PRESENT",
+        "/usr/bin/mktemp": "EXECUTABLE_METADATA_PRESENT",
+        "/usr/bin/rm": "EXECUTABLE_METADATA_PRESENT"
+      },
+      "measurement": {
+        "status": "UNKNOWN",
+        "source": "same_image_auxiliary_process",
+        "primary_process_identity": "UNKNOWN",
+        "sqlite_open_errno": "UNKNOWN",
+        "database_write_open": "UNKNOWN",
+        "checks": {
+          "mount_rw": "PASS",
+          "TRAVERSE": "PASS",
+          "READ_ACCESS": "PASS",
+          "WRITE_ACCESS": "PASS",
+          "CREATE": "PASS",
+          "REMOVE": "PASS",
+          "file_exists": "PASS",
+          "regular_database": "PASS",
+          "directory": "PASS"
+        },
+        "metadata": {
+          "DATA": {
+            "uid": 0,
+            "gid": 0,
+            "mode": "755",
+            "type": "directory",
+            "size": 4096
+          },
+          "DB": {
+            "uid": 0,
+            "gid": 0,
+            "mode": "600",
+            "type": "regular file",
+            "size": 12288
+          }
+        },
+        "uid_MAP": [
+          [
+            0,
+            0,
+            4294967295
+          ]
+        ],
+        "gid_MAP": [
+          [
+            0,
+            0,
+            4294967295
+          ]
+        ],
+        "UID": 0,
+        "GID": 0,
+        "create_error_class": "NONE",
+        "owner_matches_probe_uid": {
+          "DATA": true,
+          "DB": true
+        },
+        "access_status": "PASS"
+      },
+      "probe_identity_matches_observed_primary": "UNKNOWN",
+      "database_size_matches_seed": true
+    }
+  },
+  "diagnostics": {
+    "status": "incomplete",
+    "errors": [],
+    "runtime_seconds": 6.17624,
+    "capture_phase": "final_database",
+    "limits": {
+      "log_bytes_combined": 65536,
+      "log_tail_lines": 200,
+      "timeout_seconds_per_command": 15,
+      "state_string_characters": 8192,
+      "state_depth": 8
+    },
+    "State": {
+      "Status": "exited",
+      "Running": false,
+      "Paused": false,
+      "Restarting": false,
+      "OOMKilled": false,
+      "Dead": false,
+      "Pid": 0,
+      "ExitCode": 0,
+      "Error": "",
+      "StartedAt": "2026-11-14T09:38:33.188595439Z",
+      "FinishedAt": "2026-11-14T09:38:39.36483569Z",
+      "Health": {
+        "Status": "unhealthy",
+        "FailingStreak": 0,
+        "Log": [
+          {
+            "Start": "2026-11-14T09:38:31.937499863Z",
+            "End": "2026-11-14T09:38:31.963906676Z",
+            "ExitCode": 0,
+            "Output": ""
+          },
+          {
+            "Start": "2026-11-14T09:38:38.234623085Z",
+            "End": "2026-11-14T09:38:38.260629039Z",
+            "ExitCode": 0,
+            "Output": ""
+          }
+        ]
+      }
+    },
+    "RestartCount": 0,
+    "runtime_kind": "completed_execution",
+    "logs": {
+      "stdout": "[REDACTED SENSITIVE LINE]\n2026-11-14T09:38:26.995728604Z [SYS] 2026/11/14 - 09:38:26 | database migration started \n2026-11-14T09:38:26.996013261Z \n2026-11-14T09:38:26.996015728Z 2026/11/14 09:38:26 /go/pkg/mod/github.com/glebarez/sqlite@v1.11.0/migrator.go:342\n2026-11-14T09:38:26.996017787Z [0.108ms] [rows:1] SELECT * FROM PRAGMA_index_list(\"options\")\n2026-11-14T09:38:27.186721703Z [SYS] 2026/11/14 - 09:38:27 | system is not initialized and no root user exists \n2026-11-14T09:38:27.195504952Z [SYS] 2026/11/14 - 09:38:27 | REDIS_CONN_STRING not set, Redis is not enabled \n2026-11-14T09:38:27.196475876Z [SYS] 2026/11/14 - 09:38:27 | i18n initialized with languages: zh-CN, zh-TW, en \n2026-11-14T09:38:27.196603339Z [SYS] 2026/11/14 - 09:38:27 | Loaded 0 custom OAuth providers \n2026-11-14T09:38:27.196607317Z [SYS] 2026/11/14 - 09:38:27 | New API  started \n2026-11-14T09:38:27.197185276Z [SYS] 2026/11/14 - 09:38:27 | updating dashboard data... \n2026-11-14T09:38:27.198278688Z [SYS] 2026/11/14 - 09:38:27 | saved dashboard data, 0 records \n[REDACTED SENSITIVE LINE]\n2026-11-14T09:38:27.198286841Z [INFO] 2026/11/14 - 09:38:27 | SYSTEM | subscription quota reset task started: tick=1m0s \n2026-11-14T09:38:27.199241830Z [INFO] 2026/11/14 - 09:38:27 | SYSTEM | system task runner started: runner=30a4628bc527-gpf25TeV idle_interval=15s \n2026-11-14T09:38:27.312911348Z \n[REDACTED SENSITIVE LINE]\n2026-11-14T09:38:27.312923567Z \n2026-11-14T09:38:27.312924660Z \n2026-11-14T09:38:27.312925690Z   New API   ready in 317 ms\n2026-11-14T09:38:27.312926957Z \n2026-11-14T09:38:27.312928000Z \n2026-11-14T09:38:31.963134293Z [GIN] 2026/11/14 - 09:38:31 | api | [REDACTED OPAQUE VALUE] | 200 |     150.644µs |       127.0.0.1 |     GET /api/status\n2026-11-14T09:38:33.038078554Z [GIN] 2026/11/14 - 09:38:33 | api | [REDACTED OPAQUE VALUE] | 200 |     128.279µs |       127.0.0.1 |     GET /api/status\n2026-11-14T09:38:33.113767643Z [GIN] 2026/11/14 - 09:38:33 | api | [REDACTED OPAQUE VALUE] | 200 |      89.409µs |       127.0.0.1 |    POST /api/user/register\n2026-11-14T09:38:33.128494729Z [SYS] 2026/11/14 - 09:38:33 | received signal: terminated, shutting down... \n2026-11-14T09:38:33.128569971Z [SYS] 2026/11/14 - 09:38:33 | saved dashboard data, 0 records \n2026-11-14T09:38:33.128572799Z [SYS] 2026/11/14 - 09:38:33 | server exited \n[REDACTED SENSITIVE LINE]\n2026-11-14T09:38:33.290358745Z [SYS] 2026/11/14 - 09:38:33 | database migration started \n2026-11-14T09:38:33.290624600Z \n2026-11-14T09:38:33.290637242Z 2026/11/14 09:38:33 /go/pkg/mod/github.com/glebarez/sqlite@v1.11.0/migrator.go:342\n2026-11-14T09:38:33.290638974Z [0.093ms] [rows:1] SELECT * FROM PRAGMA_index_list(\"options\")\n2026-11-14T09:38:33.317348126Z [SYS] 2026/11/14 - 09:38:33 | system is not initialized and no root user exists \n2026-11-14T09:38:33.318978490Z [SYS] 2026/11/14 - 09:38:33 | REDIS_CONN_STRING not set, Redis is not enabled \n2026-11-14T09:38:33.320104893Z [SYS] 2026/11/14 - 09:38:33 | i18n initialized with languages: zh-CN, zh-TW, en \n2026-11-14T09:38:33.320219841Z [SYS] 2026/11/14 - 09:38:33 | Loaded 0 custom OAuth providers \n2026-11-14T09:38:33.320247509Z [SYS] 2026/11/14 - 09:38:33 | New API  started \n2026-11-14T09:38:33.320773741Z [SYS] 2026/11/14 - 09:38:33 | updating dashboard data... \n2026-11-14T09:38:33.320796463Z [SYS] 2026/11/14 - 09:38:33 | saved dashboard data, 0 records \n[REDACTED SENSITIVE LINE]\n2026-11-14T09:38:33.321325448Z [INFO] 2026/11/14 - 09:38:33 | SYSTEM | subscription quota reset task started: tick=1m0s \n2026-11-14T09:38:33.323726131Z [INFO] 2026/11/14 - 09:38:33 | SYSTEM | system task runner started: runner=30a4628bc527-20uycGsT idle_interval=15s \n2026-11-14T09:38:33.434985353Z \n[REDACTED SENSITIVE LINE]\n2026-11-14T09:38:33.434999815Z \n2026-11-14T09:38:33.435000686Z \n2026-11-14T09:38:33.435001532Z   New API   ready in 146 ms\n2026-11-14T09:38:33.435002729Z \n2026-11-14T09:38:33.435003568Z \n2026-11-14T09:38:38.259775466Z [GIN] 2026/11/14 - 09:38:38 | api | [REDACTED OPAQUE VALUE] | 200 |      128.65µs |       127.0.0.1 |     GET /api/status\n2026-11-14T09:38:39.314347213Z [GIN] 2026/11/14 - 09:38:39 | api | [REDACTED OPAQUE VALUE] | 200 |     150.483µs |       127.0.0.1 |     GET /api/status\n2026-11-14T09:38:39.361397173Z [SYS] 2026/11/14 - 09:38:39 | received signal: terminated, shutting down... \n2026-11-14T09:38:39.361489738Z [SYS] 2026/11/14 - 09:38:39 | saved dashboard data, 0 records \n2026-11-14T09:38:39.361497880Z [SYS] 2026/11/14 - 09:38:39 | server exited ",
+      "stderr": "",
+      "truncated": false,
+      "error_code": null
+    },
+    "storage": {
+      "status": "UNKNOWN",
+      "primary_process_identity": {
+        "status": "MEASURED",
+        "source": "host_proc_bound_to_container_id",
+        "uid": 0,
+        "uid_map": [
+          [
+            0,
+            0,
+            4294967295
+          ]
+        ],
+        "gid": 0,
+        "gid_map": [
+          [
+            0,
+            0,
+            4294967295
+          ]
+        ],
+        "host_pid": 2639
+      },
+      "source": "docker_inspect_configuration_and_auxiliary_process_measurement",
+      "container_config": {
+        "User": "",
+        "WorkingDir": "/data",
+        "UsernsMode": "",
+        "CapDrop": [
+          "ALL"
+        ],
+        "CapAdd": null,
+        "Privileged": false,
+        "GroupAdd": null,
+        "SecurityOpt": [
+          "no-new-privileges:true"
+        ],
+        "ReadonlyRootfs": true,
+        "NetworkMode": "none"
+      },
+      "image_config_user": "",
+      "mount": {
+        "Type": "volume",
+        "Name": "d2-accept-38c57a699e9304312193e5b7-data",
+        "Destination": "/data",
+        "RW": true
+      },
+      "capabilities": {
+        "/bin/sh": "EXECUTABLE_METADATA_PRESENT",
+        "/usr/bin/id": "EXECUTABLE_METADATA_PRESENT",
+        "/usr/bin/stat": "EXECUTABLE_METADATA_PRESENT",
+        "/usr/bin/mktemp": "EXECUTABLE_METADATA_PRESENT",
+        "/usr/bin/rm": "EXECUTABLE_METADATA_PRESENT"
+      },
+      "measurement": {
+        "status": "UNKNOWN",
+        "source": "same_image_auxiliary_process",
+        "primary_process_identity": "UNKNOWN",
+        "sqlite_open_errno": "UNKNOWN",
+        "database_write_open": "UNKNOWN",
+        "checks": {
+          "mount_rw": "PASS",
+          "TRAVERSE": "PASS",
+          "READ_ACCESS": "PASS",
+          "WRITE_ACCESS": "PASS",
+          "CREATE": "PASS",
+          "REMOVE": "PASS",
+          "file_exists": "PASS",
+          "regular_database": "PASS",
+          "directory": "PASS"
+        },
+        "metadata": {
+          "DATA": {
+            "uid": 0,
+            "gid": 0,
+            "mode": "755",
+            "type": "directory",
+            "size": 4096
+          },
+          "DB": {
+            "uid": 0,
+            "gid": 0,
+            "mode": "600",
+            "type": "regular file",
+            "size": 929792
+          }
+        },
+        "uid_MAP": [
+          [
+            0,
+            0,
+            4294967295
+          ]
+        ],
+        "gid_MAP": [
+          [
+            0,
+            0,
+            4294967295
+          ]
+        ],
+        "UID": 0,
+        "GID": 0,
+        "create_error_class": "NONE",
+        "owner_matches_probe_uid": {
+          "DATA": true,
+          "DB": true
+        },
+        "access_status": "PASS"
+      },
+      "probe_identity_matches_observed_primary": true,
+      "database_size_matches_seed": false
+    }
+  },
+  "primary_process_identity": {
+    "status": "MEASURED",
+    "source": "host_proc_bound_to_container_id",
+    "uid": 0,
+    "uid_map": [
+      [
+        0,
+        0,
+        4294967295
+      ]
+    ],
+    "gid": 0,
+    "gid_map": [
+      [
+        0,
+        0,
+        4294967295
+      ]
+    ],
+    "host_pid": 2639
+  },
+  "free_after_tests": 94689828864
+}
