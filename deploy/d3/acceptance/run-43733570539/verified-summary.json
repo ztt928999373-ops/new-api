@@ -1,0 +1,68 @@
+{
+  "mode": "full",
+  "source_sha": "7dc9da0372b7dbd3ebc6a273346523219680ff8e",
+  "image": "ghcr.io/ztt928999373-ops/suanjie-api@sha256:725d45a3fe8deb3155950a0935bc9873bf0439ef99a425be2dd5f13cbaa21ddf",
+  "image_revision": "cd8937c602640fc31c0144994a73266c3d792782",
+  "config_digest": "sha256:a0cc42d43e45ee9ccf69bc12fad8e7c150df78867817dfc727e155e7b186f66a",
+  "phases": {
+    "source": "success",
+    "environment": "success",
+    "image": "success",
+    "resource_limits": "success",
+    "seed": "success",
+    "startup": "success",
+    "backup": "success",
+    "restore": "success",
+    "restored_startup": "success",
+    "persistence": "success",
+    "rollback": "success",
+    "diagnostics": "success",
+    "cleanup": "success"
+  },
+  "outcome": "d3_pass",
+  "limits_verified": true,
+  "environment": {
+    "ServerVersion": "28.0.4",
+    "OSType": "linux",
+    "Architecture": "x86_64",
+    "CgroupVersion": "2",
+    "CgroupDriver": "systemd",
+    "MemoryLimit": true,
+    "CpuCfsQuota": true,
+    "PidsLimit": true,
+    "Driver": "overlay2",
+    "docker_free_bytes": 91487346688,
+    "work_free_bytes": 91487346688
+  },
+  "backup": {
+    "preparation_sha": "7dc9da0372b7dbd3ebc6a273346523219680ff8e",
+    "compose_sha256": "81dc25ccf117b4febfd7620ff03b11f4a44c673380a532c6dcfa9398cbbb67bc",
+    "data_sha256": "687961835c877d842674709a783619e95557c8ca2b5a4e81d32196ac2b9a0f15"
+  },
+  "workflow_status_before_upload": "success",
+  "provenance": {
+    "run_id": 43733570539,
+    "run_url": "https://github.com/ztt928999373-ops/new-api/actions/runs/43733570539",
+    "job_id": 132871138964,
+    "artifact_name": "d3-43733570539-1",
+    "artifact_id": 14169700096,
+    "retrieval": "owner-uploaded-original-zip; matched against GitHub-published artifact digest",
+    "zip_bytes": 3042,
+    "zip_sha256": "329c501ee9c3c2d58e551c2382eac6455189e2a6b92256e76b8ccb73f4550900",
+    "original_report_bytes": 11242,
+    "original_report_sha256": "36f09c16d1fcc29bbe701d423fa68876a72c7a942376da0f9d2d9ca50e3bee70",
+    "original_sha256sums_verified": true,
+    "zip_digest_matches_github": true,
+    "zip_crc_verified": true,
+    "github_job": "success",
+    "github_steps_success": 10,
+    "verified_on": "2026-11-16 Asia/Shanghai"
+  },
+  "diagnostics_summary": {
+    "application_log_sets": 2,
+    "all_untruncated": true,
+    "all_error_codes_null": true,
+    "raw_logs_published": false
+  },
+  "scope": "synthetic isolated D3 acceptance only; no production deployment or real-provider acceptance"
+}
