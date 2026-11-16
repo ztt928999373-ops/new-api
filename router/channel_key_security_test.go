@@ -303,6 +303,15 @@ func TestChannelKeySecurityConfigReadDatabaseMatrix(t *testing.T) {
 		t.Run(kind, func(t *testing.T) {
 			db := setupUpstreamBudgetDB(t, kind)
 			require.NoError(t, db.AutoMigrate(&model.User{}, &model.UserSession{}, &model.UserAccessToken{}, &model.AuditLog{}, &model.Option{}, &model.Ability{}, &model.CasbinRule{}, &model.AuthzRole{}))
+			if kind == "postgres" {
+				t.Setenv("SQL_DSN", "postgres://postgres:synthetic-test-only@127.0.0.1:25436/credential_test?sslmode=disable")
+				require.NoError(t, model.OpenPreparedDB())
+				conn, err := model.DB.DB()
+				require.NoError(t, err)
+				require.NoError(t, conn.Close())
+				model.DB = db
+			}
+
 			oldMaster, oldSecret, oldMemory := common.IsMasterNode, common.SessionSecret, common.MemoryCacheEnabled
 			common.IsMasterNode, common.SessionSecret, common.MemoryCacheEnabled = true, "synthetic-config-read-session", false
 			require.NoError(t, authz.Init(db))
@@ -352,6 +361,7 @@ func TestChannelKeySecurityConfigReadDatabaseMatrix(t *testing.T) {
 				org := "synthetic-config-organization"
 				tag := label
 				ch := model.Channel{Name: label, Type: constant.ChannelTypeAnthropic, Key: "synthetic-config-key", Status: 1, Models: "synthetic-model", Group: "default", Tag: &tag, BaseURL: &base, OpenAIOrganization: &org, HeaderOverride: &header, ParamOverride: &param, Setting: &setting, Other: "synthetic-config-other", OtherSettings: `{"opaque":"synthetic-config-settings"}`, OtherInfo: `{"status_reason":"synthetic-config-diagnostic"}`}
+				ch.ChannelInfo.MultiKeyDisabledReason = map[int]string{0: "synthetic-stale-slot-reason"}
 				if managed {
 					ch.CredentialRef = "synthetic-config-reference"
 					ch.Key = ""
@@ -366,6 +376,8 @@ func TestChannelKeySecurityConfigReadDatabaseMatrix(t *testing.T) {
 						var result map[string]any
 						require.NoError(t, common.Unmarshal(w.Body.Bytes(), &result))
 						require.Equal(t, true, result["success"], w.Body.String())
+						require.Equal(t, "no-store", w.Header().Get("Cache-Control"))
+						assert.NotContains(t, w.Body.String(), "synthetic-stale-slot-reason")
 						visible := actor == "reader" || actor == "root"
 						leaked := 0
 						for _, secret := range markers {
@@ -386,7 +398,11 @@ func TestChannelKeySecurityConfigReadDatabaseMatrix(t *testing.T) {
 				w := request("admin", "PUT", "/api/channel/", map[string]any{"id": ch.Id, "type": ch.Type, "name": label + "-renamed", "models": ch.Models, "group": ch.Group})
 				var updated map[string]any
 				require.NoError(t, common.Unmarshal(w.Body.Bytes(), &updated))
-				require.Equal(t, true, updated["success"], w.Body.String())
+				if managed {
+					require.Equal(t, http.StatusServiceUnavailable, w.Code)
+				} else {
+					require.Equal(t, true, updated["success"], w.Body.String())
+				}
 				assert.NotContains(t, w.Body.String(), "synthetic-config-header")
 				var after model.Channel
 				require.NoError(t, db.First(&after, ch.Id).Error)
@@ -394,6 +410,34 @@ func TestChannelKeySecurityConfigReadDatabaseMatrix(t *testing.T) {
 				assert.Equal(t, ch.Setting, after.Setting)
 				assert.Equal(t, ch.OtherSettings, after.OtherSettings)
 				assert.Equal(t, ch.Key, after.Key)
+				if !managed {
+					read := request("admin", "GET", fmt.Sprintf("/api/channel/%d", ch.Id), nil)
+					var envelope struct {
+						Data map[string]any `json:"data"`
+					}
+					require.NoError(t, common.Unmarshal(read.Body.Bytes(), &envelope))
+					snapshot := envelope.Data
+					delete(snapshot, "status")
+					snapshot["name"] = label + "-snapshot"
+					snapshot["setting"] = "{}"
+					snapshot["header_override"] = "[redacted]"
+					saved := request("root", "PUT", "/api/channel/", snapshot)
+					var result map[string]any
+					require.NoError(t, common.Unmarshal(saved.Body.Bytes(), &result))
+					require.Equal(t, true, result["success"], saved.Body.String())
+					require.NoError(t, db.First(&after, ch.Id).Error)
+					assert.Equal(t, ch.HeaderOverride, after.HeaderOverride)
+					assert.Equal(t, ch.Setting, after.Setting)
+					assert.Equal(t, ch.BaseURL, after.BaseURL)
+					replacement := `{"X-Custom-Auth":"synthetic-authorized-replacement"}`
+					saved = request("root", "PUT", "/api/channel/", map[string]any{"id": ch.Id, "type": ch.Type, "header_override": replacement})
+					require.NoError(t, common.Unmarshal(saved.Body.Bytes(), &result))
+					require.Equal(t, true, result["success"], saved.Body.String())
+					require.NoError(t, db.First(&after, ch.Id).Error)
+					assert.Equal(t, replacement, *after.HeaderOverride)
+					assert.Contains(t, saved.Body.String(), "synthetic-authorized-replacement")
+				}
+
 				for _, actor := range []string{"", "user"} {
 					denied := request(actor, "GET", fmt.Sprintf("/api/channel/%d", ch.Id), nil)
 					assert.Contains(t, []int{401, 403}, denied.Code)

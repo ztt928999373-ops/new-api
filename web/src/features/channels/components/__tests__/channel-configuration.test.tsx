@@ -3029,3 +3029,67 @@ test('AWS interface selection is disabled without sensitive channel write permis
     await screen.findByRole('combobox', { name: 'AWS API' })
   ).toBeDisabled()
 })
+
+
+test('sensitive channel controls stay disabled for writers without secret read permission', async () => {
+  editingChannel = {
+    ...editingChannel,
+    type: 33,
+    sensitive_fields_redacted: true,
+  }
+  useAuthStore.setState({
+    auth: {
+      ...originalAuth,
+      user: {
+        id: 10,
+        username: 'blind-writer',
+        role: ROLE.ADMIN,
+        permissions: {
+          admin_permissions: {
+            channel: {
+              read: true,
+              write: true,
+              sensitive_write: true,
+              secret_view: false,
+            },
+          },
+        },
+      },
+    },
+  })
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  expect(
+    await screen.findByRole('combobox', { name: 'AWS API' })
+  ).toBeDisabled()
+})
+
+
+test('saving routing from a redacted snapshot omits sensitive defaults and keeps the redaction marker', async () => {
+  editingChannel = {
+    ...editingChannel,
+    sensitive_fields_redacted: true,
+    base_url: null,
+    setting: null,
+    header_override: null,
+  }
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true } })
+  const user = userEvent.setup()
+  render(<ConfigurationHarness currentRow={editingChannel} />)
+  await screen.findByDisplayValue('Existing channel')
+  fireEvent.change(screen.getByLabelText('Name *'), {
+    target: { value: 'Renamed without secrets' },
+  })
+  await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+  await waitFor(() => expect(put).toHaveBeenCalled())
+  const payload = put.mock.calls[0][1]
+  expect(payload).toMatchObject({
+    id: 42,
+    name: 'Renamed without secrets',
+    sensitive_fields_redacted: true,
+  })
+  for (const field of ['key', 'base_url', 'header_override', 'param_override', 'setting', 'settings', 'other']) {
+    expect(payload).not.toHaveProperty(field)
+  }
+})
