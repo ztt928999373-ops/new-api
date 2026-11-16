@@ -111,7 +111,9 @@ func RecordPolicyFailure(c *gin.Context, channelID int, err *types.NewAPIError, 
 		source = "local"
 	}
 	state := RequestPolicy(c)
-	event := PolicyEvent{ChannelID: channelID, Status: err.StatusCode, ErrorCode: string(err.GetErrorCode()), ErrorSource: source, Decision: PolicyDecision{Action: "failure", Reason: "upstream_failure", Source: source}}
+	// This event is persisted before ProcessChannelError cleans the error value.
+	errorCode := common.SanitizeRequestDiagnostic(c, nil, string(err.GetErrorCode()))
+	event := PolicyEvent{ChannelID: channelID, Status: err.StatusCode, ErrorCode: errorCode, ErrorSource: source, Decision: PolicyDecision{Action: "failure", Reason: "upstream_failure", Source: source}}
 	if source == "local" {
 		event.Decision.Reason = "local_rejection"
 	}

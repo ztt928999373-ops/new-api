@@ -52,6 +52,11 @@ jobs:
           touch web/dist/index.html
           { git rev-parse HEAD; go version; } > "$RUNNER_TEMP/v1-security/environment.txt"
           go vet ./...
+          # Synthetic inherited lowercase proxies reproduce the cloud fixture
+          # contamination; this unit test makes no outbound network requests.
+          env http_proxy=http://inherited-http.invalid:8080 https_proxy=http://inherited-https.invalid:8080 ALL_PROXY=http://inherited-all.invalid:8080 \
+            go test -json -race -count=1 ./service -run '^TestUpstreamAddressesMaskOnlyConfiguredAddresses$' > "$RUNNER_TEMP/v1-security/proxy-isolation.jsonl"
+          go test -json -race -count=1 ./router -run '^(TestOpenAIPilotAuthenticatedSettlement|TestBailianPilotAuthenticatedSettlement)$' > "$RUNNER_TEMP/v1-security/upstream-error-redaction.jsonl"
           go test -json -race -count=1 ./router -run '^TestPasswordLoginFailureAudit' > "$RUNNER_TEMP/v1-security/login-audit.jsonl"
           go test -json -race -count=1 ./middleware -run '^TestDashboardDenialAudit' > "$RUNNER_TEMP/v1-security/denial-audit.jsonl"
           go test -json -race -count=1 ./model -run '^TestOverallChannelStatusIndependentOfCredentials$' > "$RUNNER_TEMP/v1-security/channel-status.jsonl"
