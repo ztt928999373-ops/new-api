@@ -28,7 +28,7 @@ func ReadEnabledUpstreamChannel(ctx context.Context, channelID int) (model.Chann
 	var channel model.Channel
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	if channelID <= 0 || model.DB == nil || model.DB.WithContext(ctx).Select("id", "status", "upstream_budget_enabled").First(&channel, channelID).Error != nil || channel.Status != common.ChannelStatusEnabled {
+	if channelID <= 0 || model.DB == nil || model.DB.WithContext(ctx).Select("id", "status", "type", "credential_ref", "upstream_budget_enabled").First(&channel, channelID).Error != nil || channel.Status != common.ChannelStatusEnabled {
 		return channel, ErrUpstreamChannelUnavailable
 	}
 	return channel, nil
@@ -90,6 +90,11 @@ func BeginUpstreamBudget(c *gin.Context, req *http.Request, channelID, channelTy
 	channel, err := ReadEnabledUpstreamChannel(ctx, channelID)
 	if err != nil {
 		return nil, err
+	}
+	// Managed Bailian has no supported, verified cost-admission policy yet.
+	// A false marker or declared ceiling must not authorize a payable attempt.
+	if channel.Type == constant.ChannelTypeAli && channel.CredentialRef != "" {
+		return nil, model.ErrUpstreamBudget
 	}
 	if !channel.UpstreamBudgetEnabled {
 		return nil, nil

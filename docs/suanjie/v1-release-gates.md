@@ -89,3 +89,11 @@ Finish 按声明上限分配责任，错误/崩溃保留 held，不靠退款释�
 不修改价格、用户钱包、收费规则或 Legacy 行为。兼容性代价是受管百炼试点暂停普通及流式调用；
 安全成本依据、货币/地区/模型、保守估算、额度与并发责任预留均经独立专项验证后，才可另行设计开放路径。
 Legacy 百炼仍没有本专项新增的预算承诺，不得把它当作绕开受管门禁的运营方案。
+
+修复验证：最终状态查询增加 type/CredentialRef 投影，HTTP 与 WS 在放行前拒绝受管百炼，
+不增加查询次数、不写入预算或虚构账单。SQLite/MySQL/PostgreSQL 的准入反例均变为 0 次出站；
+Legacy 对照仍为 1 次。HTTP 端到端普通、SSE、轮换、并发等 12 个百炼场景均阻断且用户/Token
+无保留扣款；OpenAI 原有成功、失败、退款、重试及 Legacy 错误脱敏场景保留。
+本地扩大后的预算/账单/渠道配置/试点定向 race：195 个含父子测试 PASS，0 FAIL / SKIPPED；vet/build PASS。
+`BenchmarkUpstreamBudgetFinalChannelRead`（合成 SQLite、200ms）为 84,119 ns/op、1 sql/op、7,324 B/op、93 allocs/op；
+没有生产或真实供应商延迟基准，不声称性能零影响。整套后端 race 仍为本轮 NOT_RUN。
