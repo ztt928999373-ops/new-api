@@ -163,3 +163,8 @@ Gemini、Minimax、service 本批不修复，继续保留既有 FAIL；完整根
 没有证据要求修改生产适配器。最小方案移除并行测试中的模式写入，保留 t.Parallel 和全部原有断言；
 Gemini 剩余串行设置由 Go 测试调度与并行测试隔离，Minimax 不再修改全局模式。模式切换不是这些请求/响应断言的目标。
 同一 Draft PR 仅治理这一类问题；service 本批不修改，既有 FAIL 保留；完整根模块 race 本批 NOT_RUN。
+
+修复后分别执行两个完整包 `go test -json -race -count=10`：Gemini 310个、Minimax 30个含父子测试 PASS，
+两者均0 FAIL / SKIPPED / race；根模块 vet PASS。仅移除6处 Gemini 与1处 Minimax 并行模式写入，
+未改变任何断言、t.Parallel 或生产文件。安全 CI 新增相同两包10次 race，防止后续再次引入并行全局写。
+没有生产运行时开销或新增锁；service 既有 FAIL 仍待后续独立治理。
