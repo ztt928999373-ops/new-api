@@ -208,6 +208,10 @@ export function parseTaskResult() { return {}; }
 	update := func(name, setting string) string {
 		return fmt.Sprintf(`{"id":%d,"type":60,"name":%q,"key":"sk","models":"gateway-doc","group":"default","base_url":"https://gateway.example","setting":%q}`, channel.Id, name, setting)
 	}
+	// Binding changes require readable configuration as well as the independent
+	// bind permission. Keep this test focused on the latter, without bypassing
+	// the redacted-edit protection for administrators lacking secret_view.
+	require.NoError(t, authz.SetUserPermissions(2, authz.PermissionsMap{authz.ResourceChannel: {authz.ActionSecretView: true}}))
 	unchanged := putUpdateChannel(t, 2, common.RoleAdminUser, update("renamed-gateway", setting))
 	assert.Contains(t, unchanged.Body.String(), `"success":true`, "resubmitting the stored bindings does not need the bind permission")
 	assert.NotContains(t, unchanged.Body.String(), "task_plugin.bind")

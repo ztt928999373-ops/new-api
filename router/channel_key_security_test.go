@@ -476,6 +476,11 @@ export function parseTaskResult(){return {};}`
 							var result map[string]any
 							require.NoError(t, common.Unmarshal(w.Body.Bytes(), &result))
 							assert.Equal(t, true, result["success"], "type=%d actor=%s flag=%s body=%s", kindType, actor, flag, w.Body.String())
+							if actor == "writer" {
+								assert.NotContains(t, w.Body.String(), "synthetic-patch-key")
+								assert.NotContains(t, w.Body.String(), "synthetic-patch-header")
+								assert.NotContains(t, w.Body.String(), "synthetic-patch-setting")
+							}
 							var after model.Channel
 							require.NoError(t, db.First(&after, original.Id).Error)
 							assert.Equal(t, body["name"], after.Name)

@@ -1126,11 +1126,12 @@ func UpdateChannel(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	if redacted, _ := requestData["sensitive_fields_redacted"].(bool); redacted {
+	// The marker protects stale redacted snapshots; the permission check also
+	// protects hidden configuration when a client omits or forges that marker.
+	if redacted, _ := requestData["sensitive_fields_redacted"].(bool); redacted ||
+		!authz.Can(c.GetInt("id"), c.GetInt("role"), authz.ChannelSecretView) {
 		for field := range channelSensitiveFields {
-			if field != "type" {
-				delete(requestData, field)
-			}
+			delete(requestData, field)
 		}
 		delete(requestData, "sensitive_fields_redacted")
 		data, marshalErr := common.Marshal(requestData)
@@ -1151,6 +1152,16 @@ func UpdateChannel(c *gin.Context) {
 	}
 	clearChannelReadOnlyFields(&channel, requestData)
 
+	// Resolve the stored type before permissions and type-specific validation.
+	originChannel, err := model.GetChannelById(channel.Id, true)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if _, provided := requestData["type"]; !provided {
+		channel.Type = originChannel.Type
+	}
+
 	if channel.Type == constant.ChannelTypeTaskPlugin &&
 		!authz.Can(c.GetInt("id"), c.GetInt("role"), authz.TaskPluginBind) {
 		c.JSON(http.StatusOK, gin.H{
@@ -1160,21 +1171,37 @@ func UpdateChannel(c *gin.Context) {
 		return
 	}
 
-	baseURLFromPluginDefault := channel.Type == constant.ChannelTypeTaskPlugin &&
-		(channel.BaseURL == nil || strings.TrimSpace(*channel.BaseURL) == "")
-	// 使用统一的校验函数
-	if err := validateChannel(&channel.Channel, false); err != nil {
-		common.ApiError(c, err)
-		return
-	}
-	// Preserve existing ChannelInfo to ensure multi-key channels keep correct state even if the client does not send ChannelInfo in the request.
-	originChannel, err := model.GetChannelById(channel.Id, true)
+	// Validate the effective configuration, not the partial edit. Keep this
+	// separate from the persisted patch so omitted secrets are never rewritten.
+	var validation model.Channel
+	originData, err := common.Marshal(originChannel)
 	if err != nil {
 		common.ApiError(c, err)
 		return
 	}
-	if _, provided := requestData["type"]; !provided {
-		channel.Type = originChannel.Type
+	if err := common.Unmarshal(originData, &validation); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	validationData, err := common.Marshal(requestData)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if err := common.Unmarshal(validationData, &validation); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	baseURLFromPluginDefault := validation.Type == constant.ChannelTypeTaskPlugin &&
+		(validation.BaseURL == nil || strings.TrimSpace(*validation.BaseURL) == "")
+	if err := validateChannel(&validation, false); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	_, baseURLProvided := requestData["base_url"]
+	baseURLFromPluginDefault = baseURLFromPluginDefault && (baseURLProvided || channel.Type != originChannel.Type)
+	if baseURLFromPluginDefault {
+		channel.BaseURL = validation.BaseURL
 	}
 	originProxy := originChannel.GetSetting().Proxy
 	if (originChannel.Type == constant.ChannelTypeOpenAI || channel.Type == constant.ChannelTypeOpenAI) &&
