@@ -142,3 +142,8 @@ SQLite/MySQL/PostgreSQL 的同一定向 race 各重复3次，共102个含父子�
 最小修复将采样测试的后台任务在清理完成前排空，再清除桶，避免后续夹具切换/恢复全局状态时仍有旧任务读取。
 全部成功率、延迟、吞吐、历史窗口与落库断言保留；不以 sleep、跳过测试或删除断言制造通过。
 Gemini、Minimax、service 本批不修复，继续保留既有 FAIL；完整根模块 race 本批 NOT_RUN。
+
+修复后完整 perf_metrics 包 race 在 SQLite/MySQL/PostgreSQL 下重复3次：132个含父子测试 PASS，
+0 FAIL / SKIPPED / race；同样三数据库普通测试44个 PASS，0 FAIL / SKIPPED；包级 vet PASS。
+未配置外部数据库时的早期 race/普通测试各有6个 SKIPPED，单独保留，不算通过；最终上述结果来自真实隔离三数据库。
+安全 CI 新增相同的完整包三数据库 race，覆盖跨测试及重复运行的生命周期。无生产指标文件变更，无生产运行时开销。
