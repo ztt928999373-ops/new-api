@@ -189,6 +189,15 @@ Tasks that touch none of these (for example unrelated frontend work, authenticat
 
 ### Project Governance
 
+**Owner-approved open-source and commercial strategy (2026-11-16):** This is a long-term constraint for Suanjie API work on `ztt928999373-ops/new-api`, with `product/v1` as the sole mainline.
+
+- Continue developing on New API with the commercial-service goal unchanged. Core code need not be closed source; do not split or restructure the architecture solely to achieve closed-source operation.
+- Follow the existing AGPL-3.0 LICENSE, NOTICE, additional terms, and third-party licenses. Preserve upstream contributor attribution, copyright notices, the required visible attribution, and the original project link: https://github.com/QuantumNous/new-api.
+- Mark Suanjie API modifications accurately; do not represent all code as original Suanjie work. Provide the applicable Corresponding Source to network users as required by the license, including a prominent, no-charge source offer under LICENSE section 13.
+- Suanjie branding, interfaces, features, and commercial services may be developed while preserving required upstream information. This does not authorize removing protected project information below.
+- Prioritize V1 security, stability, functional acceptance, and commercial preparation. License compliance does not establish supplier/API resale authorization, payment readiness, or regulatory compliance; those require independent pre-operation review. This strategy does not authorize deployment, paid API calls, registration, or charging.
+- Keep planning and acceptance aligned with [the owner decision](docs/suanjie/roadmap-v1-v15-v2.md#01-所有者正式决定开源与商业化策略) and [the release gates](docs/suanjie/v1-release-gates.md). Propose changes through independent Draft PRs, never by directly modifying the mainline without approval.
+
 **Protected project information:** The following project-related information is strictly protected and MUST NOT be modified, deleted, replaced, or removed under any circumstances:
 
 - Any references, mentions, branding, metadata, or attributions related to **nеw-аρi** (the project name/identity)
