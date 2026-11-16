@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -35,6 +36,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
 	"github.com/gorilla/websocket"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"
@@ -464,6 +466,102 @@ func TestUpstreamBudgetDatabaseMatrix(t *testing.T) {
 			require.NoError(t, db.First(&state, "channel_id = ?", ch.Id).Error)
 			require.EqualValues(t, math.MaxInt64, state.ChargedMicros)
 			require.EqualValues(t, 70, state.HeldMicros)
+		})
+	}
+}
+
+// TestUpstreamBudgetFinalChannelStatus retains a selected channel snapshot while
+// the authoritative row changes, then exercises the real final HTTP boundary.
+func TestUpstreamBudgetFinalChannelStatus(t *testing.T) {
+	for _, kind := range []string{"sqlite", "mysql", "postgres"} {
+		t.Run(kind, func(t *testing.T) {
+			db := setupUpstreamBudgetDB(t, kind)
+			require.NoError(t, db.AutoMigrate(&model.UpstreamBudget{}, &model.UpstreamCostReservation{}, &model.SupplierCostStatement{}))
+			service.InitHttpClient()
+			client := service.GetHttpClient()
+			original := client.Transport
+			t.Cleanup(func() { client.Transport = original })
+			var calls atomic.Int64
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				_, _ = io.Copy(io.Discard, r.Body)
+				_, _ = io.WriteString(w, `{}`)
+			}))
+			defer upstream.Close()
+			target, err := url.Parse(upstream.URL)
+			require.NoError(t, err)
+			client.Transport = pilotTransport(func(req *http.Request) (*http.Response, error) {
+				copied := req.Clone(req.Context())
+				address := *req.URL
+				address.Scheme, address.Host = target.Scheme, target.Host
+				copied.URL = &address
+				return original.RoundTrip(copied)
+			})
+			for _, tc := range []struct {
+				name                  string
+				marked, budget, allow bool
+				mutation              string
+			}{
+				{name: "enabled_unmarked", allow: true},
+				{name: "enabled_managed_budget_off", marked: true, allow: true},
+				{name: "enabled_budget_on", marked: true, budget: true, allow: true},
+				{name: "disabled_unmarked", mutation: "disabled"},
+				{name: "disabled_managed_budget_off", marked: true, mutation: "disabled"},
+				{name: "disabled_budget_on", marked: true, budget: true, mutation: "disabled"},
+				{name: "deleted_unmarked", mutation: "deleted"},
+				{name: "database_failure_unmarked", mutation: "database_failure"},
+				{name: "concurrent_disable_after_selection", mutation: "concurrent_disable"},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					ch, _ := syntheticBudgetChannel(t, db)
+					if !tc.budget {
+						require.NoError(t, db.Model(&model.Channel{}).Where("id = ?", ch.Id).Update("upstream_budget_enabled", false).Error)
+					}
+					// This enabled snapshot deliberately survives the database mutation.
+					selected := ch
+					selected.Status = common.ChannelStatusEnabled
+					if tc.mutation == "disabled" || tc.mutation == "concurrent_disable" {
+						done := make(chan error, 1)
+						go func() {
+							done <- db.Model(&model.Channel{}).Where("id = ?", ch.Id).Update("status", common.ChannelStatusManuallyDisabled).Error
+						}()
+						require.NoError(t, <-done)
+					}
+					if tc.mutation == "deleted" {
+						require.NoError(t, db.Delete(&model.Channel{}, ch.Id).Error)
+					}
+					if tc.mutation == "database_failure" {
+						name := "synthetic_final_channel_query_failure"
+						require.NoError(t, db.Callback().Query().Before("gorm:query").Register(name, func(tx *gorm.DB) {
+							if tx.Statement.Table == "channels" {
+								tx.AddError(errors.New("synthetic database unavailable"))
+							}
+						}))
+						defer db.Callback().Query().Remove(name)
+					}
+					c, _ := gin.CreateTestContext(httptest.NewRecorder())
+					const body = `{"model":"synthetic-model","messages":[{"role":"user","content":"synthetic"}],"max_tokens":16}`
+					c.Request = httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
+					c.Set(service.UpstreamBudgetManagedKey, tc.marked)
+					c.Set(service.UpstreamBudgetProtectedKey, tc.budget)
+					out, err := http.NewRequest("POST", "https://api.openai.com/v1/chat/completions", strings.NewReader(body))
+					require.NoError(t, err)
+					before := calls.Load()
+					resp, sendErr := channel.DoRequest(c, out, &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{ChannelId: selected.Id, ChannelType: constant.ChannelTypeOpenAI}})
+					if resp != nil {
+						require.NoError(t, resp.Body.Close())
+					}
+					count := calls.Load() - before
+					t.Logf("database=%s case=%s selected_status=%d actual_outbound_requests=%d error=%v", kind, tc.name, selected.Status, count, sendErr)
+					if tc.allow {
+						require.NoError(t, sendErr)
+						require.EqualValues(t, 1, count)
+					} else {
+						assert.Error(t, sendErr)
+						assert.Zero(t, count)
+					}
+				})
+			}
 		})
 	}
 }
