@@ -11,6 +11,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/internal/testchannel"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
@@ -52,6 +53,7 @@ func TestOpenAIPilotMockTransportAndUsage(t *testing.T) {
 			c.Request.Header.Set("Authorization", "Bearer client-token-must-not-forward")
 			info := &relaycommon.RelayInfo{OriginModelName: "pilot-model", IsStream: stream, DisablePing: true, StartTime: time.Now(), RequestURLPath: "/v1/chat/completions", RelayFormat: types.RelayFormatOpenAI,
 				ChannelMeta: &relaycommon.ChannelMeta{ChannelType: constant.ChannelTypeOpenAI, ChannelBaseUrl: upstream.URL, ApiKey: "synthetic-pilot-key", UpstreamModelName: "pilot-model", SupportStreamOptions: true}}
+			testchannel.Bind(t, info)
 			a := &Adaptor{}
 			a.Init(info)
 			request := &dto.GeneralOpenAIRequest{Model: "pilot-model", Stream: &stream, Messages: []dto.Message{{Role: "user", Content: "hi"}}}

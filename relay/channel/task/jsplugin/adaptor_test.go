@@ -19,6 +19,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/internal/testchannel"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	pluginruntime "github.com/QuantumNous/new-api/pkg/jsplugin"
@@ -900,6 +901,7 @@ func TestTaskAdaptorMapsJSContract(t *testing.T) {
 	require.NoError(t, err)
 	adaptor := New(plugin)
 	info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{ChannelBaseUrl: server.URL, ApiKey: "secret"}, OriginModelName: "client-model", TaskRelayInfo: &relaycommon.TaskRelayInfo{PublicTaskID: "task_public"}}
+	testchannel.Bind(t, info)
 	adaptor.Init(info)
 
 	recorder := httptest.NewRecorder()
@@ -1008,6 +1010,7 @@ export function parseBatchResult() { return {}; }
 					},
 					TaskRelayInfo: &relaycommon.TaskRelayInfo{},
 				}
+				testchannel.Bind(t, info)
 				adaptor := New(plugin)
 				adaptor.Init(info)
 				task := &model.Task{PrivateData: model.TaskPrivateData{UpstreamTaskID: "task-1", Key: "task-key"}}
@@ -1927,6 +1930,7 @@ export function parseTaskResult(){return {status:"SUCCESS"}}
 	require.NoError(t, err)
 	adaptor := New(plugin)
 	info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{ChannelBaseUrl: server.URL, ApiKey: "secret"}, TaskRelayInfo: &relaycommon.TaskRelayInfo{}}
+	testchannel.Bind(t, info)
 	adaptor.Init(info)
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/videos", nil)
@@ -2556,6 +2560,7 @@ func TestTaskAdaptorChainsDoubaoThroughNewAPIUpstream(t *testing.T) {
 		OriginModelName: modelName,
 		TaskRelayInfo:   &relaycommon.TaskRelayInfo{PublicTaskID: "task_local"},
 	}
+	testchannel.Bind(t, info)
 	adaptor.Init(info)
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/videos", nil)
@@ -2614,6 +2619,7 @@ func TestTaskAdaptorChainsSunoBatchFetchThroughNewAPIUpstream(t *testing.T) {
 		OriginModelName: "suno_music",
 		TaskRelayInfo:   &relaycommon.TaskRelayInfo{PublicTaskID: "task_local", Action: "MUSIC"},
 	}
+	testchannel.Bind(t, info)
 	adaptor.Init(info)
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Request = httptest.NewRequest(http.MethodPost, "/suno/submit/music", nil)

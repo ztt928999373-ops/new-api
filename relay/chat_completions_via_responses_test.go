@@ -10,6 +10,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/internal/testchannel"
 	openaichannel "github.com/QuantumNous/new-api/relay/channel/openai"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
@@ -54,6 +55,7 @@ func TestPrepareResponsesRequestRetainsConvertedAdaptor(t *testing.T) {
 	})
 	request := &dto.OpenAIResponsesRequest{Model: "gpt-4o", Input: []byte(`"hello"`)}
 	info := relaycommon.GenRelayInfoResponses(c, request)
+	testchannel.Bind(t, info, c)
 	adaptor, body, closer, apiErr := PrepareResponsesRequest(c, info, request)
 	require.Nil(t, apiErr)
 	defer closer.Close()
@@ -178,6 +180,7 @@ func TestTextRequestViaResponsesConvertsClaudeDirectly(t *testing.T) {
 			UpstreamModelName: "gpt-5.6-sol",
 		},
 	}
+	testchannel.Bind(t, info, c)
 	adaptor := &openaichannel.Adaptor{}
 	adaptor.Init(info)
 	request := &dto.ClaudeRequest{

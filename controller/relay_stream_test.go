@@ -16,6 +16,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/internal/testchannel"
 	"github.com/QuantumNous/new-api/relay/channel"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
@@ -124,6 +125,7 @@ func TestRelayKeepAliveAcrossUpstreamRetries(t *testing.T) {
 			return
 		}
 		info := &relaycommon.RelayInfo{IsStream: true, ChannelMeta: &relaycommon.ChannelMeta{}}
+		testchannel.Bind(t, info)
 		for range 2 {
 			request, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, upstream.URL, strings.NewReader("{}"))
 			if !assert.NoError(t, err) {
@@ -209,6 +211,7 @@ func TestStreamKeepAlivePreservesFastHTTPFailures(t *testing.T) {
 					return
 				}
 				info := &relaycommon.RelayInfo{IsStream: true, ChannelMeta: &relaycommon.ChannelMeta{}}
+				testchannel.Bind(t, info)
 				response, err := channel.DoRequest(c, request, info)
 				if !assert.NoError(t, err) {
 					return

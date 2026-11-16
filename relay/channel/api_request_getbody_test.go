@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/internal/testchannel"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
@@ -225,6 +226,7 @@ func TestDoTaskApiRequest_KeepsReplayableGetBody(t *testing.T) {
 	info := &relaycommon.RelayInfo{
 		ChannelMeta: &relaycommon.ChannelMeta{},
 	}
+	testchannel.Bind(t, info)
 
 	adaptor := &stubTaskAdaptor{baseURL: server.URL}
 	resp, err := DoTaskApiRequest(adaptor, ctx, info, bytes.NewReader(payload))

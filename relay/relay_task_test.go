@@ -12,6 +12,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/i18n"
+	"github.com/QuantumNous/new-api/internal/testchannel"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	pluginruntime "github.com/QuantumNous/new-api/pkg/jsplugin"
@@ -646,6 +647,7 @@ export function parseTaskResult() { return {status:"SUCCESS"}; }
 			defer server.Close()
 
 			c, info := newTaskSubmitContext(t, "declared-model", "")
+			testchannel.Bind(t, info, c)
 			common.SetContextKey(c, constant.ContextKeyChannelBaseUrl, server.URL)
 			c.Set("group", "default")
 			info.UserGroup, info.UsingGroup = "default", "default"
@@ -732,6 +734,7 @@ export function extractUsage() { return {seconds:2}; }
 			defer server.Close()
 
 			c, info := newTaskSubmitContext(t, "declared-model", "")
+			testchannel.Bind(t, info, c)
 			c.Set("group", "default")
 			info.UserGroup, info.UsingGroup, info.OriginModelName = "default", "default", "declared-model"
 			info.Billing = billing

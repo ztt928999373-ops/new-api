@@ -23,9 +23,11 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/i18n"
+	"github.com/QuantumNous/new-api/internal/testchannel"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/credentialcrypto"
 	"github.com/QuantumNous/new-api/relay/channel"
+	"github.com/QuantumNous/new-api/relay/channel/openai"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/service"
@@ -505,6 +507,9 @@ func TestUpstreamBudgetFinalChannelStatus(t *testing.T) {
 				{name: "enabled_unmarked", allow: true},
 				{name: "enabled_managed_budget_off", marked: true, allow: true},
 				{name: "enabled_budget_on", marked: true, budget: true, allow: true},
+				{name: "enabled_budget_on_stale_flags", budget: true, allow: true},
+				{name: "missing_channel_id", mutation: "missing_id"},
+				{name: "database_unavailable", mutation: "nil_database"},
 				{name: "disabled_unmarked", mutation: "disabled"},
 				{name: "disabled_managed_budget_off", marked: true, mutation: "disabled"},
 				{name: "disabled_budget_on", marked: true, budget: true, mutation: "disabled"},
@@ -520,7 +525,10 @@ func TestUpstreamBudgetFinalChannelStatus(t *testing.T) {
 					// This enabled snapshot deliberately survives the database mutation.
 					selected := ch
 					selected.Status = common.ChannelStatusEnabled
-					if tc.mutation == "disabled" || tc.mutation == "concurrent_disable" {
+					if tc.mutation == "disabled" {
+						require.NoError(t, db.Model(&model.Channel{}).Where("id = ?", ch.Id).Update("status", common.ChannelStatusManuallyDisabled).Error)
+					}
+					if tc.mutation == "concurrent_disable" {
 						done := make(chan error, 1)
 						go func() {
 							done <- db.Model(&model.Channel{}).Where("id = ?", ch.Id).Update("status", common.ChannelStatusManuallyDisabled).Error
@@ -543,9 +551,17 @@ func TestUpstreamBudgetFinalChannelStatus(t *testing.T) {
 					const body = `{"model":"synthetic-model","messages":[{"role":"user","content":"synthetic"}],"max_tokens":16}`
 					c.Request = httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body))
 					c.Set(service.UpstreamBudgetManagedKey, tc.marked)
-					c.Set(service.UpstreamBudgetProtectedKey, tc.budget)
+					c.Set(service.UpstreamBudgetProtectedKey, tc.budget && tc.marked)
 					out, err := http.NewRequest("POST", "https://api.openai.com/v1/chat/completions", strings.NewReader(body))
 					require.NoError(t, err)
+					if tc.mutation == "missing_id" {
+						selected.Id = 0
+					}
+					if tc.mutation == "nil_database" {
+						previous := model.DB
+						model.DB = nil
+						defer func() { model.DB = previous }()
+					}
 					before := calls.Load()
 					resp, sendErr := channel.DoRequest(c, out, &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{ChannelId: selected.Id, ChannelType: constant.ChannelTypeOpenAI}})
 					if resp != nil {
@@ -560,10 +576,108 @@ func TestUpstreamBudgetFinalChannelStatus(t *testing.T) {
 						assert.Error(t, sendErr)
 						assert.Zero(t, count)
 					}
+					var reservations int64
+					require.NoError(t, db.Model(&model.UpstreamCostReservation{}).Where("channel_id = ?", ch.Id).Count(&reservations).Error)
+					expected := int64(0)
+					if tc.allow && tc.budget {
+						expected = 1
+					}
+					require.Equal(t, expected, reservations, "rejected sends must not reserve upstream budget")
 				})
 			}
 		})
 	}
+}
+
+func TestUpstreamBudgetDisableWhileRequestInFlight(t *testing.T) {
+	db := setupUpstreamBudgetDB(t, "sqlite")
+	ch := model.Channel{Status: common.ChannelStatusEnabled, Name: "synthetic-inflight-status"}
+	require.NoError(t, db.Create(&ch).Error)
+	arrived, release := make(chan struct{}), make(chan struct{})
+	var calls atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) == 1 {
+			close(arrived)
+			<-release
+		}
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	defer upstream.Close()
+	defer close(release)
+	service.InitHttpClient()
+	send := func() error {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{}`))
+		out, err := http.NewRequest("POST", upstream.URL, strings.NewReader(`{}`))
+		if err != nil {
+			return err
+		}
+		resp, err := channel.DoRequest(c, out, &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{ChannelId: ch.Id}})
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		return err
+	}
+	finished := make(chan error, 1)
+	go func() { finished <- send() }()
+	select {
+	case <-arrived:
+	case err := <-finished:
+		t.Fatalf("enabled control failed before reaching the loopback upstream: %v", err)
+	}
+	require.NoError(t, db.Model(&model.Channel{}).Where("id = ?", ch.Id).Update("status", common.ChannelStatusManuallyDisabled).Error)
+	require.Error(t, send())
+	require.EqualValues(t, 1, calls.Load(), "disable must block new sends while an admitted request is in flight")
+	// Release is deferred so the already admitted request can finish even on failure.
+	t.Cleanup(func() { require.NoError(t, <-finished) })
+}
+
+func TestUpstreamBudgetFinalWebSocketStatus(t *testing.T) {
+	db := setupUpstreamBudgetDB(t, "sqlite")
+	var calls atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1); w.WriteHeader(http.StatusForbidden) }))
+	defer upstream.Close()
+	for _, disabled := range []bool{false, true} {
+		t.Run(fmt.Sprintf("disabled_%t", disabled), func(t *testing.T) {
+			ch := model.Channel{Status: common.ChannelStatusEnabled, Name: "synthetic-websocket-status"}
+			require.NoError(t, db.Create(&ch).Error)
+			t.Cleanup(func() { db.Delete(&ch) })
+			selected := ch
+			if disabled {
+				require.NoError(t, db.Model(&ch).Update("status", common.ChannelStatusManuallyDisabled).Error)
+			}
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest("GET", "/v1/realtime", nil)
+			info := &relaycommon.RelayInfo{RequestURLPath: "/v1/realtime", ChannelMeta: &relaycommon.ChannelMeta{ChannelId: selected.Id, ChannelType: constant.ChannelTypeOpenAI, ChannelBaseUrl: upstream.URL}}
+			before := calls.Load()
+			_, err := channel.DoWssRequest(&openai.Adaptor{}, c, info, nil)
+			require.Error(t, err) // Enabled control reaches the synthetic rejected handshake.
+			expected := int64(1)
+			if disabled {
+				expected = 0
+			}
+			require.Equal(t, expected, calls.Load()-before)
+			t.Logf("websocket disabled=%t actual_outbound_requests=%d", disabled, calls.Load()-before)
+		})
+	}
+}
+
+func BenchmarkUpstreamBudgetFinalChannelRead(b *testing.B) {
+	info := &relaycommon.RelayInfo{}
+	testchannel.Bind(b, info)
+	var queries atomic.Int64
+	db := model.DB
+	const callback = "synthetic_channel_status_query_count"
+	require.NoError(b, db.Callback().Query().Before("gorm:query").Register(callback, func(*gorm.DB) { queries.Add(1) }))
+	b.Cleanup(func() { db.Callback().Query().Remove(callback) })
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		if _, err := service.ReadEnabledUpstreamChannel(context.Background(), info.ChannelId); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.ReportMetric(float64(queries.Load())/float64(b.N), "sql/op")
 }
 
 func TestUpstreamBudgetHTTPAttemptsAndPermissions(t *testing.T) {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"sync"
@@ -18,6 +19,20 @@ import (
 
 const UpstreamBudgetManagedKey = "upstream_budget_managed_channel"
 const UpstreamBudgetProtectedKey = "upstream_budget_protected_channel"
+
+var ErrUpstreamChannelUnavailable = errors.New("upstream channel unavailable")
+
+// ReadEnabledUpstreamChannel checks the authoritative row at the final send
+// boundary. Selection snapshots and budget flags cannot authorize dispatch.
+func ReadEnabledUpstreamChannel(ctx context.Context, channelID int) (model.Channel, error) {
+	var channel model.Channel
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if channelID <= 0 || model.DB == nil || model.DB.WithContext(ctx).Select("id", "status", "upstream_budget_enabled").First(&channel, channelID).Error != nil || channel.Status != common.ChannelStatusEnabled {
+		return channel, ErrUpstreamChannelUnavailable
+	}
+	return channel, nil
+}
 
 type UpstreamBudgetAttempt struct {
 	id   string
@@ -67,23 +82,17 @@ func (a *UpstreamBudgetAttempt) BindResponse(resp *http.Response) {
 }
 
 // BeginUpstreamBudget is called on each FINAL outbound attempt, after mapping
-// and parameter overrides. Only the existing managed OpenAI text pilot opts in.
+// and parameter overrides. Every channel is checked even without a budget.
 // A declared ceiling is financial configuration, never an observed invoice.
 func BeginUpstreamBudget(c *gin.Context, req *http.Request, channelID, channelType int) (*UpstreamBudgetAttempt, error) {
-	if !c.GetBool(UpstreamBudgetManagedKey) && !c.GetBool(UpstreamBudgetProtectedKey) {
-		return nil, nil
-	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
 	defer cancel()
-	var channel model.Channel
-	if model.DB == nil || model.DB.WithContext(ctx).Select("id", "status", "upstream_budget_enabled").First(&channel, channelID).Error != nil {
-		return nil, model.ErrUpstreamBudget
+	channel, err := ReadEnabledUpstreamChannel(ctx, channelID)
+	if err != nil {
+		return nil, err
 	}
 	if !channel.UpstreamBudgetEnabled {
 		return nil, nil
-	}
-	if channel.Status != common.ChannelStatusEnabled {
-		return nil, model.ErrUpstreamBudget
 	}
 	var p model.UpstreamBudget
 	if model.DB.WithContext(ctx).First(&p, "channel_id = ?", channelID).Error != nil || !p.Enabled || !p.CeilingConfirmed || len(p.CostBasisHash) != 64 || p.ValidUntil <= time.Now().Unix() || p.MaxRequestBytes < 1 || p.MaxRequestBytes > 1<<20 || p.MaxOutputTokens < 1 || p.MaxOutputTokens > 32768 {
