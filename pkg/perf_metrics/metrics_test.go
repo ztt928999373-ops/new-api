@@ -12,6 +12,7 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/bytedance/gopkg/util/gopool"
 	"github.com/samber/lo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -119,7 +120,12 @@ func TestRecentHistoryRejectsOversizedModelLists(t *testing.T) {
 // token throughput only for successful tasks that report tokens.
 func TestRecordTaskResultSamplesTerminalTasks(t *testing.T) {
 	hotBuckets.Clear()
-	t.Cleanup(func() { hotBuckets.Clear() })
+	t.Cleanup(func() {
+		// Record returns before recordRedis; join its work before another
+		// fixture changes global Redis state or clears shared buckets.
+		require.Eventually(t, func() bool { return gopool.WorkerCount() == 0 }, 5*time.Second, time.Millisecond, "performance samples did not drain before fixture cleanup")
+		hotBuckets.Clear()
+	})
 	now := time.Now().Unix()
 	RecordTaskResult(&model.Task{
 		Status:     model.TaskStatusSuccess,
