@@ -97,3 +97,24 @@ Legacy 对照仍为 1 次。HTTP 端到端普通、SSE、轮换、并发等 12 �
 本地扩大后的预算/账单/渠道配置/试点定向 race：195 个含父子测试 PASS，0 FAIL / SKIPPED；vet/build PASS。
 `BenchmarkUpstreamBudgetFinalChannelRead`（合成 SQLite、200ms）为 84,119 ns/op、1 sql/op、7,324 B/op、93 allocs/op；
 没有生产或真实供应商延迟基准，不声称性能零影响。整套后端 race 仍为本轮 NOT_RUN。
+
+## PR #49 合并后竞态分类（2026-11-16）
+
+未修改基线 `20c94c8e2bd588d509e90ead484be2d67b944a58`：合并后
+[前后端 CI](https://github.com/ztt928999373-ops/new-api/actions/runs/43842147958)、
+[三数据库安全专项](https://github.com/ztt928999373-ops/new-api/actions/runs/43842147990) PASS。
+本地受管百炼 HTTP/WS 出站均0次、正常对照1次；原有失败关闭未回归。
+
+| 包 | 基线动态证据及分类 | 本批范围 |
+| --- | --- | --- |
+| controller | `go test -json -race -count=3 ./controller -run '^TestPreConsumePolicyDatabaseMatrix$'` FAIL；modelManagementDB 清理恢复 RedisEnabled，与 IncreaseUserQuota 的异步 cacheIncrUserQuota 读冲突。异步清理/全局状态污染，影响资金安全测试可信度 | 优先修复夹具生命周期，不改资金代码 |
+| pkg/perf_metrics | `go test -json -race -count=3 ./pkg/perf_metrics` FAIL；RecordTaskResult 产生的异步 recordRedis 未结束，后续聚合夹具写 RedisEnabled | 待修，FAIL |
+| relay/channel/gemini | `go test -json -race -count=3 ./relay/channel/gemini ./relay/channel/minimax` 中 Gemini FAIL；并行测试 SetMode 与 SetMode/Mode 读写冲突 | 待修，FAIL |
+| relay/channel/minimax | 上述3次运行未触发；`go test -json -race -count=10 ./relay/channel/minimax` FAIL；并行测试 SetMode/Mode 冲突 | 待修，FAIL |
+| service | `go test -json -race -count=3 ./service -run '^TestUpdateVideoTasksSlowChannelDoesNotBlockOtherChannels$'` FAIL；Eventually 回调 GetUpstreamTaskID 读取 Task.PrivateData，同时轮询 GORM UpdateWithStatus 写相同对象。测试并发观察可变输入 | 待修，FAIL |
+
+本轮观察到的冲突均涉及测试夹具、测试观察或跨测试清理；这些证据不能认定生产请求也在并发修改相同全局变量，
+也不能证明生产完全没有竞态。没有为了凑生产修复而修改资金、轮询或遥测逻辑。
+controller 的未修改调用栈为：`modelManagementDB.func1 (model_management_test.go:86)` 写，
+与 `model.cacheIncrUserQuota (user_cache.go:144) ← IncreaseUserQuota.func2 ← WalletFunding.Settle ← BillingSession.Settle`
+读冲突。重复失败日志在修改前保存；即使某次单跑 PASS，也不将仍可复现的失败包记为已解决。
