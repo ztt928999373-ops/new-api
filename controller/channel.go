@@ -272,8 +272,10 @@ func GetAllChannels(c *gin.Context) {
 		return
 	}
 
-	for _, datum := range channelData {
-		clearChannelInfo(datum)
+	responseItems, err := channelReadDTOs(c, channelData)
+	if err != nil {
+		common.ApiError(c, err)
+		return
 	}
 
 	countQuery := buildChannelListQuery(groupFilter, statusFilter, -1)
@@ -291,7 +293,7 @@ func GetAllChannels(c *gin.Context) {
 		typeCounts[r.Type] = r.Count
 	}
 	common.ApiSuccess(c, gin.H{
-		"items":       channelData,
+		"items":       responseItems,
 		"total":       total,
 		"page":        pageInfo.GetPage(),
 		"page_size":   pageInfo.GetPageSize(),
@@ -467,15 +469,17 @@ func SearchChannels(c *gin.Context) {
 
 	pagedData := channelData[startIdx:endIdx]
 
-	for _, datum := range pagedData {
-		clearChannelInfo(datum)
+	responseItems, err := channelReadDTOs(c, pagedData)
+	if err != nil {
+		common.ApiError(c, err)
+		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
 		"data": gin.H{
-			"items":       pagedData,
+			"items":       responseItems,
 			"total":       total,
 			"type_counts": typeCounts,
 		},
@@ -494,13 +498,15 @@ func GetChannel(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	if channel != nil {
-		clearChannelInfo(channel)
+	response, err := channelReadDTO(c, channel)
+	if err != nil {
+		common.ApiError(c, err)
+		return
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
-		"data":    channel,
+		"data":    response,
 	})
 	return
 }
@@ -1120,6 +1126,25 @@ func UpdateChannel(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	if redacted, _ := requestData["sensitive_fields_redacted"].(bool); redacted {
+		for field := range channelSensitiveFields {
+			if field != "type" {
+				delete(requestData, field)
+			}
+		}
+		delete(requestData, "sensitive_fields_redacted")
+		data, marshalErr := common.Marshal(requestData)
+		if marshalErr != nil {
+			common.ApiError(c, marshalErr)
+			return
+		}
+		channel = PatchChannel{}
+		if err := common.Unmarshal(data, &channel); err != nil {
+			common.ApiError(c, err)
+			return
+		}
+	}
+	delete(requestData, "sensitive_fields_redacted")
 	if _, ok := requestData["status"]; ok {
 		common.ApiErrorT(c, "Invalid parameters")
 		return
@@ -1147,6 +1172,9 @@ func UpdateChannel(c *gin.Context) {
 	if err != nil {
 		common.ApiError(c, err)
 		return
+	}
+	if _, provided := requestData["type"]; !provided {
+		channel.Type = originChannel.Type
 	}
 	originProxy := originChannel.GetSetting().Proxy
 	if (originChannel.Type == constant.ChannelTypeOpenAI || channel.Type == constant.ChannelTypeOpenAI) &&
@@ -1303,11 +1331,15 @@ func UpdateChannel(c *gin.Context) {
 	}
 	recordManageAudit(c, "channel.update", updateAudit)
 	channel.Key = ""
-	clearChannelInfo(&channel.Channel)
+	response, err := channelReadDTO(c, &channel.Channel)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
-		"data":    channel,
+		"data":    response,
 	})
 	return
 }
