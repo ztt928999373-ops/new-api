@@ -548,9 +548,15 @@ func TestUpdateVideoTasksSlowChannelDoesNotBlockOtherChannels(t *testing.T) {
 	fastFirst := seedPollingTask(t, fastChannelID, "task_public_fast_1", "upstream_fast_parallel_1")
 	fastSecond := seedPollingTask(t, fastChannelID, "task_public_fast_2", "upstream_fast_parallel_2")
 
+	// The poller mutates these Task objects while persisting status. Observe
+	// immutable IDs in this test instead of reading their shared PrivateData.
+	slowID := slowTask.GetUpstreamTaskID()
+	fastFirstID := fastFirst.GetUpstreamTaskID()
+	fastSecondID := fastSecond.GetUpstreamTaskID()
+
 	adaptor := &taskPollingFetchAdaptor{
 		fetched:      make(chan string, 4),
-		blockTaskID:  slowTask.GetUpstreamTaskID(),
+		blockTaskID:  slowID,
 		blockStarted: make(chan struct{}),
 		releaseBlock: make(chan struct{}),
 	}
@@ -560,26 +566,37 @@ func TestUpdateVideoTasksSlowChannelDoesNotBlockOtherChannels(t *testing.T) {
 			close(adaptor.releaseBlock)
 		})
 	}
-	t.Cleanup(releaseBlockedTask)
 	previousFactory := GetTaskAdaptorFunc
 	GetTaskAdaptorFunc = func(constant.TaskPlatform) TaskPollingAdaptor { return adaptor }
 	t.Cleanup(func() { GetTaskAdaptorFunc = previousFactory })
 
 	errCh := make(chan error, 1)
+	pollingDone := make(chan struct{})
 	gopool.Go(func() {
+		defer close(pollingDone)
 		errCh <- UpdateVideoTasks(context.Background(), constant.TaskPlatform("kling"), map[int][]string{
 			slowChannelID: {
-				slowTask.GetUpstreamTaskID(),
+				slowID,
 			},
 			fastChannelID: {
-				fastFirst.GetUpstreamTaskID(),
-				fastSecond.GetUpstreamTaskID(),
+				fastFirstID,
+				fastSecondID,
 			},
 		}, map[string]*model.Task{
-			slowTask.GetUpstreamTaskID():   slowTask,
-			fastFirst.GetUpstreamTaskID():  fastFirst,
-			fastSecond.GetUpstreamTaskID(): fastSecond,
+			slowID:       slowTask,
+			fastFirstID:  fastFirst,
+			fastSecondID: fastSecond,
 		})
+	})
+
+	// Run before the adaptor factory is restored, including fatal assertions.
+	t.Cleanup(func() {
+		releaseBlockedTask()
+		select {
+		case <-pollingDone:
+		case <-time.After(5 * time.Second):
+			t.Error("polling did not finish before fixture cleanup")
+		}
 	})
 
 	select {
@@ -591,12 +608,13 @@ func TestUpdateVideoTasksSlowChannelDoesNotBlockOtherChannels(t *testing.T) {
 	require.Eventually(t, func() bool {
 		fetchedTaskIDs := adaptor.fetchedTaskIDs()
 		return len(fetchedTaskIDs) == 2 &&
-			fetchedTaskIDs[0] == fastFirst.GetUpstreamTaskID() &&
-			fetchedTaskIDs[1] == fastSecond.GetUpstreamTaskID()
+			fetchedTaskIDs[0] == fastFirstID &&
+			fetchedTaskIDs[1] == fastSecondID
 	}, 500*time.Millisecond, 10*time.Millisecond)
 
 	releaseBlockedTask()
 	require.NoError(t, <-errCh)
+	<-pollingDone
 	assert.ElementsMatch(t, []string{
 		slowTask.GetUpstreamTaskID(),
 		fastFirst.GetUpstreamTaskID(),
