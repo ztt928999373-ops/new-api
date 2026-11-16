@@ -59,6 +59,9 @@ jobs:
           go test -json -race -count=1 ./router -run '^(TestOpenAIPilotAuthenticatedSettlement|TestBailianPilotAuthenticatedSettlement)$' > "$RUNNER_TEMP/v1-security/upstream-error-redaction.jsonl"
           go test -json -race -count=1 ./router -run '^TestPasswordLoginFailureAudit' > "$RUNNER_TEMP/v1-security/login-audit.jsonl"
           go test -json -race -count=1 ./middleware -run '^TestDashboardDenialAudit' > "$RUNNER_TEMP/v1-security/denial-audit.jsonl"
+          TEST_MYSQL_DSN='root:synthetic-test-only@tcp(127.0.0.1:23316)/credential_test?parseTime=true' \
+            TEST_POSTGRES_DSN='postgres://postgres:synthetic-test-only@127.0.0.1:25436/credential_test?sslmode=disable' \
+            go test -json -race -count=3 ./controller -run '^TestPreConsumePolicyDatabaseMatrix$' > "$RUNNER_TEMP/v1-security/model-fixture-lifecycle.jsonl"
           go test -json -race -count=1 ./model -run '^TestOverallChannelStatusIndependentOfCredentials$' > "$RUNNER_TEMP/v1-security/channel-status.jsonl"
           go test -json -race -count=1 ./model -run '^TestTokenRevocation' > "$RUNNER_TEMP/v1-security/token-revocation.jsonl"
           go test -json -race -count=1 ./service/credentials > "$RUNNER_TEMP/v1-security/credentials.jsonl"

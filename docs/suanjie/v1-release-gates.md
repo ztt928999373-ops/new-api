@@ -118,3 +118,10 @@ Legacy 对照仍为 1 次。HTTP 端到端普通、SSE、轮换、并发等 12 �
 controller 的未修改调用栈为：`modelManagementDB.func1 (model_management_test.go:86)` 写，
 与 `model.cacheIncrUserQuota (user_cache.go:144) ← IncreaseUserQuota.func2 ← WalletFunding.Settle ← BillingSession.Settle`
 读冲突。重复失败日志在修改前保存；即使某次单跑 PASS，也不将仍可复现的失败包记为已解决。
+
+本批最小修复仅在 modelManagementDB 清理入口等待 gopool 工作结束，然后才恢复全局设置/关闭数据库；
+超时会使测试失败，不以 sleep、跳过或删断言制造通过。钱包和商业计费生产代码均未修改。
+SQLite/MySQL/PostgreSQL 的同一定向 race 各重复3次，共102个含父子测试 PASS，0 FAIL / SKIPPED、0 race；
+本地 controller vet PASS。第一次 PostgreSQL 验证因 DSN 使用 host 格式，被既有 loopback URL 检查拒绝；
+该次保留 FAIL，改用支持的 postgres://127.0.0.1 URL 后完整重跑通过，未放宽安全检查。
+安全 CI 增加同一个三数据库定向 race，后续不依赖偶然一次通过。其他四包保持已复现 FAIL，本批不修复。
