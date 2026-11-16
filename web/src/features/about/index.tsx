@@ -21,6 +21,7 @@ import { Construction } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
 import { PublicLayout } from '@/components/layout'
+import { Footer } from '@/components/layout/components/footer'
 import { RichContent } from '@/components/rich-content'
 import { Skeleton } from '@/components/ui/skeleton'
 import { isHttpUrl, isLikelyHtml } from '@/lib/content-format'
@@ -134,6 +135,7 @@ export function About() {
           <Skeleton className='h-4 w-[90%]' />
           <Skeleton className='h-4 w-[80%]' />
         </div>
+        <Footer />
       </PublicLayout>
     )
   }
@@ -142,6 +144,7 @@ export function About() {
     return (
       <PublicLayout>
         <EmptyAboutState />
+        <Footer />
       </PublicLayout>
     )
   }
@@ -155,6 +158,7 @@ export function About() {
           title={t('About')}
           sandbox='allow-forms allow-popups allow-popups-to-escape-sandbox allow-scripts'
         />
+        <Footer />
       </PublicLayout>
     )
   }
@@ -162,12 +166,15 @@ export function About() {
   if (contentIsHtml) {
     return (
       <PublicLayout showMainContainer={false}>
-        <RichContent
-          mode='html'
-          htmlVariant='isolated'
-          content={rawContent}
-          className='prose-neutral dark:prose-invert max-w-none'
-        />
+        <div className='[contain:layout_paint]'>
+          <RichContent
+            mode='html'
+            htmlVariant='isolated'
+            content={rawContent}
+            className='prose-neutral dark:prose-invert max-w-none'
+          />
+        </div>
+        <Footer />
       </PublicLayout>
     )
   }
@@ -181,6 +188,7 @@ export function About() {
           className='prose-neutral dark:prose-invert max-w-none'
         />
       </div>
+      <Footer />
     </PublicLayout>
   )
 }
