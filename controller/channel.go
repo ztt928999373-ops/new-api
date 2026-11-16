@@ -272,8 +272,10 @@ func GetAllChannels(c *gin.Context) {
 		return
 	}
 
-	for _, datum := range channelData {
-		clearChannelInfo(datum)
+	responseItems, err := channelReadDTOs(c, channelData)
+	if err != nil {
+		common.ApiError(c, err)
+		return
 	}
 
 	countQuery := buildChannelListQuery(groupFilter, statusFilter, -1)
@@ -291,7 +293,7 @@ func GetAllChannels(c *gin.Context) {
 		typeCounts[r.Type] = r.Count
 	}
 	common.ApiSuccess(c, gin.H{
-		"items":       channelData,
+		"items":       responseItems,
 		"total":       total,
 		"page":        pageInfo.GetPage(),
 		"page_size":   pageInfo.GetPageSize(),
@@ -467,15 +469,17 @@ func SearchChannels(c *gin.Context) {
 
 	pagedData := channelData[startIdx:endIdx]
 
-	for _, datum := range pagedData {
-		clearChannelInfo(datum)
+	responseItems, err := channelReadDTOs(c, pagedData)
+	if err != nil {
+		common.ApiError(c, err)
+		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
 		"data": gin.H{
-			"items":       pagedData,
+			"items":       responseItems,
 			"total":       total,
 			"type_counts": typeCounts,
 		},
@@ -494,13 +498,15 @@ func GetChannel(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
-	if channel != nil {
-		clearChannelInfo(channel)
+	response, err := channelReadDTO(c, channel)
+	if err != nil {
+		common.ApiError(c, err)
+		return
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
-		"data":    channel,
+		"data":    response,
 	})
 	return
 }
@@ -1120,11 +1126,44 @@ func UpdateChannel(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	// The marker protects stale redacted snapshots; the permission check also
+	// protects hidden configuration when a client omits or forges that marker.
+	if redacted, _ := requestData["sensitive_fields_redacted"].(bool); redacted ||
+		!authz.Can(c.GetInt("id"), c.GetInt("role"), authz.ChannelSecretView) {
+		for field := range requestData {
+			// JSON struct decoding accepts case-insensitive field names.
+			if _, sensitive := channelSensitiveFields[strings.ToLower(field)]; sensitive {
+				delete(requestData, field)
+			}
+		}
+		delete(requestData, "sensitive_fields_redacted")
+		data, marshalErr := common.Marshal(requestData)
+		if marshalErr != nil {
+			common.ApiError(c, marshalErr)
+			return
+		}
+		channel = PatchChannel{}
+		if err := common.Unmarshal(data, &channel); err != nil {
+			common.ApiError(c, err)
+			return
+		}
+	}
+	delete(requestData, "sensitive_fields_redacted")
 	if _, ok := requestData["status"]; ok {
 		common.ApiErrorT(c, "Invalid parameters")
 		return
 	}
 	clearChannelReadOnlyFields(&channel, requestData)
+
+	// Resolve the stored type before permissions and type-specific validation.
+	originChannel, err := model.GetChannelById(channel.Id, true)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if _, provided := requestData["type"]; !provided {
+		channel.Type = originChannel.Type
+	}
 
 	if channel.Type == constant.ChannelTypeTaskPlugin &&
 		!authz.Can(c.GetInt("id"), c.GetInt("role"), authz.TaskPluginBind) {
@@ -1135,18 +1174,38 @@ func UpdateChannel(c *gin.Context) {
 		return
 	}
 
-	baseURLFromPluginDefault := channel.Type == constant.ChannelTypeTaskPlugin &&
-		(channel.BaseURL == nil || strings.TrimSpace(*channel.BaseURL) == "")
-	// 使用统一的校验函数
-	if err := validateChannel(&channel.Channel, false); err != nil {
-		common.ApiError(c, err)
-		return
-	}
-	// Preserve existing ChannelInfo to ensure multi-key channels keep correct state even if the client does not send ChannelInfo in the request.
-	originChannel, err := model.GetChannelById(channel.Id, true)
+	// Validate the effective configuration, not the partial edit. Keep this
+	// separate from the persisted patch so omitted secrets are never rewritten.
+	var validation model.Channel
+	originData, err := common.Marshal(originChannel)
 	if err != nil {
 		common.ApiError(c, err)
 		return
+	}
+	if err := common.Unmarshal(originData, &validation); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	validationData, err := common.Marshal(requestData)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	if err := common.Unmarshal(validationData, &validation); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	validation.Type = channel.Type
+	baseURLFromPluginDefault := validation.Type == constant.ChannelTypeTaskPlugin &&
+		(validation.BaseURL == nil || strings.TrimSpace(*validation.BaseURL) == "")
+	if err := validateChannel(&validation, false); err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	_, baseURLProvided := requestData["base_url"]
+	baseURLFromPluginDefault = baseURLFromPluginDefault && (baseURLProvided || channel.Type != originChannel.Type)
+	if baseURLFromPluginDefault {
+		channel.BaseURL = validation.BaseURL
 	}
 	originProxy := originChannel.GetSetting().Proxy
 	if (originChannel.Type == constant.ChannelTypeOpenAI || channel.Type == constant.ChannelTypeOpenAI) &&
@@ -1303,11 +1362,15 @@ func UpdateChannel(c *gin.Context) {
 	}
 	recordManageAudit(c, "channel.update", updateAudit)
 	channel.Key = ""
-	clearChannelInfo(&channel.Channel)
+	response, err := channelReadDTO(c, &channel.Channel)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
 		"message": "",
-		"data":    channel,
+		"data":    response,
 	})
 	return
 }

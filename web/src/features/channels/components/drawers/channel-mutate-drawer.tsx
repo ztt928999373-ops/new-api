@@ -416,6 +416,11 @@ export function ChannelMutateDrawer({
     ADMIN_PERMISSION_RESOURCES.CHANNEL,
     ADMIN_PERMISSION_ACTIONS.SENSITIVE_WRITE
   )
+  const canReadSensitive = hasPermission(
+    currentUser,
+    ADMIN_PERMISSION_RESOURCES.CHANNEL,
+    ADMIN_PERMISSION_ACTIONS.SECRET_VIEW
+  )
   const canOperateChannel = hasPermission(
     currentUser,
     ADMIN_PERMISSION_RESOURCES.CHANNEL,
@@ -468,7 +473,6 @@ export function ChannelMutateDrawer({
     setDrawerSide(requestedSide)
   }
   const channelId = currentRow?.id ?? null
-  const sensitiveLocked = isEditing && !canEditSensitive
   const [providerTarget, setProviderTarget] =
     useState<ChannelProviderTarget | null>(null)
   const [choosingProvider, setChoosingProvider] = useState(true)
@@ -539,6 +543,12 @@ export function ChannelMutateDrawer({
     enabled: open && isEditing && Boolean(channelId),
     meta: { errorToast: false },
   })
+  const sensitiveLocked =
+    isEditing &&
+    (!canEditSensitive ||
+      !canReadSensitive ||
+      (channelData?.data ?? currentRow)?.sensitive_fields_redacted === true)
+
 
   // Fetch available groups
   const { data: groupsData, isLoading: isLoadingGroups } = useQuery({
@@ -1595,7 +1605,7 @@ export function ChannelMutateDrawer({
   }, [])
 
   const channelMutation = useChannelMutateForm({
-    currentRow,
+    currentRow: channelData?.data ?? currentRow,
     isEditing,
     isMultiKeyChannel,
     onSuccess: handleSuccess,

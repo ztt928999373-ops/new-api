@@ -1,6 +1,13 @@
 package controller
 
-import "github.com/QuantumNous/new-api/model"
+import (
+	"encoding/json"
+
+	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/service/authz"
+	"github.com/gin-gonic/gin"
+)
 
 func channelHasSensitiveChanges(channel *PatchChannel, origin *model.Channel, requestData map[string]any) bool {
 	if _, ok := requestData["type"]; ok && channel.Type != origin.Type {
@@ -133,4 +140,48 @@ var channelNonSensitiveFields = map[string]struct{}{
 	"remark":              {},
 	"channel_info":        {},
 	"multi_key_mode":      {},
+}
+
+// channelReadDTO uses a response copy and a public field allowlist. Opaque
+// historical config is never classified by guessing secret names or formats.
+func channelReadDTO(c *gin.Context, channel *model.Channel) (map[string]json.RawMessage, error) {
+	c.Header("Cache-Control", "no-store")
+	copy := *channel
+	copy.Key = ""
+	clearChannelInfo(&copy)
+	copy.ChannelInfo.MultiKeyDisabledReason = nil
+	copy.ChannelInfo.MultiKeyDisabledTime = nil
+	data, err := common.Marshal(copy)
+	if err != nil {
+		return nil, err
+	}
+	var fields map[string]json.RawMessage
+	if err = common.Unmarshal(data, &fields); err != nil {
+		return nil, err
+	}
+	sensitive := authz.Can(c.GetInt("id"), c.GetInt("role"), authz.ChannelSecretView)
+	if !sensitive {
+		for field := range fields {
+			_, routing := channelNonSensitiveFields[field]
+			_, readonly := channelReadOnlyFields[field]
+			_, operational := channelOperationalFields[field]
+			if field == "other_info" || (!routing && !readonly && !operational && field != "type" && field != "key") {
+				delete(fields, field)
+			}
+		}
+	}
+	fields["sensitive_fields_redacted"], err = common.Marshal(!sensitive)
+	return fields, err
+}
+
+func channelReadDTOs(c *gin.Context, channels []*model.Channel) ([]map[string]json.RawMessage, error) {
+	result := make([]map[string]json.RawMessage, 0, len(channels))
+	for _, channel := range channels {
+		item, err := channelReadDTO(c, channel)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, item)
+	}
+	return result, nil
 }

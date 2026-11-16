@@ -76,7 +76,9 @@ export function useChannelMutateForm(props: UseChannelMutateFormParams) {
         if (!data.key?.trim()) {
           delete payload.key
         }
-        if (!canEditSensitive) {
+        payload.sensitive_fields_redacted =
+          props.currentRow.sensitive_fields_redacted
+        if (!canEditSensitive || props.currentRow.sensitive_fields_redacted) {
           for (const field of SENSITIVE_UPDATE_FIELDS) {
             delete payload[field]
           }

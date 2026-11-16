@@ -14,6 +14,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/service/authz"
 	"github.com/QuantumNous/new-api/service/credentials"
@@ -292,6 +293,258 @@ func TestChannelKeySecurityDatabaseMatrix(t *testing.T) {
 				assert.NotContains(t, version.Envelope, "synthetic-slot-one")
 			}
 			assert.Equal(t, constant.ChannelTypeOpenAI, ch.Type)
+		})
+	}
+}
+
+// TestChannelKeySecurityConfigReadDatabaseMatrix follows real management routes
+// with synthetic historical configs; ChannelRead must not imply secret_view.
+func TestChannelKeySecurityConfigReadDatabaseMatrix(t *testing.T) {
+	for _, kind := range []string{"sqlite", "mysql", "postgres"} {
+		t.Run(kind, func(t *testing.T) {
+			db := setupUpstreamBudgetDB(t, kind)
+			require.NoError(t, db.AutoMigrate(&model.User{}, &model.UserSession{}, &model.UserAccessToken{}, &model.AuditLog{}, &model.Option{}, &model.Ability{}, &model.CasbinRule{}, &model.AuthzRole{}))
+			if kind == "postgres" {
+				t.Setenv("SQL_DSN", "postgres://postgres:synthetic-test-only@127.0.0.1:25436/credential_test?sslmode=disable")
+				require.NoError(t, model.OpenPreparedDB())
+				conn, err := model.DB.DB()
+				require.NoError(t, err)
+				require.NoError(t, conn.Close())
+				model.DB = db
+			}
+
+			oldMaster, oldSecret, oldMemory := common.IsMasterNode, common.SessionSecret, common.MemoryCacheEnabled
+			common.IsMasterNode, common.SessionSecret, common.MemoryCacheEnabled = true, "synthetic-config-read-session", false
+			require.NoError(t, authz.Init(db))
+			t.Cleanup(func() {
+				common.IsMasterNode, common.SessionSecret, common.MemoryCacheEnabled = oldMaster, oldSecret, oldMemory
+			})
+			tokens := map[string]string{}
+			users := map[string]model.User{}
+			for _, name := range []string{"admin", "reader", "writer", "root", "user"} {
+				role := common.RoleAdminUser
+				if name == "root" {
+					role = common.RoleRootUser
+				}
+				if name == "user" {
+					role = common.RoleCommonUser
+				}
+				u := model.User{Username: "synthetic-config-" + name, Role: role, Status: 1, AuthVersion: 1, Group: "default", AffCode: "config-" + name}
+				require.NoError(t, db.Create(&u).Error)
+				t.Cleanup(func() { db.Delete(&u) })
+				login, err := service.CreateLoginSession(u.Id, "synthetic", "127.0.0.1", "synthetic")
+				require.NoError(t, err)
+				users[name] = u
+				tokens[name] = login.AccessToken
+			}
+			require.NoError(t, authz.SetUserPermissions(users["reader"].Id, authz.PermissionsMap{authz.ResourceChannel: {authz.ActionSecretView: true}}))
+			require.NoError(t, authz.SetUserPermissions(users["writer"].Id, authz.PermissionsMap{authz.ResourceChannel: {authz.ActionSensitiveWrite: true, authz.ActionSecretView: false}}))
+			engine := gin.New()
+			registerChannelRoutes(engine.Group("/api"))
+			request := func(actor, method, path string, body any) *httptest.ResponseRecorder {
+				data, err := common.Marshal(body)
+				require.NoError(t, err)
+				r := httptest.NewRequest(method, path, strings.NewReader(string(data)))
+				r.Header.Set("Content-Type", "application/json")
+				if actor != "" {
+					r.Header.Set("Authorization", "Bearer "+tokens[actor])
+				}
+				w := httptest.NewRecorder()
+				engine.ServeHTTP(w, r)
+				return w
+			}
+			for _, managed := range []bool{false, true} {
+				label := fmt.Sprintf("historical-config-%t", managed)
+				header := `{"X-Custom-Auth":"synthetic-config-header"}`
+				setting := `{"proxy":"http://user:synthetic-proxy-password@proxy.invalid:8080","opaque":"synthetic-config-setting"}`
+				param := `{"opaque":"synthetic-config-param"}`
+				base := "https://provider.invalid/synthetic-base-credential"
+				org := "synthetic-config-organization"
+				tag := label
+				ch := model.Channel{Name: label, Type: constant.ChannelTypeAnthropic, Key: "synthetic-config-key", Status: 1, Models: "synthetic-model", Group: "default", Tag: &tag, BaseURL: &base, OpenAIOrganization: &org, HeaderOverride: &header, ParamOverride: &param, Setting: &setting, Other: "synthetic-config-other", OtherSettings: `{"opaque":"synthetic-config-settings"}`, OtherInfo: `{"status_reason":"synthetic-config-diagnostic"}`}
+				ch.ChannelInfo.MultiKeyDisabledReason = map[int]string{0: "synthetic-stale-slot-reason"}
+				if managed {
+					ch.CredentialRef = "synthetic-config-reference"
+					ch.Key = ""
+				}
+				require.NoError(t, db.Create(&ch).Error)
+				t.Cleanup(func() { db.Delete(&ch); db.Where("channel_id = ?", ch.Id).Delete(&model.Ability{}) })
+				markers := []string{"synthetic-config-header", "synthetic-proxy-password", "synthetic-config-setting", "synthetic-config-param", "synthetic-base-credential", "synthetic-config-organization", "synthetic-config-other", "synthetic-config-diagnostic"}
+				for _, actor := range []string{"admin", "writer", "reader", "root"} {
+					for _, path := range []string{fmt.Sprintf("/api/channel/%d", ch.Id), "/api/channel/?page_size=100", "/api/channel/?tag_mode=true&page_size=100", "/api/channel/search?keyword=" + label, "/api/channel/search?tag_mode=true&keyword=" + label} {
+						w := request(actor, "GET", path, nil)
+						require.Equal(t, 200, w.Code, "actor=%s path=%s body=%s", actor, path, w.Body.String())
+						var result map[string]any
+						require.NoError(t, common.Unmarshal(w.Body.Bytes(), &result))
+						require.Equal(t, true, result["success"], w.Body.String())
+						require.Equal(t, "no-store", w.Header().Get("Cache-Control"))
+						assert.NotContains(t, w.Body.String(), "synthetic-stale-slot-reason")
+						visible := actor == "reader" || actor == "root"
+						leaked := 0
+						for _, secret := range markers {
+							if strings.Contains(w.Body.String(), secret) {
+								leaked++
+							}
+							if visible {
+								assert.Contains(t, w.Body.String(), secret)
+							} else {
+								assert.NotContains(t, w.Body.String(), secret)
+							}
+						}
+						assert.NotContains(t, w.Body.String(), "synthetic-config-key")
+						t.Logf("database=%s managed=%t actor=%s path=%s visible_sensitive_markers=%d authorized=%t", kind, managed, actor, path, leaked, visible)
+					}
+				}
+				// A normal routing edit omits secret fields, and must leave their DB values intact.
+				w := request("admin", "PUT", "/api/channel/", map[string]any{"id": ch.Id, "type": ch.Type, "name": label + "-renamed", "models": ch.Models, "group": ch.Group})
+				var updated map[string]any
+				require.NoError(t, common.Unmarshal(w.Body.Bytes(), &updated))
+				if managed {
+					require.Equal(t, http.StatusServiceUnavailable, w.Code)
+				} else {
+					require.Equal(t, true, updated["success"], w.Body.String())
+				}
+				assert.NotContains(t, w.Body.String(), "synthetic-config-header")
+				var after model.Channel
+				require.NoError(t, db.First(&after, ch.Id).Error)
+				assert.Equal(t, ch.HeaderOverride, after.HeaderOverride)
+				assert.Equal(t, ch.Setting, after.Setting)
+				assert.Equal(t, ch.OtherSettings, after.OtherSettings)
+				assert.Equal(t, ch.Key, after.Key)
+				if !managed {
+					read := request("admin", "GET", fmt.Sprintf("/api/channel/%d", ch.Id), nil)
+					var envelope struct {
+						Data map[string]any `json:"data"`
+					}
+					require.NoError(t, common.Unmarshal(read.Body.Bytes(), &envelope))
+					snapshot := envelope.Data
+					delete(snapshot, "status")
+					snapshot["name"] = label + "-snapshot"
+					snapshot["setting"] = "{}"
+					snapshot["header_override"] = "[redacted]"
+					saved := request("root", "PUT", "/api/channel/", snapshot)
+					var result map[string]any
+					require.NoError(t, common.Unmarshal(saved.Body.Bytes(), &result))
+					require.Equal(t, true, result["success"], saved.Body.String())
+					require.NoError(t, db.First(&after, ch.Id).Error)
+					assert.Equal(t, ch.HeaderOverride, after.HeaderOverride)
+					assert.Equal(t, ch.Setting, after.Setting)
+					assert.Equal(t, ch.BaseURL, after.BaseURL)
+					replacement := `{"X-Custom-Auth":"synthetic-authorized-replacement"}`
+					saved = request("root", "PUT", "/api/channel/", map[string]any{"id": ch.Id, "type": ch.Type, "header_override": replacement})
+					require.NoError(t, common.Unmarshal(saved.Body.Bytes(), &result))
+					require.Equal(t, true, result["success"], saved.Body.String())
+					require.NoError(t, db.First(&after, ch.Id).Error)
+					assert.Equal(t, replacement, *after.HeaderOverride)
+					assert.Contains(t, saved.Body.String(), "synthetic-authorized-replacement")
+				}
+
+				for _, actor := range []string{"", "user"} {
+					denied := request(actor, "GET", fmt.Sprintf("/api/channel/%d", ch.Id), nil)
+					assert.Contains(t, []int{401, 403}, denied.Code)
+					assert.NotContains(t, denied.Body.String(), "synthetic-config-header")
+				}
+			}
+			// Exercise the exact no-type PATCH shape produced by the redacted form.
+			source := `export const meta = {apiVersion:1,key:"pr48-patch-shape",name:"Patch fixture",version:"1.0.0",author:{name:"Test"},models:["doc"],fetchMode:"per_task"};
+export function buildSubmitRequest(){return {};}
+export function parseSubmitResponse(){return {};}
+export function buildQueryRequest(){return {};}
+export function parseTaskResult(){return {};}`
+			_, err := jsplugin.DefaultRegistry.Register(source, jsplugin.Options{})
+			require.NoError(t, err)
+			t.Cleanup(func() { jsplugin.DefaultRegistry.Unregister("pr48-patch-shape") })
+			require.NoError(t, authz.SetUserPermissions(users["writer"].Id, authz.PermissionsMap{authz.ResourceTaskPlugin: {authz.ActionBind: true}}))
+			for _, kindType := range []int{constant.ChannelTypeAnthropic, constant.ChannelTypeNewAPI, constant.ChannelTypeTaskPlugin} {
+				t.Run(fmt.Sprintf("no-type-%d", kindType), func(t *testing.T) {
+					base := "https://synthetic.invalid/private-route"
+					header := `{"X-Custom-Auth":"synthetic-patch-header"}`
+					setting := `{"opaque":"synthetic-patch-setting"}`
+					if kindType == constant.ChannelTypeTaskPlugin {
+						setting = `{"task_plugin_key":"pr48-patch-shape","opaque":"synthetic-patch-setting"}`
+					}
+					original := model.Channel{Type: kindType, Name: "before-patch", Models: "doc", Group: "default", Key: "synthetic-patch-key", BaseURL: &base, HeaderOverride: &header, Setting: &setting, Status: 1}
+					require.NoError(t, db.Create(&original).Error)
+					t.Cleanup(func() { db.Delete(&original); db.Where("channel_id = ?", original.Id).Delete(&model.Ability{}) })
+					for _, actor := range []string{"root", "writer"} {
+						for _, flag := range []string{"true", "false", "omitted"} {
+							body := map[string]any{"id": original.Id, "name": "updated-" + actor + "-" + flag, "models": "doc,doc-v2"}
+							if flag != "omitted" {
+								body["sensitive_fields_redacted"] = flag == "true"
+							}
+							w := request(actor, "PUT", "/api/channel/", body)
+							var result map[string]any
+							require.NoError(t, common.Unmarshal(w.Body.Bytes(), &result))
+							assert.Equal(t, true, result["success"], "type=%d actor=%s flag=%s body=%s", kindType, actor, flag, w.Body.String())
+							if actor == "writer" {
+								assert.NotContains(t, w.Body.String(), "synthetic-patch-key")
+								assert.NotContains(t, w.Body.String(), "synthetic-patch-header")
+								assert.NotContains(t, w.Body.String(), "synthetic-patch-setting")
+							}
+							var after model.Channel
+							require.NoError(t, db.First(&after, original.Id).Error)
+							assert.Equal(t, body["name"], after.Name)
+							assert.Equal(t, "doc,doc-v2", after.Models)
+							assert.Equal(t, original.Type, after.Type)
+							assert.Equal(t, original.Key, after.Key)
+							assert.Equal(t, original.HeaderOverride, after.HeaderOverride)
+							assert.Equal(t, original.Setting, after.Setting)
+							assert.Equal(t, original.BaseURL, after.BaseURL)
+						}
+					}
+					for _, flag := range []string{"true", "false", "omitted"} {
+						body := map[string]any{"id": original.Id, "header_override": "{}", "setting": "{}", "base_url": "https://untrusted.invalid/replaced", "key": "synthetic-replacement"}
+						if flag != "omitted" {
+							body["sensitive_fields_redacted"] = flag == "true"
+						}
+						// Mixed-case JSON names must not bypass server-side filtering either.
+						for _, field := range []string{"key", "header_override", "setting", "base_url"} {
+							body[strings.ToUpper(field)] = body[field]
+						}
+						body["TYPE"] = constant.ChannelTypeAnthropic
+						_ = request("writer", "PUT", "/api/channel/", body)
+						var after model.Channel
+						require.NoError(t, db.First(&after, original.Id).Error)
+						assert.Equal(t, original.Type, after.Type, "flag=%s", flag)
+						assert.Equal(t, original.Key, after.Key, "flag=%s", flag)
+						assert.Equal(t, original.HeaderOverride, after.HeaderOverride, "flag=%s", flag)
+						assert.Equal(t, original.Setting, after.Setting, "flag=%s", flag)
+						assert.Equal(t, original.BaseURL, after.BaseURL, "flag=%s", flag)
+						// Keep cases independent when the old candidate fails this assertion.
+						require.NoError(t, db.Model(&model.Channel{}).Where("id = ?", original.Id).Updates(map[string]any{"key": original.Key, "header_override": original.HeaderOverride, "setting": original.Setting, "base_url": original.BaseURL}).Error)
+						read := request("writer", "GET", fmt.Sprintf("/api/channel/%d?sensitive_fields_redacted=%s", original.Id, flag), nil)
+						assert.NotContains(t, read.Body.String(), "synthetic-patch-key")
+						assert.NotContains(t, read.Body.String(), "synthetic-patch-header")
+						assert.NotContains(t, read.Body.String(), "synthetic-patch-setting")
+					}
+					if kindType == constant.ChannelTypeTaskPlugin {
+						w := request("admin", "PUT", "/api/channel/", map[string]any{"id": original.Id, "name": "must-not-bind-bypass", "sensitive_fields_redacted": true})
+						var result map[string]any
+						require.NoError(t, common.Unmarshal(w.Body.Bytes(), &result))
+						assert.Equal(t, false, result["success"], "omitting type must not bypass task_plugin.bind")
+					}
+					if kindType != constant.ChannelTypeAnthropic {
+						body := map[string]any{"id": original.Id, "TYPE": constant.ChannelTypeAnthropic}
+						if kindType == constant.ChannelTypeTaskPlugin {
+							body["setting"] = "{}"
+						} else {
+							body["base_url"] = ""
+						}
+						w := request("root", "PUT", "/api/channel/", body)
+						var result map[string]any
+						require.NoError(t, common.Unmarshal(w.Body.Bytes(), &result))
+						assert.Equal(t, false, result["success"], "omitting type must not bypass real type validation")
+						var after model.Channel
+						require.NoError(t, db.First(&after, original.Id).Error)
+						assert.Equal(t, original.Setting, after.Setting)
+						assert.Equal(t, original.BaseURL, after.BaseURL)
+					}
+				})
+			}
+			// Permissions are checked again even when the same login token is reused.
+			require.NoError(t, authz.SetUserPermissions(users["reader"].Id, authz.PermissionsMap{authz.ResourceChannel: {authz.ActionSecretView: false}}))
+			w := request("reader", "GET", "/api/channel/?page_size=100", nil)
+			assert.NotContains(t, w.Body.String(), "synthetic-config-header")
 		})
 	}
 }
