@@ -46,10 +46,11 @@ func testPilotAuthenticatedSettlement(t *testing.T, bailian bool) {
 	require.NoError(t, i18n.Init())
 	scenarios := []string{"ordinary", "replaced", "stream", "retry", "failure", "timeout", "interrupted", "insufficient", "invalid_token", "disabled", "revoked", "concurrent"}
 	if !bailian {
-		scenarios = append(scenarios, "legacy_failure")
+		scenarios = append(scenarios, "legacy_failure", "legacy_http_failure")
 	}
 	for _, scenario := range scenarios {
 		t.Run(scenario, func(t *testing.T) {
+			legacyFailure := scenario == "legacy_failure" || scenario == "legacy_http_failure"
 			oldDB, oldLog := model.DB, model.LOG_DB
 			t.Cleanup(func() { model.DB, model.LOG_DB = oldDB, oldLog })
 			setupRelayRouterTestDB(t)
@@ -89,6 +90,16 @@ func testPilotAuthenticatedSettlement(t *testing.T, bailian bool) {
 			if scenario == "replaced" {
 				expectedKey = "syntheticreplacedsupplier"
 			}
+			errorType := "server_error"
+			if legacyFailure {
+				errorType += "_" + expectedKey
+			}
+			failurePayload, err := common.Marshal(map[string]any{"error": map[string]any{
+				"type": errorType, "message": "synthetic failure echo " + expectedKey,
+				"param": expectedKey, "code": "synthetic_echo_" + expectedKey,
+				"metadata": map[string]any{"echo": expectedKey},
+			}})
+			require.NoError(t, err)
 			var calls atomic.Int32
 			release := make(chan struct{})
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -105,17 +116,11 @@ func testPilotAuthenticatedSettlement(t *testing.T, bailian bool) {
 					}
 					return
 				}
-				if scenario == "failure" || scenario == "legacy_failure" || (scenario == "retry" && n == 1) {
+				if scenario == "failure" || legacyFailure || (scenario == "retry" && n == 1) {
 					if scenario != "legacy_failure" {
 						w.WriteHeader(500)
 					}
-					payload, err := common.Marshal(map[string]any{"error": map[string]any{
-						"type": "server_error", "message": "synthetic failure echo " + expectedKey,
-						"param": expectedKey, "code": "synthetic_echo_" + expectedKey,
-						"metadata": map[string]any{"echo": expectedKey},
-					}})
-					require.NoError(t, err)
-					_, _ = w.Write(payload)
+					_, _ = w.Write(failurePayload)
 					return
 				}
 				if scenario == "stream" || scenario == "interrupted" {
@@ -157,7 +162,7 @@ func testPilotAuthenticatedSettlement(t *testing.T, bailian bool) {
 			previous := service.SetChannelCredentialResolver(&credentials.Resolver{Environment: "test", Repository: store, Providers: map[string]credentialcrypto.KeyProvider{"local-test": provider}, Audit: store})
 			t.Cleanup(func() { service.SetChannelCredentialResolver(previous) })
 			channel := model.Channel{Type: constant.ChannelTypeOpenAI, CredentialRef: head.ID, Name: "pilot", Status: common.ChannelStatusEnabled, BaseURL: &url, Models: "qwen3.7-flash-2026-07-15", Group: "default"}
-			if scenario == "legacy_failure" {
+			if legacyFailure {
 				// Exercise the legacy plaintext path without a managed request lease.
 				channel.CredentialRef, channel.Key = "", expectedKey
 			}
@@ -248,7 +253,7 @@ func testPilotAuthenticatedSettlement(t *testing.T, bailian bool) {
 			} else {
 				engine.ServeHTTP(w, r)
 			}
-			if scenario == "failure" || scenario == "legacy_failure" || scenario == "timeout" || (bailian && scenario == "retry") {
+			if scenario == "failure" || legacyFailure || scenario == "timeout" || (bailian && scenario == "retry") {
 				require.Eventually(t, func() bool {
 					var u model.User
 					var tok model.Token
@@ -278,7 +283,9 @@ func testPilotAuthenticatedSettlement(t *testing.T, bailian bool) {
 				require.Len(t, logs, 4)
 			}
 			require.LessOrEqual(t, len(logs), expectedRequests, "retries and stream termination must not settle twice")
-			if scenario == "legacy_failure" {
+			if legacyFailure {
+				require.Positive(t, calls.Load(), "the synthetic upstream must actually receive the request")
+				require.Contains(t, w.Body.String(), "synthetic failure echo", "retain the diagnostic message")
 				var errorLogs []model.Log
 				require.NoError(t, model.LOG_DB.Where("type = ?", model.LogTypeError).Find(&errorLogs).Error)
 				require.NotEmpty(t, errorLogs)

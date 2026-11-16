@@ -70,8 +70,8 @@ func ProcessChannelError(c *gin.Context, channelError types.ChannelError, err *t
 	}
 	// A compatible upstream can echo its Authorization value in error fields.
 	// Remove the actual request key before logging, persistence and client output.
-	value, _ := c.Get(channelRequestLeaseKey)
-	if _, managed := value.(channelRequestLease); managed && channelError.UsingKey != "" {
+	// Legacy channels carry the same request-scoped key, without a managed lease.
+	if channelError.UsingKey != "" {
 		key := channelError.UsingKey
 		err.SetMessage(strings.ReplaceAll(err.Error(), key, "[redacted]"))
 		if failure, ok := err.RelayError.(types.OpenAIError); ok {
