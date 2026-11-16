@@ -295,3 +295,115 @@ func TestChannelKeySecurityDatabaseMatrix(t *testing.T) {
 		})
 	}
 }
+
+// TestChannelKeySecurityConfigReadDatabaseMatrix follows real management routes
+// with synthetic historical configs; ChannelRead must not imply secret_view.
+func TestChannelKeySecurityConfigReadDatabaseMatrix(t *testing.T) {
+	for _, kind := range []string{"sqlite", "mysql", "postgres"} {
+		t.Run(kind, func(t *testing.T) {
+			db := setupUpstreamBudgetDB(t, kind)
+			require.NoError(t, db.AutoMigrate(&model.User{}, &model.UserSession{}, &model.UserAccessToken{}, &model.AuditLog{}, &model.Option{}, &model.Ability{}, &model.CasbinRule{}, &model.AuthzRole{}))
+			oldMaster, oldSecret, oldMemory := common.IsMasterNode, common.SessionSecret, common.MemoryCacheEnabled
+			common.IsMasterNode, common.SessionSecret, common.MemoryCacheEnabled = true, "synthetic-config-read-session", false
+			require.NoError(t, authz.Init(db))
+			t.Cleanup(func() {
+				common.IsMasterNode, common.SessionSecret, common.MemoryCacheEnabled = oldMaster, oldSecret, oldMemory
+			})
+			tokens := map[string]string{}
+			users := map[string]model.User{}
+			for _, name := range []string{"admin", "reader", "writer", "root", "user"} {
+				role := common.RoleAdminUser
+				if name == "root" {
+					role = common.RoleRootUser
+				}
+				if name == "user" {
+					role = common.RoleCommonUser
+				}
+				u := model.User{Username: "synthetic-config-" + name, Role: role, Status: 1, AuthVersion: 1, Group: "default", AffCode: "config-" + name}
+				require.NoError(t, db.Create(&u).Error)
+				t.Cleanup(func() { db.Delete(&u) })
+				login, err := service.CreateLoginSession(u.Id, "synthetic", "127.0.0.1", "synthetic")
+				require.NoError(t, err)
+				users[name] = u
+				tokens[name] = login.AccessToken
+			}
+			require.NoError(t, authz.SetUserPermissions(users["reader"].Id, authz.PermissionsMap{authz.ResourceChannel: {authz.ActionSecretView: true}}))
+			require.NoError(t, authz.SetUserPermissions(users["writer"].Id, authz.PermissionsMap{authz.ResourceChannel: {authz.ActionSensitiveWrite: true, authz.ActionSecretView: false}}))
+			engine := gin.New()
+			registerChannelRoutes(engine.Group("/api"))
+			request := func(actor, method, path string, body any) *httptest.ResponseRecorder {
+				data, err := common.Marshal(body)
+				require.NoError(t, err)
+				r := httptest.NewRequest(method, path, strings.NewReader(string(data)))
+				r.Header.Set("Content-Type", "application/json")
+				if actor != "" {
+					r.Header.Set("Authorization", "Bearer "+tokens[actor])
+				}
+				w := httptest.NewRecorder()
+				engine.ServeHTTP(w, r)
+				return w
+			}
+			for _, managed := range []bool{false, true} {
+				label := fmt.Sprintf("historical-config-%t", managed)
+				header := `{"X-Custom-Auth":"synthetic-config-header"}`
+				setting := `{"proxy":"http://user:synthetic-proxy-password@proxy.invalid:8080","opaque":"synthetic-config-setting"}`
+				param := `{"opaque":"synthetic-config-param"}`
+				base := "https://provider.invalid/synthetic-base-credential"
+				org := "synthetic-config-organization"
+				tag := label
+				ch := model.Channel{Name: label, Type: constant.ChannelTypeAnthropic, Key: "synthetic-config-key", Status: 1, Models: "synthetic-model", Group: "default", Tag: &tag, BaseURL: &base, OpenAIOrganization: &org, HeaderOverride: &header, ParamOverride: &param, Setting: &setting, Other: "synthetic-config-other", OtherSettings: `{"opaque":"synthetic-config-settings"}`, OtherInfo: `{"status_reason":"synthetic-config-diagnostic"}`}
+				if managed {
+					ch.CredentialRef = "synthetic-config-reference"
+					ch.Key = ""
+				}
+				require.NoError(t, db.Create(&ch).Error)
+				t.Cleanup(func() { db.Delete(&ch); db.Where("channel_id = ?", ch.Id).Delete(&model.Ability{}) })
+				markers := []string{"synthetic-config-header", "synthetic-proxy-password", "synthetic-config-setting", "synthetic-config-param", "synthetic-base-credential", "synthetic-config-organization", "synthetic-config-other", "synthetic-config-diagnostic"}
+				for _, actor := range []string{"admin", "writer", "reader", "root"} {
+					for _, path := range []string{fmt.Sprintf("/api/channel/%d", ch.Id), "/api/channel/?page_size=100", "/api/channel/?tag_mode=true&page_size=100", "/api/channel/search?keyword=" + label, "/api/channel/search?tag_mode=true&keyword=" + label} {
+						w := request(actor, "GET", path, nil)
+						require.Equal(t, 200, w.Code, "actor=%s path=%s body=%s", actor, path, w.Body.String())
+						var result map[string]any
+						require.NoError(t, common.Unmarshal(w.Body.Bytes(), &result))
+						require.Equal(t, true, result["success"], w.Body.String())
+						visible := actor == "reader" || actor == "root"
+						leaked := 0
+						for _, secret := range markers {
+							if strings.Contains(w.Body.String(), secret) {
+								leaked++
+							}
+							if visible {
+								assert.Contains(t, w.Body.String(), secret)
+							} else {
+								assert.NotContains(t, w.Body.String(), secret)
+							}
+						}
+						assert.NotContains(t, w.Body.String(), "synthetic-config-key")
+						t.Logf("database=%s managed=%t actor=%s path=%s visible_sensitive_markers=%d authorized=%t", kind, managed, actor, path, leaked, visible)
+					}
+				}
+				// A normal routing edit omits secret fields, and must leave their DB values intact.
+				w := request("admin", "PUT", "/api/channel/", map[string]any{"id": ch.Id, "type": ch.Type, "name": label + "-renamed", "models": ch.Models, "group": ch.Group})
+				var updated map[string]any
+				require.NoError(t, common.Unmarshal(w.Body.Bytes(), &updated))
+				require.Equal(t, true, updated["success"], w.Body.String())
+				assert.NotContains(t, w.Body.String(), "synthetic-config-header")
+				var after model.Channel
+				require.NoError(t, db.First(&after, ch.Id).Error)
+				assert.Equal(t, ch.HeaderOverride, after.HeaderOverride)
+				assert.Equal(t, ch.Setting, after.Setting)
+				assert.Equal(t, ch.OtherSettings, after.OtherSettings)
+				assert.Equal(t, ch.Key, after.Key)
+				for _, actor := range []string{"", "user"} {
+					denied := request(actor, "GET", fmt.Sprintf("/api/channel/%d", ch.Id), nil)
+					assert.Contains(t, []int{401, 403}, denied.Code)
+					assert.NotContains(t, denied.Body.String(), "synthetic-config-header")
+				}
+			}
+			// Permissions are checked again even when the same login token is reused.
+			require.NoError(t, authz.SetUserPermissions(users["reader"].Id, authz.PermissionsMap{authz.ResourceChannel: {authz.ActionSecretView: false}}))
+			w := request("reader", "GET", "/api/channel/?page_size=100", nil)
+			assert.NotContains(t, w.Body.String(), "synthetic-config-header")
+		})
+	}
+}
