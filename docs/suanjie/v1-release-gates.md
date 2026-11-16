@@ -147,3 +147,19 @@ Gemini、Minimax、service 本批不修复，继续保留既有 FAIL；完整根
 0 FAIL / SKIPPED / race；同样三数据库普通测试44个 PASS，0 FAIL / SKIPPED；包级 vet PASS。
 未配置外部数据库时的早期 race/普通测试各有6个 SKIPPED，单独保留，不算通过；最终上述结果来自真实隔离三数据库。
 安全 CI 新增相同的完整包三数据库 race，覆盖跨测试及重复运行的生命周期。无生产指标文件变更，无生产运行时开销。
+
+## PR #51 合并后 Gemini/Minimax Gin 模式竞态（2026-11-16）
+
+未修改基线 `ffcb4d33ef2d25dc3f59705b5cc93b3e46c51872`：
+[合并后前后端 CI](https://github.com/ztt928999373-ops/new-api/actions/runs/43851586407) 与
+[三数据库安全回归](https://github.com/ztt928999373-ops/new-api/actions/runs/43851586428) PASS；
+本地 controller 资金安全与完整 perf_metrics 定向 race 重复3次 PASS（未配置外部数据库的 perf 子用例 SKIPPED 单列）。
+
+分别在修改前执行：
+- `go test -json -race -count=3 ./relay/channel/gemini` FAIL，21条 race 报告；并行 TestGeminiChatHandlerMissingUsageMetadataBuildsEstimatedBillingUsage（relay_gemini_usage_test.go:465）的 SetMode 与 TestGeminiChatHandlerCompletionTokensExcludeToolUsePromptTokens（:149）的 SetMode 写冲突。日志 SHA256 `377b632dc91d60b502b27b5368b47234a5a48979b6f61568253b548a653bb748`。
+- `go test -json -race -count=10 ./relay/channel/minimax` FAIL，1条 race 报告；TestConvertImageRequest（adaptor_test.go:55）→ gin.New → IsDebugging 读，与并行 TestDoResponseForImageGeneration（:90）→ gin.SetMode 写冲突。日志 SHA256 `ed37d44867f9dae05cfb8f7162974996d246eae0f5e701e2ca6ece637adee007`。
+
+原始 JSONL 与完整读写调用栈保留在执行工作区。两包均为测试准备阶段并发修改 Gin 全局模式的同一根因；
+没有证据要求修改生产适配器。最小方案移除并行测试中的模式写入，保留 t.Parallel 和全部原有断言；
+Gemini 剩余串行设置由 Go 测试调度与并行测试隔离，Minimax 不再修改全局模式。模式切换不是这些请求/响应断言的目标。
+同一 Draft PR 仅治理这一类问题；service 本批不修改，既有 FAIL 保留；完整根模块 race 本批 NOT_RUN。
