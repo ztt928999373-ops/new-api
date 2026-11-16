@@ -127,7 +127,7 @@ function LegalLinks(props: { leadingSeparator?: boolean }) {
 function ProjectAttribution(props: { currentYear: number; inline?: boolean }) {
   const { t } = useTranslation()
   const content = (
-    <span className='text-muted-foreground/45'>
+    <span className='text-foreground/80'>
       &copy; {props.currentYear}{' '}
       <a
         href='https://github.com/QuantumNous/new-api'
