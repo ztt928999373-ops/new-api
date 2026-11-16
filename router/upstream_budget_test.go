@@ -474,6 +474,73 @@ func TestUpstreamBudgetDatabaseMatrix(t *testing.T) {
 
 // TestUpstreamBudgetFinalChannelStatus retains a selected channel snapshot while
 // the authoritative row changes, then exercises the real final HTTP boundary.
+// Managed Bailian must not opt out of cost admission through a false budget
+// marker. Synthetic prices/declared ceilings are not supplier billing evidence.
+func TestUpstreamBudgetBailianAdmission(t *testing.T) {
+	for _, kind := range []string{"sqlite", "mysql", "postgres"} {
+		t.Run(kind, func(t *testing.T) {
+			db := setupUpstreamBudgetDB(t, kind)
+			require.NoError(t, db.AutoMigrate(&model.UpstreamBudget{}, &model.UpstreamCostReservation{}))
+			service.InitHttpClient()
+			client := service.GetHttpClient()
+			originalTransport := client.Transport
+			t.Cleanup(func() { client.Transport = originalTransport })
+			var calls atomic.Int64
+			client.Transport = pilotTransport(func(req *http.Request) (*http.Response, error) {
+				calls.Add(1)
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"usage":{"prompt_tokens":11,"completion_tokens":3}}`))}, nil
+			})
+			for _, tc := range []struct {
+				name                    string
+				marker, declared, allow bool
+			}{
+				{name: "managed_no_budget"},
+				{name: "managed_declared_ceiling_without_marker", declared: true},
+				{name: "managed_declared_ceiling_with_marker", declared: true, marker: true},
+				{name: "legacy_unchanged", allow: true},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					ch := model.Channel{Type: constant.ChannelTypeAli, Status: common.ChannelStatusEnabled, Name: "synthetic-bailian-admission", UpstreamBudgetEnabled: tc.marker}
+					if !tc.allow {
+						ch.CredentialRef = "synthetic-bailian-reference"
+					}
+					require.NoError(t, db.Create(&ch).Error)
+					t.Cleanup(func() { db.Where("channel_id = ?", ch.Id).Delete(&model.UpstreamBudget{}); db.Delete(&ch) })
+					if tc.declared {
+						// Deliberately synthetic, unverified declaration, not an invoice.
+						p := model.UpstreamBudget{ChannelID: ch.Id, Enabled: true, Revision: 1, LimitMicros: 100, AttemptCeilingMicros: 10, Model: "synthetic-qwen", MaxRequestBytes: 4096, MaxOutputTokens: 64, ValidUntil: time.Now().Unix() + 3600, CeilingConfirmed: true, CostBasisHash: strings.Repeat("a", 64)}
+						require.NoError(t, db.Create(&p).Error)
+					}
+					const payload = `{"model":"synthetic-qwen","messages":[{"role":"user","content":"synthetic"}],"max_tokens":16}`
+					c, _ := gin.CreateTestContext(httptest.NewRecorder())
+					c.Request = httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(payload))
+					out, err := http.NewRequest("POST", "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions", strings.NewReader(payload))
+					require.NoError(t, err)
+					before := calls.Load()
+					// A stale selection's type/marker must not authorize a managed row.
+					info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{ChannelId: ch.Id, ChannelType: constant.ChannelTypeOpenAI}}
+					resp, sendErr := channel.DoRequest(c, out, info)
+					if resp != nil {
+						require.NoError(t, resp.Body.Close())
+					}
+					actual := calls.Load() - before
+					t.Logf("database=%s case=%s actual_outbound_requests=%d error=%v accounting=synthetic_not_invoice", kind, tc.name, actual, sendErr)
+					if tc.allow {
+						require.NoError(t, sendErr)
+						assert.EqualValues(t, 1, actual)
+					} else {
+						assert.Error(t, sendErr)
+						assert.Zero(t, actual)
+					}
+					var reservations int64
+					require.NoError(t, db.Model(&model.UpstreamCostReservation{}).Where("channel_id = ?", ch.Id).Count(&reservations).Error)
+					assert.Zero(t, reservations, "no fabricated supplier cost for unsupported admission")
+				})
+			}
+		})
+	}
+}
+
 func TestUpstreamBudgetFinalChannelStatus(t *testing.T) {
 	for _, kind := range []string{"sqlite", "mysql", "postgres"} {
 		t.Run(kind, func(t *testing.T) {
@@ -637,13 +704,22 @@ func TestUpstreamBudgetFinalWebSocketStatus(t *testing.T) {
 	var calls atomic.Int64
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1); w.WriteHeader(http.StatusForbidden) }))
 	defer upstream.Close()
-	for _, disabled := range []bool{false, true} {
-		t.Run(fmt.Sprintf("disabled_%t", disabled), func(t *testing.T) {
+	for _, tc := range []struct {
+		name                     string
+		disabled, managedBailian bool
+	}{
+		{name: "enabled"}, {name: "disabled", disabled: true}, {name: "managed_bailian", managedBailian: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			ch := model.Channel{Status: common.ChannelStatusEnabled, Name: "synthetic-websocket-status"}
+			if tc.managedBailian {
+				ch.Type = constant.ChannelTypeAli
+				ch.CredentialRef = "synthetic-bailian-reference"
+			}
 			require.NoError(t, db.Create(&ch).Error)
 			t.Cleanup(func() { db.Delete(&ch) })
 			selected := ch
-			if disabled {
+			if tc.disabled {
 				require.NoError(t, db.Model(&ch).Update("status", common.ChannelStatusManuallyDisabled).Error)
 			}
 			c, _ := gin.CreateTestContext(httptest.NewRecorder())
@@ -653,11 +729,11 @@ func TestUpstreamBudgetFinalWebSocketStatus(t *testing.T) {
 			_, err := channel.DoWssRequest(&openai.Adaptor{}, c, info, nil)
 			require.Error(t, err) // Enabled control reaches the synthetic rejected handshake.
 			expected := int64(1)
-			if disabled {
+			if tc.disabled || tc.managedBailian {
 				expected = 0
 			}
 			require.Equal(t, expected, calls.Load()-before)
-			t.Logf("websocket disabled=%t actual_outbound_requests=%d", disabled, calls.Load()-before)
+			t.Logf("websocket case=%s actual_outbound_requests=%d", tc.name, calls.Load()-before)
 		})
 	}
 }
