@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -24,6 +25,7 @@ import (
 	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
+	"github.com/bytedance/gopkg/util/gopool"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -77,6 +79,9 @@ func modelManagementDB(t *testing.T, kind, dsn string) *gorm.DB {
 	require.NoError(t, database.Raw(query).Scan(&version).Error)
 	t.Logf("database version: %s", version)
 	t.Cleanup(func() {
+		// Settlement can return before its cache/metrics callbacks finish.
+		// Join them before restoring globals or closing their database.
+		require.Eventually(t, func() bool { return gopool.WorkerCount() == 0 }, 5*time.Second, time.Millisecond, "model management background work did not drain before fixture cleanup")
 		for _, value := range restoreRatios {
 			require.NoError(t, value.restore(value.value))
 		}
