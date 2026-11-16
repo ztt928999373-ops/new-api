@@ -125,3 +125,20 @@ SQLite/MySQL/PostgreSQL 的同一定向 race 各重复3次，共102个含父子�
 本地 controller vet PASS。第一次 PostgreSQL 验证因 DSN 使用 host 格式，被既有 loopback URL 检查拒绝；
 该次保留 FAIL，改用支持的 postgres://127.0.0.1 URL 后完整重跑通过，未放宽安全检查。
 安全 CI 增加同一个三数据库定向 race，后续不依赖偶然一次通过。其他四包保持已复现 FAIL，本批不修复。
+
+## PR #50 合并后 perf_metrics 夹具生命周期（2026-11-16）
+
+未修改基线 `9ca28f53555c502d0224dccf88625c1eb6c799d9`：
+[合并后 CI](https://github.com/ztt928999373-ops/new-api/actions/runs/43848347296)、
+[三数据库安全专项及 controller 资金安全回归](https://github.com/ztt928999373-ops/new-api/actions/runs/43848347057) PASS；
+本地 controller 资金安全 SQLite 定向 race 重复3次 PASS。
+
+`go test -json -race -count=3 ./pkg/perf_metrics` 在修改前 FAIL：
+`TestPerformanceAggregationAndFlush.func1 (metrics_test.go:176)` 写 RedisEnabled，
+与 `recordRedis (metrics.go:553) ← Record.func1 (metrics.go:127) ← gopool worker` 读冲突。
+该异步工作由前一个 `TestRecordTaskResultSamplesTerminalTasks` 创建，其清理只有 hotBuckets.Clear，未等待后台采样结束。
+原始失败日志在执行工作区保存，SHA256 为 `d2bdf5b58a1ef2f5edaeb45669e4e496547067ae1d1e7be1d4ffab5ec5b9bc32`。
+这证明跨测试的异步生命周期污染，不能据此认定生产进程也在并发切换 RedisEnabled；本批不修改生产指标逻辑。
+最小修复将采样测试的后台任务在清理完成前排空，再清除桶，避免后续夹具切换/恢复全局状态时仍有旧任务读取。
+全部成功率、延迟、吞吐、历史窗口与落库断言保留；不以 sleep、跳过测试或删除断言制造通过。
+Gemini、Minimax、service 本批不修复，继续保留既有 FAIL；完整根模块 race 本批 NOT_RUN。
