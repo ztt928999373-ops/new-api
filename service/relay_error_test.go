@@ -179,6 +179,11 @@ func TestUpstreamAddressesMaskOnlyConfiguredAddresses(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			// x/net prefers lowercase proxy variables. Own the complete fixture
+			// so an inherited cloud or developer proxy cannot replace tc.proxyEnv.
+			for _, name := range []string{"http_proxy", "https_proxy", "all_proxy", "ALL_PROXY", "no_proxy", "NO_PROXY", "REQUEST_METHOD"} {
+				t.Setenv(name, "")
+			}
 			t.Setenv("HTTPS_PROXY", tc.proxyEnv)
 			t.Setenv("HTTP_PROXY", "")
 			c, _ := gin.CreateTestContext(httptest.NewRecorder())

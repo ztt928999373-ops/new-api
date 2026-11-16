@@ -32,6 +32,7 @@ import (
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/bytedance/gopkg/util/gopool"
 	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -43,7 +44,11 @@ type pilotTransport func(*http.Request) (*http.Response, error)
 func (f pilotTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 func testPilotAuthenticatedSettlement(t *testing.T, bailian bool) {
 	require.NoError(t, i18n.Init())
-	for _, scenario := range []string{"ordinary", "replaced", "stream", "retry", "failure", "timeout", "interrupted", "insufficient", "invalid_token", "disabled", "revoked", "concurrent"} {
+	scenarios := []string{"ordinary", "replaced", "stream", "retry", "failure", "timeout", "interrupted", "insufficient", "invalid_token", "disabled", "revoked", "concurrent"}
+	if !bailian {
+		scenarios = append(scenarios, "legacy_failure")
+	}
+	for _, scenario := range scenarios {
 		t.Run(scenario, func(t *testing.T) {
 			oldDB, oldLog := model.DB, model.LOG_DB
 			t.Cleanup(func() { model.DB, model.LOG_DB = oldDB, oldLog })
@@ -60,6 +65,9 @@ func testPilotAuthenticatedSettlement(t *testing.T, bailian bool) {
 			retry, timeout, count, streamTimeout := common.RetryTimes, common.RelayTimeout, constant.CountToken, constant.StreamingTimeout
 			common.MemoryCacheEnabled, common.BatchUpdateEnabled, common.LogConsumeEnabled = false, false, true
 			common.RetryTimes, common.RelayTimeout, constant.CountToken, constant.StreamingTimeout = 1, 1, false, 1
+			errorLogs := constant.ErrorLogEnabled
+			constant.ErrorLogEnabled = true
+			t.Cleanup(func() { constant.ErrorLogEnabled = errorLogs })
 			t.Cleanup(func() {
 				common.MemoryCacheEnabled, common.BatchUpdateEnabled, common.LogConsumeEnabled = cache, batch, consume
 				common.RetryTimes, common.RelayTimeout, constant.CountToken, constant.StreamingTimeout = retry, timeout, count, streamTimeout
@@ -97,9 +105,17 @@ func testPilotAuthenticatedSettlement(t *testing.T, bailian bool) {
 					}
 					return
 				}
-				if scenario == "failure" || (scenario == "retry" && n == 1) {
-					w.WriteHeader(500)
-					_, _ = io.WriteString(w, `{"error":{"type":"server_error","message":"synthetic failure echo syntheticpilotsupplier"}}`)
+				if scenario == "failure" || scenario == "legacy_failure" || (scenario == "retry" && n == 1) {
+					if scenario != "legacy_failure" {
+						w.WriteHeader(500)
+					}
+					payload, err := common.Marshal(map[string]any{"error": map[string]any{
+						"type": "server_error", "message": "synthetic failure echo " + expectedKey,
+						"param": expectedKey, "code": "synthetic_echo_" + expectedKey,
+						"metadata": map[string]any{"echo": expectedKey},
+					}})
+					require.NoError(t, err)
+					_, _ = w.Write(payload)
 					return
 				}
 				if scenario == "stream" || scenario == "interrupted" {
@@ -141,6 +157,10 @@ func testPilotAuthenticatedSettlement(t *testing.T, bailian bool) {
 			previous := service.SetChannelCredentialResolver(&credentials.Resolver{Environment: "test", Repository: store, Providers: map[string]credentialcrypto.KeyProvider{"local-test": provider}, Audit: store})
 			t.Cleanup(func() { service.SetChannelCredentialResolver(previous) })
 			channel := model.Channel{Type: constant.ChannelTypeOpenAI, CredentialRef: head.ID, Name: "pilot", Status: common.ChannelStatusEnabled, BaseURL: &url, Models: "qwen3.7-flash-2026-07-15", Group: "default"}
+			if scenario == "legacy_failure" {
+				// Exercise the legacy plaintext path without a managed request lease.
+				channel.CredentialRef, channel.Key = "", expectedKey
+			}
 			if bailian {
 				channel.Type = constant.ChannelTypeAli
 				official := "https://dashscope.aliyuncs.com"
@@ -228,7 +248,7 @@ func testPilotAuthenticatedSettlement(t *testing.T, bailian bool) {
 			} else {
 				engine.ServeHTTP(w, r)
 			}
-			if scenario == "failure" || scenario == "timeout" || (bailian && scenario == "retry") {
+			if scenario == "failure" || scenario == "legacy_failure" || scenario == "timeout" || (bailian && scenario == "retry") {
 				require.Eventually(t, func() bool {
 					var u model.User
 					var tok model.Token
@@ -258,8 +278,16 @@ func testPilotAuthenticatedSettlement(t *testing.T, bailian bool) {
 				require.Len(t, logs, 4)
 			}
 			require.LessOrEqual(t, len(logs), expectedRequests, "retries and stream termination must not settle twice")
-			require.NotContains(t, w.Body.String(), "syntheticpilotsupplier")
-			require.NotContains(t, w.Body.String(), expectedKey)
+			if scenario == "legacy_failure" {
+				var errorLogs []model.Log
+				require.NoError(t, model.LOG_DB.Where("type = ?", model.LogTypeError).Find(&errorLogs).Error)
+				require.NotEmpty(t, errorLogs)
+				for _, entry := range errorLogs {
+					assert.NotContains(t, entry.Content+entry.Other, expectedKey)
+				}
+			}
+			assert.NotContains(t, w.Body.String(), "syntheticpilotsupplier")
+			assert.NotContains(t, w.Body.String(), expectedKey)
 			if scenario == "ordinary" || scenario == "replaced" || scenario == "stream" || (scenario == "retry" && !bailian) {
 				require.Equal(t, 200, w.Code, w.Body.String())
 				require.Len(t, logs, 1)
@@ -268,6 +296,10 @@ func testPilotAuthenticatedSettlement(t *testing.T, bailian bool) {
 				require.Equal(t, 3, logs[0].CompletionTokens)
 				require.Equal(t, channel.Id, logs[0].ChannelId)
 				require.Contains(t, w.Body.String(), "hello")
+			} else if scenario == "legacy_failure" {
+				require.Equal(t, http.StatusOK, w.Code, "preserve the existing upstream status contract")
+				require.Contains(t, w.Body.String(), `"error"`)
+				require.Zero(t, charged)
 			} else if scenario != "interrupted" && scenario != "concurrent" {
 				require.GreaterOrEqual(t, w.Code, 400, w.Body.String())
 				require.Zero(t, charged)

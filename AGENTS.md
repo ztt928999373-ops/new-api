@@ -8,6 +8,22 @@ This is an AI API gateway/proxy built with Go. It aggregates 40+ upstream AI pro
 
 ## Tech Stack
 
+### Codex cloud toolchain
+
+In the published Codex cloud environment, load the existing toolchain in every
+new execution session before running Go or Bun commands:
+
+```sh
+source /workspace/.onboarding/env.sh
+go version
+bun --version
+```
+
+The configured versions are Go 1.26.11 and Bun 1.4.4. The environment file also
+selects the existing dependency caches and read-only Go module mode. Do not
+reinstall the toolchain or recreate the environment to fix a missing PATH entry.
+Changes to the published environment configuration require owner review.
+
 - **Backend**: Go 1.26 for the root module and `tokenkit/`, Go 1.25.1 for `relaykit/` (see each module’s `go.mod`), Gin web framework, GORM v2 ORM
 - **Frontend**: React 19, TypeScript, Rsbuild 2, TanStack Router/Query/Table, Zustand, Base UI, Tailwind CSS 4
 - **Databases**: SQLite, MySQL, PostgreSQL for the primary database (all three must be supported); a separately configured log database also supports ClickHouse
