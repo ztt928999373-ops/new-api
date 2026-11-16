@@ -427,7 +427,7 @@ func DoWssRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 	if err != nil {
 		return nil, types.NewErrorWithStatusCode(service.ErrUpstreamChannelUnavailable, types.ErrorCodeChannelNoAvailableKey, http.StatusServiceUnavailable)
 	}
-	if current.UpstreamBudgetEnabled {
+	if current.UpstreamBudgetEnabled || (current.Type == appconstant.ChannelTypeAli && current.CredentialRef != "") {
 		return nil, types.NewErrorWithStatusCode(errors.New(i18n.T(c, i18n.MsgUpstreamBudgetDenied)), types.ErrorCodeInvalidRequest, http.StatusServiceUnavailable, types.ErrOptionWithSkipRetry())
 	}
 	targetConn, resp, err := dialer.DialContext(c.Request.Context(), fullRequestURL, targetHeader)

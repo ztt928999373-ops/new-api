@@ -56,3 +56,44 @@
 - V1 → V1.5：G0/G1 的强制项 PASS，真实供应商成本/合规问题有明确受控解法；运营指标能被测量。由所有者批准。
 - V1.5 → V2：智能路由已与固定优先级对照，策略可禁用/回滚，性能或成本改善有真实证据，且无预算/成功率安全回退问题。由所有者批准。
 - V2 图像 → 视频 → Agent：按用户需求、运营能力和成本上限逐个审批，不凭路线图自动启动。
+
+## P1-02d 受管百炼成本准入证据（2026-11-16）
+
+基线 `b0d3a0fe6a395b880f8d475f71c6077e5ad02c0c`：PR #48 合并后
+[前后端 CI](https://github.com/ztt928999373-ops/new-api/actions/runs/43834766455) 与
+[三数据库安全回归](https://github.com/ztt928999373-ops/new-api/actions/runs/43834766471) PASS。
+本地渠道配置/权限、TaskPlugin 校验、最终 HTTP/WS 状态保护定向 race PASS，0 FAIL / SKIPPED。
+完整后端 race 本轮 NOT_RUN；controller、pkg/perf_metrics、relay/channel/gemini、
+relay/channel/minimax、service 的五个既有失败包仍记 FAIL，不声称全绿。
+
+审查：百炼准备入口建立禁用的固定北京地址、单模型受管渠道，但预算标记默认为 false；
+人工启用后，BeginUpstreamBudget 在此标记为 false 时直接放行。
+预算配置 controller/model 及已标记渠道的最终 HTTP 准入只支持 OpenAI，不能配置可用百炼策略。
+标记为 true 的百炼请求会被拒绝，此处不是已启用百炼预算策略的绕过。
+
+修复前复现：`SUANJIE_TEST_DATABASES=local-synthetic go test -json -race -count=1 ./router -run '^TestUpstreamBudgetBailianAdmission$'` FAIL。
+SQLite/MySQL/PostgreSQL 中，`managed_no_budget` 和 `managed_declared_ceiling_without_marker`
+各观察到 1 次 Mock HTTP 出站且无预留；`managed_declared_ceiling_with_marker` 为 0 次；Legacy 对照为 1 次。
+HTTP transport 完全替换为本地函数，无真实供应商访问。另有真实 TokenAuth→Relay→Adaptor 的
+`TestBailianPilotAuthenticatedSettlement/ordinary` 基线 PASS，证明现有受管路径确实允许调用。
+最终 WS 边界使用 loopback 拒绝握手计数，受管百炼也应在握手前阻断。
+
+成本边界：客户售价、测试中的合成价格、令牌 Usage、管理员声明的单次额度及 cost_basis 的哈希
+都不是供应商真实账单或经验证的成本上界。现有预留是美元微单位保守责任，与用户钱包独立；
+Finish 按声明上限分配责任，错误/崩溃保留 held，不靠退款释放责任。
+结构化供应商账单仍是受信操作员的观察输入，并非独立拉取验证；现有 identity 固定 OpenAI/USD，
+不应直接当作百炼人民币/地区/阶梯/缓存成本。仓库中没有已核实的该百炼模型供应商成本上界及账户级硬限额。
+
+最小修复方向：在最终 HTTP 和 WS 发送前，根据数据库真实 type 与 CredentialRef，拒绝受管百炼。
+不可凭客户端上下文、旧选择类型、false 标记或合成声明恢复准入；不扩展现有 OpenAI 预算白名单，
+不修改价格、用户钱包、收费规则或 Legacy 行为。兼容性代价是受管百炼试点暂停普通及流式调用；
+安全成本依据、货币/地区/模型、保守估算、额度与并发责任预留均经独立专项验证后，才可另行设计开放路径。
+Legacy 百炼仍没有本专项新增的预算承诺，不得把它当作绕开受管门禁的运营方案。
+
+修复验证：最终状态查询增加 type/CredentialRef 投影，HTTP 与 WS 在放行前拒绝受管百炼，
+不增加查询次数、不写入预算或虚构账单。SQLite/MySQL/PostgreSQL 的准入反例均变为 0 次出站；
+Legacy 对照仍为 1 次。HTTP 端到端普通、SSE、轮换、并发等 12 个百炼场景均阻断且用户/Token
+无保留扣款；OpenAI 原有成功、失败、退款、重试及 Legacy 错误脱敏场景保留。
+本地扩大后的预算/账单/渠道配置/试点定向 race：195 个含父子测试 PASS，0 FAIL / SKIPPED；vet/build PASS。
+`BenchmarkUpstreamBudgetFinalChannelRead`（合成 SQLite、200ms）为 84,119 ns/op、1 sql/op、7,324 B/op、93 allocs/op；
+没有生产或真实供应商延迟基准，不声称性能零影响。整套后端 race 仍为本轮 NOT_RUN。

@@ -244,7 +244,11 @@ func testPilotAuthenticatedSettlement(t *testing.T, bailian bool) {
 					select {
 					case rec := <-responses:
 						pending--
-						require.Equal(t, 200, rec.Code, rec.Body.String())
+						if bailian {
+							require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+						} else {
+							require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+						}
 						w = rec
 					case <-time.After(5 * time.Second):
 						t.Fatal("concurrent request did not finish")
@@ -253,7 +257,7 @@ func testPilotAuthenticatedSettlement(t *testing.T, bailian bool) {
 			} else {
 				engine.ServeHTTP(w, r)
 			}
-			if scenario == "failure" || legacyFailure || scenario == "timeout" || (bailian && scenario == "retry") {
+			if bailian || scenario == "failure" || legacyFailure || scenario == "timeout" {
 				require.Eventually(t, func() bool {
 					var u model.User
 					var tok model.Token
@@ -276,6 +280,21 @@ func testPilotAuthenticatedSettlement(t *testing.T, bailian bool) {
 			}
 			require.Equal(t, charged, initial-after.Quota, w.Body.String())
 			require.Equal(t, charged, 1000000-afterToken.RemainQuota)
+			if bailian {
+				// The managed pilot is now closed until supplier cost admission is
+				// supported. Exercise every real HTTP scenario, including parallel
+				// and SSE requests, with no dispatch and no retained user charge.
+				require.GreaterOrEqual(t, w.Code, http.StatusBadRequest, w.Body.String())
+				require.Zero(t, calls.Load())
+				require.Empty(t, logs)
+				require.Zero(t, charged)
+				assert.NotContains(t, w.Body.String(), "syntheticpilotsupplier")
+				assert.NotContains(t, w.Body.String(), expectedKey)
+				if scenario == "ordinary" || scenario == "stream" || scenario == "concurrent" || scenario == "replaced" {
+					require.Equal(t, http.StatusServiceUnavailable, w.Code, w.Body.String())
+				}
+				return
+			}
 			expectedRequests := 1
 			if scenario == "concurrent" {
 				expectedRequests = 4
