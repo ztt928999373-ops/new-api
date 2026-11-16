@@ -1130,8 +1130,11 @@ func UpdateChannel(c *gin.Context) {
 	// protects hidden configuration when a client omits or forges that marker.
 	if redacted, _ := requestData["sensitive_fields_redacted"].(bool); redacted ||
 		!authz.Can(c.GetInt("id"), c.GetInt("role"), authz.ChannelSecretView) {
-		for field := range channelSensitiveFields {
-			delete(requestData, field)
+		for field := range requestData {
+			// JSON struct decoding accepts case-insensitive field names.
+			if _, sensitive := channelSensitiveFields[strings.ToLower(field)]; sensitive {
+				delete(requestData, field)
+			}
 		}
 		delete(requestData, "sensitive_fields_redacted")
 		data, marshalErr := common.Marshal(requestData)

@@ -497,6 +497,11 @@ export function parseTaskResult(){return {};}`
 						if flag != "omitted" {
 							body["sensitive_fields_redacted"] = flag == "true"
 						}
+						// Mixed-case JSON names must not bypass server-side filtering either.
+						for _, field := range []string{"key", "header_override", "setting", "base_url"} {
+							body[strings.ToUpper(field)] = body[field]
+						}
+						body["TYPE"] = constant.ChannelTypeAnthropic
 						_ = request("writer", "PUT", "/api/channel/", body)
 						var after model.Channel
 						require.NoError(t, db.First(&after, original.Id).Error)
