@@ -524,7 +524,7 @@ export function parseTaskResult(){return {};}`
 						assert.Equal(t, false, result["success"], "omitting type must not bypass task_plugin.bind")
 					}
 					if kindType != constant.ChannelTypeAnthropic {
-						body := map[string]any{"id": original.Id}
+						body := map[string]any{"id": original.Id, "TYPE": constant.ChannelTypeAnthropic}
 						if kindType == constant.ChannelTypeTaskPlugin {
 							body["setting"] = "{}"
 						} else {

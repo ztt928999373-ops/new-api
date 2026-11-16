@@ -1195,6 +1195,7 @@ func UpdateChannel(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	validation.Type = channel.Type
 	baseURLFromPluginDefault := validation.Type == constant.ChannelTypeTaskPlugin &&
 		(validation.BaseURL == nil || strings.TrimSpace(*validation.BaseURL) == "")
 	if err := validateChannel(&validation, false); err != nil {
