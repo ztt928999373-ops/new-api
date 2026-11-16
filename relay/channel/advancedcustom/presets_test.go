@@ -11,6 +11,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/internal/testchannel"
 	"github.com/QuantumNous/new-api/relay"
 	"github.com/QuantumNous/new-api/relay/channel/advancedcustom"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
@@ -95,6 +96,7 @@ func TestSGLangRerankRequestAndResponse(t *testing.T) {
 		RelayFormat:  types.RelayFormatOpenAI,
 		RerankerInfo: &relaycommon.RerankerInfo{Documents: []any{"first", "second"}, ReturnDocuments: true},
 	}
+	testchannel.Bind(t, info)
 	info.SetEstimatePromptTokens(12)
 	adaptor := &advancedcustom.Adaptor{}
 	info.ChannelOtherSettings.AdvancedCustom = common.GetAdvancedCustomPreset(constant.ChannelTypeSGLang)

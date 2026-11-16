@@ -19,6 +19,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/internal/testchannel"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	relaytypes "github.com/QuantumNous/new-api/relaykit/types"
@@ -620,6 +621,7 @@ func TestMantleHTTPResponsesPreserveCacheUsage(t *testing.T) {
 				http.DefaultClient = server.Client()
 				defer func() { http.DefaultClient = original }()
 				info := newMantleTestInfo()
+				testchannel.Bind(t, info)
 				info.ChannelBaseUrl, info.IsStream, info.RelayFormat = server.URL, stream, format
 				recorder := httptest.NewRecorder()
 				c := newAwsTestContext(recorder, context.Background())
@@ -672,6 +674,7 @@ func TestMantleDoesNotFollowRedirectsOrFallbackOnAuthFailure(t *testing.T) {
 			http.DefaultClient = server.Client()
 			defer func() { http.DefaultClient = original }()
 			info := newMantleTestInfo()
+			testchannel.Bind(t, info)
 			info.ChannelBaseUrl = server.URL
 			c := newAwsTestContext(httptest.NewRecorder(), context.Background())
 			response, err := (&Adaptor{}).DoRequest(c, info, strings.NewReader(`{"messages":[]}`))
@@ -789,6 +792,7 @@ func TestMantleSignatureMatchesWireHeaders(t *testing.T) {
 			defer func() { http.DefaultClient = originalClient }()
 
 			info := newMantleTestInfo()
+			testchannel.Bind(t, info)
 			info.ChannelBaseUrl = server.URL
 			info.ApiKey = "access-key|secret-key|us-east-1"
 			info.UseRuntimeHeadersOverride = true

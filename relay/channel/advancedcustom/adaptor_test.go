@@ -13,6 +13,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/internal/testchannel"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -77,6 +78,7 @@ func TestAdaptorMasksDialedHostsInDialFailure(t *testing.T) {
 			info := advancedCustomRelayInfo(&dto.AdvancedCustomConfig{
 				Routes: []dto.AdvancedCustomRoute{{IncomingPath: "/v1/realtime", UpstreamPath: "http://localhost:" + upstreamURL.Port() + "/v1/realtime", Converter: relayconvert.ConverterNone}},
 			})
+			testchannel.Bind(t, info)
 			info.RelayMode = relayconstant.RelayModeRealtime
 			info.RequestURLPath = "/v1/realtime"
 			info.ChannelSetting.Proxy = tc.proxy

@@ -423,6 +423,13 @@ func DoWssRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 	if info.ChannelSetting.TLSInsecureSkipVerify {
 		dialer.TLSClientConfig = common2.InsecureTLSConfig
 	}
+	current, err := service.ReadEnabledUpstreamChannel(c.Request.Context(), info.ChannelId)
+	if err != nil {
+		return nil, types.NewErrorWithStatusCode(service.ErrUpstreamChannelUnavailable, types.ErrorCodeChannelNoAvailableKey, http.StatusServiceUnavailable)
+	}
+	if current.UpstreamBudgetEnabled {
+		return nil, types.NewErrorWithStatusCode(errors.New(i18n.T(c, i18n.MsgUpstreamBudgetDenied)), types.ErrorCodeInvalidRequest, http.StatusServiceUnavailable, types.ErrOptionWithSkipRetry())
+	}
 	targetConn, resp, err := dialer.DialContext(c.Request.Context(), fullRequestURL, targetHeader)
 	if err != nil {
 		statusCode := http.StatusInternalServerError
@@ -495,6 +502,9 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 	req = req.WithContext(c.Request.Context())
 	budgetAttempt, budgetErr := service.BeginUpstreamBudget(c, req, info.ChannelId, info.ChannelType)
 	if budgetErr != nil {
+		if errors.Is(budgetErr, service.ErrUpstreamChannelUnavailable) {
+			return nil, types.NewErrorWithStatusCode(service.ErrUpstreamChannelUnavailable, types.ErrorCodeChannelNoAvailableKey, http.StatusServiceUnavailable)
+		}
 		return nil, types.NewErrorWithStatusCode(errors.New(i18n.T(c, i18n.MsgUpstreamBudgetDenied)), types.ErrorCodeInvalidRequest, http.StatusServiceUnavailable, types.ErrOptionWithSkipRetry())
 	}
 	resp, err := relayClient.Do(req)

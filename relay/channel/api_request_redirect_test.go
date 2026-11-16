@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/QuantumNous/new-api/internal/testchannel"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
@@ -66,6 +67,7 @@ func TestDoRequestReturnsUpstreamRedirectWithoutFollowing(t *testing.T) {
 			req, err := http.NewRequest(http.MethodPost, source.URL, bytes.NewReader([]byte("request body")))
 			require.NoError(t, err)
 			info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{}}
+			testchannel.Bind(t, info)
 
 			resp, err := doRequest(ctx, req, info)
 			require.NoError(t, err)

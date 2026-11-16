@@ -13,6 +13,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/internal/testchannel"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/relay/channel"
 	"github.com/QuantumNous/new-api/relay/channel/openai"
@@ -46,7 +47,8 @@ func TestProviderDiagnosticSafety(t *testing.T) {
 	c.Set(common.RequestIdKey, "request-42")
 	logger.LogInfo(c, "provider=openai event=authentication_failed")
 	common.SysError(`refresh_token=synthetic-oauth-token`)
-	info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{ApiKey: "synthetic-invalid-zhipu-key"}}
+	info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{ChannelId: 42, ApiKey: "synthetic-invalid-zhipu-key"}}
+	testchannel.Bind(t, info)
 	headers := http.Header{}
 	require.NoError(t, (&zhipu.Adaptor{}).SetupRequestHeader(c, &headers, info))
 	require.Contains(t, output.String(), "provider=zhipu")

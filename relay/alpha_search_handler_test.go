@@ -9,6 +9,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/internal/testchannel"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
@@ -135,6 +136,7 @@ func TestDeepSeekToolsHelper(t *testing.T) {
 			request, err := helper.GetAndValidateRequest(c, types.RelayFormatDeepSeekTools)
 			require.NoError(t, err)
 			info, err := relaycommon.GenRelayInfo(c, types.RelayFormatDeepSeekTools, request, nil)
+			testchannel.Bind(t, info, c)
 			require.NoError(t, err)
 			info.BillingRequestInput = &billingexpr.RequestInput{Body: []byte(tc.body)}
 			_, err = helper.ModelPriceHelper(c, info, 0, request.GetTokenCountMeta())
