@@ -65,6 +65,7 @@ jobs:
           TEST_PERF_MYSQL_DSN='root:synthetic-test-only@tcp(127.0.0.1:23316)/credential_test?parseTime=true' \
             TEST_PERF_POSTGRES_DSN='postgres://postgres:synthetic-test-only@127.0.0.1:25436/credential_test?sslmode=disable' \
             go test -json -race -count=3 ./pkg/perf_metrics > "$RUNNER_TEMP/v1-security/perf-fixture-lifecycle.jsonl"
+          go test -json -race -count=10 ./relay/channel > "$RUNNER_TEMP/v1-security/header-override-race.jsonl"
           go test -json -race -count=10 ./relay/channel/gemini ./relay/channel/minimax > "$RUNNER_TEMP/v1-security/gin-mode-race.jsonl"
           go test -json -race -count=3 ./service -run '^TestUpdateVideoTasksSlowChannelDoesNotBlockOtherChannels$' > "$RUNNER_TEMP/v1-security/service-polling-observation-race.jsonl"
           go test -json -race -count=1 ./model -run '^TestOverallChannelStatusIndependentOfCredentials$' > "$RUNNER_TEMP/v1-security/channel-status.jsonl"
