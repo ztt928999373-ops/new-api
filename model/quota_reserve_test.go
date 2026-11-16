@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/bytedance/gopkg/util/gopool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -141,6 +142,11 @@ func TestRedisBatchReserveNeverFallsBackToStaleDatabaseBalance(t *testing.T) {
 func TestBatchUpdateAccumulatesTwoMaximumRequestCharges(t *testing.T) {
 	truncateTables(t)
 	resetBatchUpdateTestState(t)
+	t.Cleanup(func() {
+		// Join DecreaseUserQuota's cache work before the earlier cleanups reset
+		// batch state and delete users, or the next test switches Redis fixtures.
+		require.Eventually(t, func() bool { return gopool.WorkerCount() == 0 }, 5*time.Second, time.Millisecond, "quota cache tasks did not drain before fixture cleanup")
+	})
 	common.BatchUpdateEnabled = true
 
 	user := createReserveTestUser(t, common.MaxQuota*2+100)
