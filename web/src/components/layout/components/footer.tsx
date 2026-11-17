@@ -25,6 +25,8 @@ import { useStatus } from '@/hooks/use-status'
 import { useSystemConfig } from '@/hooks/use-system-config'
 import { cn } from '@/lib/utils'
 
+import { SourceInfo } from './source-info'
+
 interface FooterLink {
   text: string
   href: string
@@ -138,6 +140,9 @@ function ProjectAttribution(props: { currentYear: number; inline?: boolean }) {
         {t('New API')}
       </a>
       . {t(NEW_API_FOOTER_ATTRIBUTION_KEY)}
+      <span className='mt-1 block'>
+        <SourceInfo />
+      </span>
     </span>
   )
   if (props.inline) {

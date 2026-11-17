@@ -6,6 +6,8 @@ import { pluginReact } from '@rsbuild/plugin-react'
 import { pluginTailwindcss } from '@rsbuild/plugin-tailwindcss'
 import { tanstackRouter } from '@tanstack/router-plugin/rspack'
 
+import { readSourceRevision } from './scripts/source-revision'
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
 export default defineConfig(({ envMode }) => {
@@ -53,6 +55,11 @@ export default defineConfig(({ envMode }) => {
       },
     },
     source: {
+      define: {
+        __SOURCE_REVISION__: JSON.stringify(
+          readSourceRevision(path.resolve(__dirname, '..'))
+        ),
+      },
       entry: {
         index: './src/main.tsx',
       },

@@ -90,3 +90,54 @@ ops serve 不读取 `.env`，明确选择该目录下的 database.sqlite、suppl
 本批测试以合成数据实施。Windows、Linux、SQLite、MySQL、PostgreSQL、race 的实际状态以本批报告为准，不沿用历史 PR 结论。
 
 安全参考：[OWASP Secrets Management](https://cheatsheetseries.owasp.org/cheatsheets/Secrets_Management_Cheat_Sheet.html)、[Key Management](https://cheatsheetseries.owasp.org/cheatsheets/Key_Management_Cheat_Sheet.html)。本批不宣称完整 ASVS 或生产部署合规验收。
+
+## 对应源码与构建身份
+
+`VERSION`、`common.Version`、前端 `rv.*` 支持标记和 OCI 标签是发行/运维标签，
+不能单独作为实际源码证明。公开页脚和 About 的“对应源码”入口只在下列条件同时满足时显示：
+
+1. Bun/Rsbuild 在构建时确认仓库根目录、`origin` 为本项目
+   `https://github.com/ztt928999373-ops/new-api`（或等价 SSH 地址）、工作区干净，记录真实完整 Git SHA；
+2. Go 编译器的原生 VCS 信息为 Git、完整 SHA、`vcs.modified=false`；
+3. 页脚挂载时刷新状态，刷新中/持久化占位数据不得确认来源；浏览器自身构建 SHA 与正在提供 `/api/status` 的后端 SHA 相同。
+
+入口固定到该 SHA 的 `tree/<SHA>`，不是 `product/v1` 最新分支；所有人可免费浏览/下载
+该提交的源码，包含根模块、relaykit、tokenkit、前端、插件、锁文件、Dockerfile、安装/恢复文档、
+LICENSE、NOTICE 和 THIRD-PARTY-LICENSES.md。使用原项目链接不能替代修改版本对应源码入口。
+
+从公开仓库克隆后检出要运行的完整 SHA，在**干净工作区**先构建前端，再构建后端：
+
+```sh
+git clone https://github.com/ztt928999373-ops/new-api.git
+cd new-api
+git checkout --detach <完整的已审核SHA>
+git status --porcelain
+cd web
+bun install --frozen-lockfile
+bun run build
+cd ..
+GOWORK=off go build -buildvcs=true \
+  -ldflags "-X github.com/QuantumNous/new-api/common.Version=$(git rev-parse HEAD)" \
+  -o new-api .
+go version -m new-api
+```
+
+上述真实SHA版本标签同时保留既有ops升级/状态区分；它本身仍不是源码身份的独立证明。
+构建前确认 `git status --porcelain` 为空。构建产物应写入已有忽略路径或源码目录以外，
+不要把额外未跟踪源码、配置或旧 `web/dist` 当作当前源码证据。不要使用 `-buildvcs=false`。
+忽略文件本身不由 Git 身份证明覆盖；发行方仍需清理并审计 `.env`、本地配置、构建工具、
+依赖和产物，完成供应链/构建见证。该 SHA 一致性机制不是签名或独立可复现构建认证。
+
+运行时可核对 `/api/status` 的 `source_revision`、`go version -m` 的 VCS 记录和页面
+`<html data-source-revision>` / `window.__APP_BUILD__.sourceRevision`。任一缺失、工作区脏、
+上游仓库构建、不同前后端产物或旧缓存混用，页面均显示 `UNKNOWN`，不生成假装对应的链接。
+`VERSION` 或 `SOURCE_REVISION` 环境变量不会提供源码身份。
+
+现有 Dockerfile 的上下文排除了 `.git`，Bun 阶段又只复制了 web 目录，因此默认容器构建
+会显示 `UNKNOWN`；不能把 OCI revision 标签直接升级为页面已验证 SHA。
+本机制不复制 `.git`、GitHub token 或凭据进入构建缓存，不改变发布审批/推送机制。
+容器的可验证来源注入/构建见证仍是明确的发行前缺口，未经后续验证不能宣称容器版本追溯已完成。
+
+容器已将 LICENSE、NOTICE、THIRD-PARTY-LICENSES.md 放在 `/licenses/`；二进制、前端包、
+桌面包仍应分别核查随附材料和第三方声明。源码树中存在这些文件不等于每种发行包均已履约。
+不要把 SHA 一致性、网络源码入口或 NOTICE 检查当作全部 AGPL、供应商、支付或运营合规审查。

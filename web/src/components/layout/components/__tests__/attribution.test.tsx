@@ -32,14 +32,27 @@ import zh from '@/i18n/locales/zh.json'
 
 import { Footer } from '../footer'
 
-const fixture = vi.hoisted(() => ({ footerHtml: '', about: '' }))
+const fixture = vi.hoisted(() => ({
+  footerHtml: '',
+  about: '',
+  backendRevision: '',
+  frontendRevision: '',
+  placeholder: false,
+  fetching: false,
+}))
 vi.mock('@/hooks/use-system-config', () => ({
   useSystemConfig: () => ({
     systemName: 'Synthetic brand',
     footerHtml: fixture.footerHtml,
   }),
 }))
-vi.mock('@/hooks/use-status', () => ({ useStatus: () => ({ status: {} }) }))
+vi.mock('@/hooks/use-status', () => ({
+  useStatus: () => ({
+    status: { source_revision: fixture.backendRevision },
+    isPlaceholderData: fixture.placeholder,
+    isFetching: fixture.fetching,
+  }),
+}))
 vi.mock('@tanstack/react-router', () => ({
   Link: (props: { to: string; children: ReactNode; className?: string }) => (
     <a href={props.to} className={props.className}>
@@ -56,12 +69,20 @@ vi.mock('@/components/layout', () => ({
   ),
 }))
 
+vi.mock('@/lib/build-metadata', () => ({
+  getSourceRevision: () => fixture.frontendRevision,
+}))
+
 const notice = 'Frontend design and development by New API contributors.'
 const locales = { en, fr, ja, ru, vi: viLocale, zhCN: zh, zhTW }
 
 afterEach(async () => {
   fixture.footerHtml = ''
   fixture.about = ''
+  fixture.backendRevision = ''
+  fixture.frontendRevision = ''
+  fixture.placeholder = false
+  fixture.fetching = false
   await i18next.changeLanguage('en')
 })
 
@@ -122,4 +143,57 @@ describe('NOTICE attribution', () => {
     expect(container.querySelector('style')).toBeNull()
     expect(screen.getByText(notice, { exact: false })).toBeVisible()
   })
+})
+
+describe('corresponding source entry', () => {
+  test('a refresh cannot reuse an old matching backend snapshot', () => {
+    fixture.backendRevision = 'a'.repeat(40)
+    fixture.frontendRevision = fixture.backendRevision
+    fixture.fetching = true
+    render(<Footer />)
+    expect(
+      screen.queryByRole('link', { name: 'Corresponding source' })
+    ).not.toBeInTheDocument()
+    expect(screen.getByText('UNKNOWN', { exact: false })).toBeVisible()
+  })
+
+  test('persisted placeholder status cannot assert the running backend identity', () => {
+    fixture.backendRevision = 'a'.repeat(40)
+    fixture.frontendRevision = fixture.backendRevision
+    fixture.placeholder = true
+    render(<Footer />)
+    expect(
+      screen.queryByRole('link', { name: 'Corresponding source' })
+    ).not.toBeInTheDocument()
+    expect(screen.getByText('UNKNOWN', { exact: false })).toBeVisible()
+  })
+
+  test('matching build commits link to the immutable modified source', () => {
+    fixture.backendRevision = 'a'.repeat(40)
+    fixture.frontendRevision = fixture.backendRevision
+    render(<Footer />)
+    expect(
+      screen.getByRole('link', { name: 'Corresponding source' })
+    ).toHaveAttribute(
+      'href',
+      `https://github.com/ztt928999373-ops/new-api/tree/${fixture.backendRevision}`
+    )
+    expect(screen.getByText(fixture.backendRevision)).toBeVisible()
+  })
+  test.each([
+    ['', 'a'.repeat(40)],
+    ['a'.repeat(40), 'b'.repeat(40)],
+    ['a'.repeat(40), 'UNKNOWN'],
+  ])(
+    'unconfirmed or mismatched builds show UNKNOWN (%s / %s)',
+    (backend, frontend) => {
+      fixture.backendRevision = backend
+      fixture.frontendRevision = frontend
+      render(<Footer />)
+      expect(
+        screen.queryByRole('link', { name: 'Corresponding source' })
+      ).not.toBeInTheDocument()
+      expect(screen.getByText('UNKNOWN', { exact: false })).toBeVisible()
+    }
+  )
 })
