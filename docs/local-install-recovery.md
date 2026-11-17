@@ -116,10 +116,13 @@ cd web
 bun install --frozen-lockfile
 bun run build
 cd ..
-GOWORK=off go build -buildvcs=true -o new-api .
+GOWORK=off go build -buildvcs=true \
+  -ldflags "-X github.com/QuantumNous/new-api/common.Version=$(git rev-parse HEAD)" \
+  -o new-api .
 go version -m new-api
 ```
 
+上述真实SHA版本标签同时保留既有ops升级/状态区分；它本身仍不是源码身份的独立证明。
 构建前确认 `git status --porcelain` 为空。构建产物应写入已有忽略路径或源码目录以外，
 不要把额外未跟踪源码、配置或旧 `web/dist` 当作当前源码证据。不要使用 `-buildvcs=false`。
 忽略文件本身不由 Git 身份证明覆盖；发行方仍需清理并审计 `.env`、本地配置、构建工具、
