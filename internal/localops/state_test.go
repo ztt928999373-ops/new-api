@@ -15,10 +15,12 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/internal/totpops"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/credentialcrypto"
 	"github.com/QuantumNous/new-api/service/credentials"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func TestLocalInstallBackupRestore(t *testing.T) {
@@ -265,4 +267,80 @@ func TestColdChannelMigration(t *testing.T) {
 		require.NoError(t, r.WithCredential(context.Background(), credentials.Principal{TenantID: "default", UserID: "synthetic-check", PlatformOperator: true}, migrated.CredentialRef, 1, "relay", func(secret []byte) error { require.Equal(t, ch.Key, string(secret)); return nil }))
 		closeDB()
 	}
+}
+
+func TestTOTPColdMigrationAndRecovery(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "legacy")
+	require.NoError(t, Initialize(source, "test"))
+	db, closeDB, err := openDatabase(filepath.Join(source, databaseName))
+	require.NoError(t, err)
+	seed := "JBSWY3DPEHPK3PXP"
+	rows := []model.TwoFA{{Id: 11, UserId: 11, Secret: seed, IsEnabled: true, FailedAttempts: 3}, {Id: 12, UserId: 12, Secret: seed}}
+	require.NoError(t, db.Session(&gorm.Session{SkipHooks: true}).Create(&rows).Error)
+	require.NoError(t, db.Migrator().DropTable(&model.TOTPStorageState{}))
+	closeDB()
+	m, err := readManifest(filepath.Join(source, readyName))
+	require.NoError(t, err)
+	m.TOTP = false
+	require.NoError(t, os.Remove(filepath.Join(source, readyName)))
+	require.NoError(t, saveManifest(filepath.Join(source, readyName), m))
+	require.NoError(t, os.RemoveAll(filepath.Join(source, "totp-keys")))
+	dbDir, keyDir := filepath.Join(root, "db-backups"), filepath.Join(root, "key-backups")
+	require.NoError(t, credentialcrypto.InitializeLocalDirectory(dbDir))
+	require.NoError(t, credentialcrypto.InitializeLocalDirectory(keyDir))
+	target := filepath.Join(root, "migrated")
+	require.NoError(t, MigrateTOTPState(source, filepath.Join(dbDir, "before.sqlite"), filepath.Join(keyDir, "before.ring"), target))
+	require.NoError(t, Check(target))
+	migrated, closeMigrated, err := openDatabase(filepath.Join(target, databaseName))
+	require.NoError(t, err)
+	codec, _, err := totpops.OpenKeys(filepath.Join(target, "totp-keys"))
+	require.NoError(t, err)
+	require.NoError(t, model.TOTPReady(migrated, codec))
+	var stored model.TwoFA
+	require.NoError(t, migrated.First(&stored, 11).Error)
+	require.Equal(t, 3, stored.FailedAttempts)
+	require.True(t, stored.IsEnabled)
+	require.False(t, strings.Contains(stored.Secret, seed), "stored seed is not encrypted")
+	plain, err := codec.Open(context.Background(), stored)
+	require.NoError(t, err)
+	require.True(t, string(plain) == seed)
+	clear(plain)
+	closeMigrated()
+	original, closeOriginal, err := openDatabase(filepath.Join(source, databaseName))
+	require.NoError(t, err)
+	var old model.TwoFA
+	require.NoError(t, original.First(&old, 11).Error)
+	require.Zero(t, old.SecretFormat)
+	require.True(t, old.Secret == seed)
+	closeOriginal()
+	dbBackup, keyBackup := filepath.Join(dbDir, "encrypted.sqlite"), filepath.Join(keyDir, "encrypted.ring")
+	require.NoError(t, Backup(target, dbBackup, keyBackup))
+	restored := filepath.Join(root, "restored")
+	require.NoError(t, Restore(restored, dbBackup, keyBackup))
+	require.NoError(t, Check(restored))
+	restoredCodec, _, err := totpops.OpenKeys(filepath.Join(restored, "totp-keys"))
+	require.NoError(t, err)
+	oldKey, err := codec.Provider.GetKeyVersion(context.Background())
+	require.NoError(t, err)
+	newKey, err := restoredCodec.Provider.GetKeyVersion(context.Background())
+	require.NoError(t, err)
+	require.NotEqual(t, oldKey, newKey)
+	// Same-host duplicate instance and cold operations cannot share live keys.
+	release, err := totpops.Acquire(filepath.Join(restored, "totp-keys"))
+	require.NoError(t, err)
+	_, err = totpops.Acquire(filepath.Join(restored, "totp-keys"))
+	require.Error(t, err)
+	require.Error(t, totpops.Rotate(filepath.Join(restored, databaseName), filepath.Join(restored, "totp-keys")))
+	release()
+	require.NoError(t, totpops.Rotate(filepath.Join(restored, databaseName), filepath.Join(restored, "totp-keys")))
+	require.NoError(t, Check(restored))
+	// Losing a ring never creates a replacement or publishes a successful check.
+	ring := filepath.Join(restored, "totp-keys", "totp.ring")
+	require.NoError(t, os.Rename(ring, ring+".held"))
+	require.Error(t, Check(restored))
+	_, _, err = totpops.OpenKeys(filepath.Join(restored, "totp-keys"))
+	require.Error(t, err)
+	require.NoError(t, os.Rename(ring+".held", ring))
+	require.NoError(t, Check(restored))
 }

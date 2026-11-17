@@ -381,6 +381,7 @@ func migrateDB() error {
 		&PrefillGroup{},
 		&Setup{},
 		&TwoFA{},
+		&TOTPStorageState{},
 		&TwoFABackupCode{},
 		&Checkin{},
 		&SubscriptionOrder{},

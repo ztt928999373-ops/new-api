@@ -2,8 +2,11 @@ package controller
 
 import (
 	"errors"
+	"net"
 	"net/http"
+	"os"
 	"strconv"
+	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/middleware"
@@ -20,6 +23,12 @@ type Verify2FARequest struct {
 }
 
 func Setup2FA(c *gin.Context) {
+	if !totpSetupTransportAllowed(c) {
+		c.JSON(http.StatusForbidden, gin.H{"success": false, "code": "TOTP_SECURE_TRANSPORT_REQUIRED", "message": "Invalid request"})
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	c.Header("Pragma", "no-cache")
 	authorization := middleware.RequireSecurityProof(c, service.VerificationOperation{Scope: service.VerificationScopeTwoFASetup})
 	if authorization == nil {
 		return
@@ -222,4 +231,42 @@ func AdminDisable2FA(c *gin.Context) {
 	})
 
 	common.ApiSuccessT(c, "Two-factor authentication reset", nil)
+}
+
+// Only an explicitly trusted TLS terminator may attest HTTPS; do not accept an
+// arbitrary client Forwarded header. Test/development codecs are loopback-only
+// at application startup and never enabled by request data.
+func totpSetupTransportAllowed(c *gin.Context) bool {
+	if model.TOTPStorageEnvironment() != "production" {
+		return true
+	}
+	if c.Request.TLS != nil {
+		return true
+	}
+	if os.Getenv("TRUSTED_PROXIES") == "" || len(c.Request.Header.Values("X-Forwarded-Proto")) != 1 || c.GetHeader("X-Forwarded-Proto") != "https" {
+		return false
+	}
+	peer, _, err := net.SplitHostPort(c.Request.RemoteAddr)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(peer)
+	if ip == nil {
+		return false
+	}
+	proxies, _, err := common.ResolveTrustedProxies(os.Getenv("TRUSTED_PROXIES"))
+	if err != nil {
+		return false
+	}
+	for _, proxy := range proxies {
+		if strings.Contains(proxy, "/") {
+			_, network, e := net.ParseCIDR(proxy)
+			if e == nil && network.Contains(ip) {
+				return true
+			}
+		} else if allowed := net.ParseIP(proxy); allowed != nil && allowed.Equal(ip) {
+			return true
+		}
+	}
+	return false
 }

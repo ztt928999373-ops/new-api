@@ -47,3 +47,17 @@ func TestPrivateSnapshotNeverOverwritesAndHonorsWriterLock(t *testing.T) {
 	require.True(t, os.IsNotExist(err))
 	require.NoError(t, p.SnapshotTo(blocked))
 }
+
+func TestPrivateProcessLease(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "private")
+	require.NoError(t, InitializeLocalDirectory(dir))
+	path := filepath.Join(dir, "instance.lock")
+	release, err := AcquireLocalLease(path)
+	require.NoError(t, err)
+	_, err = AcquireLocalLease(path)
+	require.Error(t, err)
+	release()
+	again, err := AcquireLocalLease(path)
+	require.NoError(t, err)
+	again()
+}

@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/binary"
@@ -15,9 +16,11 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"github.com/QuantumNous/new-api/pkg/credentialcrypto"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -40,6 +43,30 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
+
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "controller-totp-keys-")
+	if err != nil {
+		panic(err)
+	}
+	keyRoot := dir
+	dir = filepath.Join(keyRoot, "keys")
+	if err = credentialcrypto.InitializeLocalDirectory(dir); err != nil {
+		panic(err)
+	}
+	ring := filepath.Join(dir, "test.ring")
+	if err = credentialcrypto.InitializeLocalFile(ring); err != nil {
+		panic(err)
+	}
+	provider, err := credentialcrypto.NewLocalFileKeyProvider(ring)
+	if err != nil {
+		panic(err)
+	}
+	model.SetTOTPSecretStore(&model.TOTPSecretStore{Environment: "test", Namespace: "controller-tests", Provider: provider})
+	code := m.Run()
+	os.RemoveAll(keyRoot)
+	os.Exit(code)
+}
 
 func setupSecurityEnrollmentTest(t *testing.T) (*model.User, service.AuthIdentity) {
 	t.Helper()
@@ -824,7 +851,7 @@ func TestSecurityEnrollmentChannelProofRejectsMismatchesBeforeConsumption(t *tes
 	twoFA := &model.TwoFA{UserId: user.Id, Secret: "JBSWY3DPEHPK3PXP", IsEnabled: true}
 	require.NoError(t, model.DB.Create(twoFA).Error)
 	operation := service.VerificationOperation{Scope: service.VerificationScopeChannelKeyRead, Context: []byte(`{"channel_id":123}`)}
-	code, err := totp.GenerateCode(twoFA.Secret, time.Now())
+	code, err := totp.GenerateCode("JBSWY3DPEHPK3PXP", time.Now())
 	require.NoError(t, err)
 	proof, err := service.VerifySecurityInput(identity, service.VerificationInput{Method: "2fa", Scope: operation.Scope, Context: operation.Context, Code: code})
 	require.NoError(t, err)
@@ -1267,7 +1294,11 @@ func TestSecurityEnrollmentSetupAndEnableRollback(t *testing.T) {
 	require.NoError(t, model.DB.Callback().Create().Remove("security_setup_failure"))
 	pending, err := model.GetTwoFAByUserId(user.Id)
 	require.NoError(t, err)
-	assert.Equal(t, setup.Secret, pending.Secret)
+	assert.False(t, setup.Secret == pending.Secret, "pending row must be encrypted")
+	decryptedSeed, storageErr := pending.DecryptTOTPSecret(context.Background())
+	require.NoError(t, storageErr)
+	assert.True(t, setup.Secret == string(decryptedSeed), "pending seed did not survive transaction rollback")
+	clear(decryptedSeed)
 	count, err := model.GetUnusedBackupCodeCount(user.Id)
 	require.NoError(t, err)
 	assert.Equal(t, common.BackupCodeCount, count)
@@ -1423,7 +1454,7 @@ func TestSecurityEnrollmentTwoFAFailureAccountingAndStorageErrors(t *testing.T) 
 	assert.Zero(t, stored.FailedAttempts, "missing required input must not count as a failed verification")
 	wrongCode := ""
 	for _, candidate := range []string{"000000", "111111", "222222", "333333"} {
-		if !common.ValidateTOTPCode(twoFA.Secret, candidate) {
+		if !common.ValidateTOTPCode("JBSWY3DPEHPK3PXP", candidate) {
 			wrongCode = candidate
 			break
 		}
@@ -1442,7 +1473,7 @@ func TestSecurityEnrollmentTwoFAFailureAccountingAndStorageErrors(t *testing.T) 
 	stored.LockedUntil = &until
 	assert.ErrorIs(t, service.VerifyTwoFactorCode(stored, "ABCD-1234"), service.ErrVerificationLocked)
 	stored.LockedUntil = nil
-	code, err := totp.GenerateCode(stored.Secret, time.Now())
+	code, err := totp.GenerateCode("JBSWY3DPEHPK3PXP", time.Now())
 	require.NoError(t, err)
 	failure := errors.New("usage storage failed")
 	require.NoError(t, model.DB.Callback().Update().Before("gorm:update").Register("security_usage_failure", func(tx *gorm.DB) {
@@ -1589,7 +1620,7 @@ func TestSecurityEnrollmentCustomOAuthUsesExistingBinding(t *testing.T) {
 	t.Cleanup(upstream.Close)
 	provider := oauth.NewGenericOAuthProvider(&model.CustomOAuthProvider{
 		Id: 42, Slug: "enrollment-custom", Name: "Custom provider", Enabled: true,
-		ClientId: "client", ClientSecret: "secret", UserIdField: "sub",
+		ClientId: "client", ClientSecret: "JBSWY3DPEHPK3PXP", UserIdField: "sub",
 		TokenEndpoint: upstream.URL + "/token", UserInfoEndpoint: upstream.URL + "/userinfo",
 	})
 	oauth.RegisterCustom("enrollment-custom", provider)
@@ -1739,7 +1770,7 @@ func TestSecurityEnrollmentNeverTrustsSessionForFirstFactor(t *testing.T) {
 				require.NoError(t, model.DB.Create(&model.PasskeyCredential{UserID: user.Id, CredentialID: "credential", PublicKey: "key"}).Error)
 			case "locked 2fa":
 				until := time.Now().Add(time.Hour)
-				require.NoError(t, model.DB.Create(&model.TwoFA{UserId: user.Id, Secret: "secret", IsEnabled: true, LockedUntil: &until}).Error)
+				require.NoError(t, model.DB.Create(&model.TwoFA{UserId: user.Id, Secret: "JBSWY3DPEHPK3PXP", IsEnabled: true, LockedUntil: &until}).Error)
 			case "telegram":
 				require.NoError(t, model.DB.Model(user).Update("telegram_id", "42").Error)
 			case "github":
@@ -1882,4 +1913,94 @@ func TestSecurityEnrollmentRejectsChangedFirstFactorPolicy(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestTOTPSetupRequiresTrustedTLSInProduction(t *testing.T) {
+	previous := model.SetTOTPSecretStore(nil)
+	require.NotNil(t, previous)
+	defer model.SetTOTPSecretStore(previous)
+	production := *previous
+	production.Environment = "production"
+	model.SetTOTPSecretStore(&production)
+	t.Setenv("TRUSTED_PROXIES", "127.0.0.1")
+	for _, tc := range []struct {
+		name, peer, forwarded string
+		tls, want             bool
+	}{{"direct TLS", "192.0.2.1:443", "", true, true}, {"plain HTTP", "192.0.2.1:80", "", false, false}, {"spoofed header", "192.0.2.1:80", "https", false, false}, {"trusted terminator", "127.0.0.1:1000", "https", false, true}, {"ambiguous header", "127.0.0.1:1000", "https,http", false, false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest("POST", "/api/user/2fa/setup", nil)
+			c.Request.RemoteAddr = tc.peer
+			if tc.tls {
+				c.Request.TLS = &tls.ConnectionState{}
+			}
+			if tc.forwarded != "" {
+				c.Request.Header.Set("X-Forwarded-Proto", tc.forwarded)
+			}
+			assert.Equal(t, tc.want, totpSetupTransportAllowed(c))
+		})
+	}
+}
+
+func TestHistoricalTOTPPendingFlowSurvivesEncryptionMigration(t *testing.T) {
+	user, identity := setupSecurityEnrollmentTest(t)
+	setup, err := service.StartTwoFASetup(identity, authorizeSecurityEnrollment(t, identity))
+	require.NoError(t, err)
+	pending, err := model.GetTwoFAByUserId(user.Id)
+	require.NoError(t, err)
+	// Controlled legacy fixture only. The ordinary create path never writes this.
+	require.NoError(t, model.DB.Model(&model.TwoFA{}).Where("id = ?", pending.Id).Updates(map[string]any{"secret": setup.Secret, "secret_format": 0}).Error)
+	codec := model.SetTOTPSecretStore(nil)
+	model.SetTOTPSecretStore(codec)
+	require.NoError(t, model.MigrateTOTP(model.DB, codec, nil))
+	require.NoError(t, model.PublishTOTPReady(model.DB, codec))
+	unchanged, err := model.GetUserById(user.Id, false)
+	require.NoError(t, err)
+	assert.Equal(t, identity.UserAuthVersion, unchanged.AuthVersion)
+	code, err := totp.GenerateCode(setup.Secret, time.Now())
+	require.NoError(t, err)
+	require.NoError(t, service.FinishTwoFASetup(identity, setup.FlowToken, code))
+	active, err := model.GetTwoFAByUserId(user.Id)
+	require.NoError(t, err)
+	assert.True(t, active.IsEnabled)
+	assert.EqualValues(t, 1, active.SecretFormat)
+	assert.False(t, active.Secret == setup.Secret)
+}
+
+func TestTOTPStorageFailureDoesNotDowngradeOrConsumeLogin(t *testing.T) {
+	user, identity := setupSecurityEnrollmentTest(t)
+	seed := "JBSWY3DPEHPK3PXP"
+	factor := &model.TwoFA{UserId: user.Id, Secret: seed, IsEnabled: true}
+	require.NoError(t, model.DB.Create(factor).Error)
+	challenge, err := service.StartLoginVerification(user, "password", nil)
+	require.NoError(t, err)
+	code, err := totp.GenerateCode(seed, time.Now())
+	require.NoError(t, err)
+	previous := model.SetTOTPSecretStore(nil)
+	defer model.SetTOTPSecretStore(previous)
+	verification, err := common.Marshal(service.VerificationInput{Method: service.VerificationMethodTwoFA, Scope: service.VerificationScopeTwoFADisable, Code: code})
+	require.NoError(t, err)
+	response := securityEnrollmentRequest("POST", "/api/verify", string(verification), "", identity, UniversalVerify)
+	var body securityEnrollmentResponse
+	require.NoError(t, common.Unmarshal(response.Body.Bytes(), &body))
+	assert.False(t, body.Success)
+	assert.Equal(t, http.StatusInternalServerError, response.Code)
+	assert.False(t, strings.Contains(response.Body.String(), seed))
+	payload, err := common.Marshal(map[string]string{"flow_token": challenge.FlowToken, "method": "2fa", "code": code})
+	require.NoError(t, err)
+	response = securityEnrollmentRequest("POST", "/api/user/login/2fa", string(payload), "", identity, Verify2FALogin)
+	require.NoError(t, common.Unmarshal(response.Body.Bytes(), &body))
+	assert.False(t, body.Success)
+	assert.Equal(t, http.StatusInternalServerError, response.Code)
+	stored, err := model.GetTwoFAByUserId(user.Id)
+	require.NoError(t, err)
+	assert.True(t, stored.IsEnabled)
+	assert.Zero(t, stored.FailedAttempts)
+	_, err = service.RequireVerificationMethod(identity, service.VerificationScopeTwoFADisable, service.VerificationMethodPassword)
+	assert.Error(t, err)
+	model.SetTOTPSecretStore(previous)
+	response = securityEnrollmentRequest("POST", "/api/user/login/2fa", string(payload), "", identity, Verify2FALogin)
+	require.NoError(t, common.Unmarshal(response.Body.Bytes(), &body))
+	assert.True(t, body.Success, "infrastructure failure must not consume a valid login flow")
 }

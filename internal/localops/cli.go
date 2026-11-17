@@ -48,6 +48,8 @@ func Dispatch(args []string) (handled bool, release func(), err error) {
 		return true, nil, Backup(absolute, *databaseBackup, *keyBackup)
 	case "restore":
 		return true, nil, Restore(absolute, *databaseBackup, *keyBackup)
+	case "migrate-totp":
+		return true, nil, MigrateTOTPState(absolute, *databaseBackup, *keyBackup, *restoreCheck)
 	case "migrate-channel":
 		return true, nil, MigrateChannel(absolute, *channelID, *databaseBackup, *keyBackup, *restoreCheck)
 	case "serve":
@@ -70,6 +72,13 @@ func Dispatch(args []string) (handled bool, release func(), err error) {
 			"SUPPLIER_CREDENTIAL_KEYRING_PATH": filepath.Join(absolute, ringName), "SUPPLIER_CREDENTIAL_ENVIRONMENT": m.Environment,
 			"REDIS_CONN_STRING": "", "NODE_TYPE": "master", "MEMORY_CACHE_ENABLED": "true", "BATCH_UPDATE_ENABLED": "false",
 			"BIND_ADDRESS": "127.0.0.1", "PORT": strconv.Itoa(*port), "ENABLE_PPROF": "false", "DEBUG": "false",
+		}
+		if m.TOTP {
+			variables["TOTP_KEY_DIRECTORY"] = filepath.Join(absolute, "totp-keys")
+			variables["TOTP_ENVIRONMENT"] = m.Environment
+			variables["TOTP_DEPLOYMENT_MODE"] = "single-instance-local"
+		} else {
+			variables["TOTP_KEY_DIRECTORY"] = ""
 		}
 		for key, value := range variables {
 			if os.Setenv(key, value) != nil {
