@@ -91,6 +91,7 @@ export interface SystemStatus {
   success?: boolean
   message?: string
   data?: {
+    source_revision?: string
     version?: string
     system_name?: string
     logo?: string
@@ -138,6 +139,7 @@ export interface SystemStatus {
     [key: string]: unknown
   }
   // Allow direct access to common properties
+  source_revision?: string
   version?: string
   system_name?: string
   logo?: string

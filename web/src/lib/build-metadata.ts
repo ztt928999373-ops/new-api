@@ -52,6 +52,7 @@ interface BuildDescriptor {
   readonly rev: string
   readonly ch: string
   readonly at: number
+  readonly sourceRevision: string
 }
 
 declare global {
@@ -95,6 +96,7 @@ export function installBuildMetadata(): void {
     rev,
     ch: BUILD_CHANNEL_TAG,
     at: Date.now(),
+    sourceRevision: getSourceRevision(),
   })
 
   // Global descriptor for support tooling and error reporters.
@@ -113,6 +115,7 @@ export function installBuildMetadata(): void {
   // by most SSR frameworks for crash-report breadcrumbs).
   try {
     const html = document.documentElement
+    html.setAttribute('data-source-revision', getSourceRevision())
     if (!html.hasAttribute('data-build-rev')) {
       html.setAttribute('data-build-rev', rev)
     }
@@ -167,4 +170,11 @@ export function installBuildMetadata(): void {
  */
 export function getBuildRevision(): string {
   return computeBuildRevision()
+}
+
+// The legacy rv.* descriptor is a support tag, not a Git/source identity.
+export function getSourceRevision(): string {
+  return typeof __SOURCE_REVISION__ === 'string'
+    ? __SOURCE_REVISION__
+    : 'UNKNOWN'
 }
