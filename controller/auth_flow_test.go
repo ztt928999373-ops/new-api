@@ -79,7 +79,7 @@ func TestSecurityLoginCodeCompletesOnce(t *testing.T) {
 			challenge, err := service.StartLoginVerification(user, "password", nil)
 			require.NoError(t, err)
 			require.NotNil(t, challenge)
-			code, err := totp.GenerateCode(factor.Secret, time.Now())
+			code, err := totp.GenerateCode("JBSWY3DPEHPK3PXP", time.Now())
 			require.NoError(t, err)
 			if test.backup {
 				code = "ABCD-1234"
@@ -142,7 +142,7 @@ func TestSecurityLoginRejectsChangedOrExpiredAuthorization(t *testing.T) {
 			case "other purpose":
 				require.NoError(t, model.DB.Model(&model.AuthFlow{}).Where("purpose = ?", model.AuthFlowPurposeLoginVerification).Update("purpose", model.AuthFlowPurposeSecurityProof).Error)
 			}
-			code, err := totp.GenerateCode(factor.Secret, time.Now())
+			code, err := totp.GenerateCode("JBSWY3DPEHPK3PXP", time.Now())
 			require.NoError(t, err)
 			body, err := common.Marshal(map[string]string{"flow_token": challenge.FlowToken, "code": code, "method": method})
 			require.NoError(t, err)
@@ -1024,7 +1024,7 @@ func TestOAuthLoginLegacyGitHubBindingMigratesAfterLoginVerification(t *testing.
 				require.NoError(t, model.DB.Model(existing).Update("github_id", "relinked-legacy").Error)
 				expectedGitHubID = "relinked-legacy"
 			}
-			code, err := totp.GenerateCode(factor.Secret, time.Now())
+			code, err := totp.GenerateCode("JBSWY3DPEHPK3PXP", time.Now())
 			require.NoError(t, err)
 			body, err := common.Marshal(map[string]string{"flow_token": challenge.Data.FlowToken, "code": code})
 			require.NoError(t, err)

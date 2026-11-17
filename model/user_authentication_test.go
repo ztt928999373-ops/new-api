@@ -29,7 +29,7 @@ func TestHardDeleteUserFailsClosedWhenAuthFenceCannotPublish(t *testing.T) {
 	}))
 	require.NoError(t, DB.Create(&Token{UserId: user.Id, Key: "hard-delete-token"}).Error)
 	require.NoError(t, DB.Create(&UserAccessToken{UserId: user.Id, TokenHash: AccessTokenFingerprint("nap_hard-delete-token")}).Error)
-	require.NoError(t, DB.Create(&TwoFA{UserId: user.Id, Secret: "secret", IsEnabled: true}).Error)
+	require.NoError(t, DB.Create(&TwoFA{UserId: user.Id, Secret: "JBSWY3DPEHPK3PXP", IsEnabled: true}).Error)
 	require.NoError(t, DB.Create(&TwoFABackupCode{UserId: user.Id, CodeHash: "hash"}).Error)
 	require.NoError(t, DB.Create(&PasskeyCredential{UserID: user.Id, CredentialID: "credential", PublicKey: "public-key"}).Error)
 	require.NoError(t, DB.Create(&UserOAuthBinding{UserId: user.Id, ProviderId: 1, ProviderUserId: "provider-user"}).Error)
@@ -92,7 +92,7 @@ func TestHardDeleteUserPublishesTombstoneAndPurgesAuthenticationData(t *testing.
 	}))
 	require.NoError(t, DB.Create(&Token{UserId: user.Id, Key: "hard-delete-success-token"}).Error)
 	require.NoError(t, DB.Create(&UserAccessToken{UserId: user.Id, TokenHash: AccessTokenFingerprint("nap_hard-delete-success-token")}).Error)
-	require.NoError(t, DB.Create(&TwoFA{UserId: user.Id, Secret: "secret", IsEnabled: true}).Error)
+	require.NoError(t, DB.Create(&TwoFA{UserId: user.Id, Secret: "JBSWY3DPEHPK3PXP", IsEnabled: true}).Error)
 	require.NoError(t, DB.Create(&TwoFABackupCode{UserId: user.Id, CodeHash: "hash"}).Error)
 	require.NoError(t, DB.Create(&PasskeyCredential{UserID: user.Id, CredentialID: "credential-success", PublicKey: "public-key"}).Error)
 	require.NoError(t, DB.Create(&UserOAuthBinding{UserId: user.Id, ProviderId: 1, ProviderUserId: "provider-user-success"}).Error)
@@ -143,7 +143,7 @@ func TestIncrementFailedAttemptsCountsConcurrentFailures(t *testing.T) {
 
 	user := User{Username: "twofa-cas-user", Password: "password"}
 	require.NoError(t, DB.Create(&user).Error)
-	twoFA := TwoFA{UserId: user.Id, Secret: "secret", IsEnabled: true}
+	twoFA := TwoFA{UserId: user.Id, Secret: "JBSWY3DPEHPK3PXP", IsEnabled: true}
 	require.NoError(t, DB.Create(&twoFA).Error)
 
 	const attempts = 4
@@ -171,7 +171,7 @@ func TestValidateBackupCodeCanOnlySucceedOnce(t *testing.T) {
 	const code = "ABCD-1234"
 	user := User{Id: 123, Username: "backup-code-user", Password: "password", AuthVersion: 1}
 	require.NoError(t, DB.Create(&user).Error)
-	require.NoError(t, DB.Create(&TwoFA{UserId: user.Id, Secret: "secret", IsEnabled: false}).Error)
+	require.NoError(t, DB.Create(&TwoFA{UserId: user.Id, Secret: "JBSWY3DPEHPK3PXP", IsEnabled: false}).Error)
 	hashedCode, err := common.HashBackupCode(code)
 	require.NoError(t, err)
 	require.NoError(t, DB.Create(&TwoFABackupCode{UserId: user.Id, CodeHash: hashedCode}).Error)
@@ -212,7 +212,7 @@ func TestPendingTwoFASetupAPIsRejectEnabledFactor(t *testing.T) {
 
 	user := User{Username: "enabled-twofa-guard", Password: "password", Status: common.UserStatusEnabled, AuthVersion: 1}
 	require.NoError(t, DB.Create(&user).Error)
-	twoFA := TwoFA{UserId: user.Id, Secret: "secret", IsEnabled: true}
+	twoFA := TwoFA{UserId: user.Id, Secret: "JBSWY3DPEHPK3PXP", IsEnabled: true}
 	require.NoError(t, DB.Create(&twoFA).Error)
 
 	session := UserSession{SID: "enabled-factor-session", UserID: user.Id, Version: 1, UserAuthVersion: 1, Status: UserSessionStatusActive, ExpiresAt: time.Now().Add(time.Hour).Unix()}

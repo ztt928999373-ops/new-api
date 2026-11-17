@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"crypto/hmac"
 	"errors"
 	"time"
@@ -92,11 +93,16 @@ func EnableTwoFAEnrollment(identity AuthSessionIdentity, token, code string) err
 			}
 			return err
 		}
-		secretHash := common.GenerateHMACWithKey([]byte("twofa-enrollment:"+common.SessionSecret), pending.Secret)
+		seed, err := pending.DecryptTOTPSecret(context.Background())
+		if err != nil {
+			return ErrTOTPStorage
+		}
+		defer clear(seed)
+		secretHash := common.GenerateHMACWithKey([]byte("twofa-enrollment:"+common.SessionSecret), string(seed))
 		if !hmac.Equal([]byte(payload.SecretHash), []byte(secretHash)) {
 			return ErrTwoFASetupInvalid
 		}
-		if !common.ValidateTOTPCode(pending.Secret, cleanCode) {
+		if !common.ValidateTOTPCode(string(seed), cleanCode) {
 			return ErrTwoFACodeInvalid
 		}
 		if _, err := IncrementUserAuthVersionWithTx(tx, identity.UserID); err != nil {

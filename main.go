@@ -21,6 +21,7 @@ import (
 	"github.com/QuantumNous/new-api/controller"
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/internal/localops"
+	"github.com/QuantumNous/new-api/internal/totpops"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
@@ -50,6 +51,14 @@ var buildFS embed.FS
 var indexPage []byte
 
 func main() {
+	defer service.CloseTOTPStorage()
+	if len(os.Args) > 1 && os.Args[1] == "totp" {
+		if err := totpops.Dispatch(os.Args[2:], os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, "TOTP operation unavailable; see docs/local-install-recovery.md")
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "ops" {
 		handled, release, err := localops.Dispatch(append([]string{os.Args[0]}, os.Args[2:]...))
 		if err != nil {
@@ -349,6 +358,9 @@ func InitResources() error {
 	}
 
 	model.CheckSetup()
+	if err := service.InitTOTPStorage(model.DB); err != nil {
+		return errors.New("TOTP storage unavailable; offline initialization or migration required")
+	}
 	if err := service.InitSupplierCredentialStorage(model.DB); err != nil {
 		return errors.New("supplier credential configuration unavailable")
 	}

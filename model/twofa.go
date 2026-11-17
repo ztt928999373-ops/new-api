@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -12,9 +13,11 @@ import (
 
 // TwoFA 用户2FA设置表
 type TwoFA struct {
-	Id             int            `json:"id" gorm:"primaryKey"`
-	UserId         int            `json:"user_id" gorm:"unique;not null;index"`
-	Secret         string         `json:"-" gorm:"type:varchar(255);not null"` // TOTP密钥，不返回给前端
+	Id             int    `json:"id" gorm:"primaryKey"`
+	UserId         int    `json:"user_id" gorm:"unique;not null;index"`
+	Secret         string `json:"-" gorm:"type:text;not null"` // TOTP密钥，不返回给前端
+	SecretFormat   uint32 `json:"-" gorm:"not null;default:0"`
+	seedForCreate  []byte
 	IsEnabled      bool           `json:"is_enabled"`
 	FailedAttempts int            `json:"failed_attempts" gorm:"default:0"`
 	LockedUntil    *time.Time     `json:"locked_until,omitempty"`
@@ -276,7 +279,13 @@ func (t *TwoFA) ValidateTOTPAndUpdateUsage(code string) (bool, error) {
 	}
 
 	// 验证TOTP码
-	if !common.ValidateTOTPCode(t.Secret, code) {
+	seed, err := t.DecryptTOTPSecret(context.Background())
+	if err != nil {
+		return false, ErrTOTPStorage
+	}
+	valid := common.ValidateTOTPCode(string(seed), code)
+	clear(seed)
+	if !valid {
 		// 增加失败次数
 		if err := t.IncrementFailedAttempts(); err != nil {
 			return false, err

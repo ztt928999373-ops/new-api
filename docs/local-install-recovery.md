@@ -141,3 +141,92 @@ go version -m new-api
 容器已将 LICENSE、NOTICE、THIRD-PARTY-LICENSES.md 放在 `/licenses/`；二进制、前端包、
 桌面包仍应分别核查随附材料和第三方声明。源码树中存在这些文件不等于每种发行包均已履约。
 不要把 SHA 一致性、网络源码入口或 NOTICE 检查当作全部 AGPL、供应商、支付或运营合规审查。
+
+## TOTP 种子加密与离线升级（算介 API 修改）
+
+本节用于 P1-G1-TOTP-ATREST。首批密钥模式为**单机、单实例、本地持久目录**；不支持复制可写 ring、多主机、共享盘。`TOTP_DEPLOYMENT_MODE=single-instance-local` 是必需配置，已配置的同一密钥目录有 OS 进程锁；从节点拒绝此模式。不得把分别复制的目录当作多机共享密钥。本批运维命令只接受本地 SQLite 文件；MySQL/PostgreSQL 的 TEXT/schema 和逐行迁移算法有专门回归，但其生产数据库备份/恢复与部署转换仍须另行审核，不能把这些算法测试当作数据库运维工具已经支持三库。
+
+### 存储、启动与注册
+
+- `two_fas.secret` 扩展为 TEXT；`secret_format=1` 与 `totp:v1:` 标记版本化认证加密封装。复用 `pkg/credentialcrypto`：每个 seed 使用随机 DEK、随机 payload nonce，AAD绑定环境、密钥命名空间、用户ID、TwoFA记录ID、用途及逻辑版本；包装层保存KEK版本。
+- 新记录在同一事务内先取得记录ID，INSERT参数没有seed；加密写入完成才允许事务提交。激活保持密文。读取状态不解密；激活、登录challenge及step-up保留原有服务端检查后才按需解密。没有正常认证的明文回退。
+- TOTP密钥独立于供应商凭据、SessionSecret及用户密码。缺失、损坏、版本错误或绑定不符均失败关闭；已有MFA状态不被改成未启用。错误密钥不计为普通错误验证码，也不自动回退密码。用户显式提交备用码仍按既有单次恢复策略处理。
+- 首次注册仅在有效step-up后交付seed/二维码，响应no-store；激活后不再返回seed。生产必须使用直连TLS，或明确设置`TRUSTED_PROXIES`、由可信连接端点声明HTTPS的TLS终止代理。代理必须清理客户端伪造头。test/development密钥只能用于loopback绑定的合成实例，不是公网HTTP生产例外。
+- 私钥目录必须私有、持久、独立备份，不进入镜像或数据库。初始化不覆盖既有目录；丢失密钥不会自动生成替代品。
+
+`ops init` 为新的隔离状态创建独立 `totp-keys`，验证密钥快照恢复及probe后发布密钥身份；空数据库通过就绪校验。`ops serve`自动提供同一TOTP配置。普通单机启动必须显式提供（值取自受控初始化的密钥身份，不是示例密钥）：
+
+```sh
+TOTP_KEY_DIRECTORY=/private/path/totp-keys
+TOTP_ENVIRONMENT=production
+TOTP_DEPLOYMENT_MODE=single-instance-local
+```
+
+普通启动与localops共用同一个密钥读取、DB READY和逐条解密校验。存在历史TOTP或已有TOTP存储元数据但未配置有效密钥时，启动失败；没有TOTP数据及元数据的部署可以继续非MFA功能，但不能在未初始化密钥时注册TOTP。首次上线必须先完成离线初始化/迁移，不能直接升级后等待用户登录时懒迁移。
+
+### 显式运维入口
+
+所有文件均为隔离/审核操作示意，不授权生产迁移。先停止旧二进制及所有写入；旧版本不认识新锁和READY标志，`--offline`不是自动证明旧进程已停止。不能确认停写就不要执行或切换服务。新版本运行实例占用密钥目录的OS租约，冷操作与之互斥。
+
+```sh
+# 普通单机SQLite：key-dir必须是尚不存在的绝对路径。
+./new-api totp init-keys --keys /private/totp-keys --environment production
+./new-api totp inventory --sqlite /private/source/database.sqlite --keys /private/totp-keys
+
+# 仅对空TwoFA表初始化；已有记录必须走迁移。
+./new-api totp initialize --offline --sqlite /private/new/database.sqlite --keys /private/totp-keys
+
+# 历史迁移：原数据库不变，destination不得已存在。
+# DB和key备份目录必须分别私有，备份名称不得已存在。
+./new-api totp migrate --offline \
+  --sqlite /private/source/database.sqlite \
+  --destination /private/destination/database.sqlite \
+  --keys /private/totp-keys \
+  --db-backup /private/db-backups/before.sqlite \
+  --key-backup /private/key-backups/before.ring
+
+# 中断后仅恢复有匹配存储元数据的staged目标，使用全新备份文件名。
+./new-api totp resume --offline \
+  --sqlite /private/destination/database.sqlite --keys /private/totp-keys \
+  --db-backup /private/db-backups/resume.sqlite \
+  --key-backup /private/key-backups/resume.ring
+```
+
+`migrate`先生成一致性数据库备份、独立ring快照和配对SHA256清单，并实际恢复到临时私有目录验证；然后只在全新目标转换。逐行事务与CAS仅改变secret及格式，不改变failed_attempts、locked_until、last_used、created/updated时间、激活状态、auth_version、备用码及pending flow绑定。已知密文只验证，不重复加密；未知格式、异常明文或无法解密记录阻止READY，不输出seed。
+
+逐行迁移允许已完成行保留；故障行事务回滚，READY仍false。重新执行resume继续未完成行，再次验证配对备份恢复；所有适用记录通过后才发布READY。审计输出仅计数/类别，不能把seed或明文SQL放入日志。关闭迁移期间认证；不要手动将READY改true。
+
+`migrate`还生成 `.encrypted` 数据库/密钥备份及相应身份与manifest文件，用新目录实际恢复、轮换活动KEK并验证全部密文后才令目标READY。备份的数据库旁清单及key旁 `.identity.json` 是配套材料，必须一同保护和保留。源库中的历史明文未被就地擦除，须按历史敏感备份政策处理。
+
+旧localops状态使用新的目标目录升级（原目录不变）：
+
+```sh
+./new-api ops migrate-totp --state /private/legacy-state \
+  --database-backup /private/db-backups/before.sqlite \
+  --key-backup /private/key-backups/before.ring \
+  --restore-check /private/new-state
+```
+
+迁移目标未完成时没有ready.json，禁止启动。选择全新目标重做不改变原输入；底层逐行断点恢复另见totp resume。不能把不完整目录当作已恢复状态，不能人工补ready.json。
+
+### 备份、恢复与KEK轮换
+
+```sh
+./new-api totp backup --offline --sqlite /private/live/database.sqlite \
+  --keys /private/totp-keys --db-backup /private/db-backups/encrypted.sqlite \
+  --key-backup /private/key-backups/encrypted.ring
+./new-api totp restore --offline --destination /private/restored/database.sqlite \
+  --keys /private/restored-keys --db-backup /private/db-backups/encrypted.sqlite \
+  --key-backup /private/key-backups/encrypted.ring
+./new-api totp rotate --offline --sqlite /private/live/database.sqlite --keys /private/totp-keys
+```
+
+restore目标和密钥目录必须新建，校验配对hash及身份probe；恢复密钥在任何新加密前先rotate。保留旧KEK解密旧记录/备份，rewrap不改变payload和身份，不提供自动删除旧KEK能力。中断的rewrap可重做，旧版本密钥保留，任何丢失/损坏都不能靠生成新密钥绕过。
+
+localops的backup/restore/check同步处理TOTP：原supplier key备份之外产生 `.totp`、`.totp.identity.json`，manifest绑定二者hash；恢复后校验TOTP元数据和全部记录，轮换独立TOTP KEK。备份时必须保留所有配套文件，不能只复制database.sqlite或supplier.ring。
+
+### 回滚与历史备份风险
+
+旧程序不能直接覆盖运行已加密数据库。禁止用SQL批量解密回明文作为普通回滚；默认保持停机并前向修复，或退到同样理解此封装和就绪规则的已审核版本。首次切换尚无这种旧稳定版本时，更不能把原文档的“原二进制返回原目录”当作安全认证回滚承诺。
+
+历史明文源库/备份仍含旧seed：独立加密、限权、保留审计，按批准政策清理所有副本；疑似泄露时需用户受控重新绑定。加密现库和rewrap不能消除过去泄露。恢复旧快照还可能丢失备份后的因素撤销、会话失效或重绑定；必须核对这些变化再决定恢复服务，不自动恢复对外认证。

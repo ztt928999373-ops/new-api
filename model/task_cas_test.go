@@ -3,7 +3,9 @@ package model
 import (
 	"context"
 	"encoding/json"
+	"github.com/QuantumNous/new-api/pkg/credentialcrypto"
 	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -17,6 +19,25 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	keyDir, e := os.MkdirTemp("", "model-totp-keys-")
+	if e != nil {
+		panic(e)
+	}
+	keyRoot := keyDir
+	keyDir = filepath.Join(keyRoot, "keys")
+	if e = credentialcrypto.InitializeLocalDirectory(keyDir); e != nil {
+		panic(e)
+	}
+	ring := filepath.Join(keyDir, "test.ring")
+	if e = credentialcrypto.InitializeLocalFile(ring); e != nil {
+		panic(e)
+	}
+	provider, e := credentialcrypto.NewLocalFileKeyProvider(ring)
+	if e != nil {
+		panic(e)
+	}
+	SetTOTPSecretStore(&TOTPSecretStore{Environment: "test", Namespace: "model-tests", Provider: provider})
+
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
 		panic("failed to open test db: " + err.Error())
@@ -64,7 +85,9 @@ func TestMain(m *testing.M) {
 		panic("failed to migrate: " + err.Error())
 	}
 
-	os.Exit(m.Run())
+	code := m.Run()
+	os.RemoveAll(keyRoot)
+	os.Exit(code)
 }
 
 func truncateTables(t *testing.T) {

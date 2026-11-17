@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/internal/totpops"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/credentialcrypto"
 	"github.com/QuantumNous/new-api/service/credentials"
@@ -29,13 +30,16 @@ const ringName = "supplier.ring"
 const readyName = "ready.json"
 
 type Manifest struct {
-	Build          string                    `json:"build"`
-	Format         int                       `json:"format"`
-	Environment    string                    `json:"environment"`
-	ID             string                    `json:"id"`
-	Probe          credentialcrypto.Envelope `json:"probe"`
-	DatabaseSHA256 string                    `json:"database_sha256,omitempty"`
-	KeySHA256      string                    `json:"key_sha256,omitempty"`
+	Build              string                    `json:"build"`
+	Format             int                       `json:"format"`
+	Environment        string                    `json:"environment"`
+	ID                 string                    `json:"id"`
+	Probe              credentialcrypto.Envelope `json:"probe"`
+	DatabaseSHA256     string                    `json:"database_sha256,omitempty"`
+	KeySHA256          string                    `json:"key_sha256,omitempty"`
+	TOTP               bool                      `json:"totp,omitempty"`
+	TOTPKeySHA256      string                    `json:"totp_key_sha256,omitempty"`
+	TOTPIdentitySHA256 string                    `json:"totp_identity_sha256,omitempty"`
 }
 
 func probeIdentity(m Manifest) credentialcrypto.Identity {
@@ -156,6 +160,12 @@ func verify(state string, m Manifest) error {
 		return err
 	}
 	defer closeDB()
+	if m.TOTP {
+		codec, _, e := totpops.OpenKeys(filepath.Join(state, "totp-keys"))
+		if e != nil || codec.Environment != m.Environment || model.TOTPReady(db, codec) != nil {
+			return ErrOperation
+		}
+	}
 	for _, table := range []any{&model.Channel{}, &model.User{}, &model.Token{}, &model.Ability{}, &model.Option{}, &model.Setup{}, &model.UserSession{}, &model.AuthFlow{}, &model.CasbinRule{}, &model.AuthzRole{}, &model.AuditLog{}, &model.Log{}, &credentials.AccessEvent{}} {
 		if !db.Migrator().HasTable(table) {
 			return ErrOperation
@@ -282,6 +292,13 @@ func Initialize(state, environment string) error {
 	if err = verify(state, m); err != nil {
 		return err
 	}
+	if totpops.InitializeKeys(filepath.Join(state, "totp-keys"), environment) != nil || totpops.InitializeDatabase(filepath.Join(state, databaseName), filepath.Join(state, "totp-keys")) != nil {
+		return ErrOperation
+	}
+	m.TOTP = true
+	if verify(state, m) != nil {
+		return ErrOperation
+	}
 	return saveManifest(filepath.Join(state, readyName), m)
 }
 
@@ -395,6 +412,24 @@ func backupLocked(state, databaseBackup, keyBackup string) error {
 	if err != nil {
 		return err
 	}
+	if m.TOTP {
+		release, e := totpops.Acquire(filepath.Join(state, "totp-keys"))
+		if e != nil {
+			return ErrOperation
+		}
+		defer release()
+		if totpops.SnapshotKeys(filepath.Join(state, "totp-keys"), keyBackup+".totp") != nil {
+			return ErrOperation
+		}
+		m.TOTPKeySHA256, err = fileHash(keyBackup + ".totp")
+		if err != nil {
+			return err
+		}
+		m.TOTPIdentitySHA256, err = fileHash(keyBackup + ".totp.identity.json")
+		if err != nil {
+			return err
+		}
+	}
 	return saveManifest(databaseBackup+".manifest.json", m)
 }
 
@@ -423,6 +458,13 @@ func Restore(state, databaseBackup, keyBackup string) error {
 	p, err := credentialcrypto.NewLocalFileKeyProvider(keyBackup)
 	if err != nil || p.SnapshotTo(filepath.Join(state, ringName)) != nil {
 		return ErrOperation
+	}
+	if m.TOTP {
+		keyHash, e := fileHash(keyBackup + ".totp")
+		identityHash, e2 := fileHash(keyBackup + ".totp.identity.json")
+		if e != nil || e2 != nil || keyHash != m.TOTPKeySHA256 || identityHash != m.TOTPIdentitySHA256 || totpops.RestoreKeys(keyBackup+".totp", filepath.Join(state, "totp-keys")) != nil {
+			return ErrOperation
+		}
 	}
 	if verify(state, m) != nil {
 		return ErrOperation
