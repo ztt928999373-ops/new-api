@@ -23,11 +23,14 @@ import { getSourceRevision } from '@/lib/build-metadata'
 
 export function SourceInfo() {
   const { t } = useTranslation()
-  const { status, loading, error, isPlaceholderData } = useStatus()
+  const { status, loading, error, isPlaceholderData, isFetching } = useStatus({
+    fresh: true,
+  })
   const backend = status?.source_revision ?? status?.data?.source_revision
   const frontend = getSourceRevision()
   const matched =
     !loading &&
+    !isFetching &&
     !error &&
     !isPlaceholderData &&
     typeof backend === 'string' &&

@@ -38,6 +38,7 @@ const fixture = vi.hoisted(() => ({
   backendRevision: '',
   frontendRevision: '',
   placeholder: false,
+  fetching: false,
 }))
 vi.mock('@/hooks/use-system-config', () => ({
   useSystemConfig: () => ({
@@ -49,6 +50,7 @@ vi.mock('@/hooks/use-status', () => ({
   useStatus: () => ({
     status: { source_revision: fixture.backendRevision },
     isPlaceholderData: fixture.placeholder,
+    isFetching: fixture.fetching,
   }),
 }))
 vi.mock('@tanstack/react-router', () => ({
@@ -80,6 +82,7 @@ afterEach(async () => {
   fixture.backendRevision = ''
   fixture.frontendRevision = ''
   fixture.placeholder = false
+  fixture.fetching = false
   await i18next.changeLanguage('en')
 })
 
@@ -143,6 +146,17 @@ describe('NOTICE attribution', () => {
 })
 
 describe('corresponding source entry', () => {
+  test('a refresh cannot reuse an old matching backend snapshot', () => {
+    fixture.backendRevision = 'a'.repeat(40)
+    fixture.frontendRevision = fixture.backendRevision
+    fixture.fetching = true
+    render(<Footer />)
+    expect(
+      screen.queryByRole('link', { name: 'Corresponding source' })
+    ).not.toBeInTheDocument()
+    expect(screen.getByText('UNKNOWN', { exact: false })).toBeVisible()
+  })
+
   test('persisted placeholder status cannot assert the running backend identity', () => {
     fixture.backendRevision = 'a'.repeat(40)
     fixture.frontendRevision = fixture.backendRevision

@@ -99,7 +99,7 @@ ops serve 不读取 `.env`，明确选择该目录下的 database.sqlite、suppl
 1. Bun/Rsbuild 在构建时确认仓库根目录、`origin` 为本项目
    `https://github.com/ztt928999373-ops/new-api`（或等价 SSH 地址）、工作区干净，记录真实完整 Git SHA；
 2. Go 编译器的原生 VCS 信息为 Git、完整 SHA、`vcs.modified=false`；
-3. 浏览器自身构建 SHA 与正在提供 `/api/status` 的后端 SHA 相同。
+3. 页脚挂载时刷新状态，刷新中/持久化占位数据不得确认来源；浏览器自身构建 SHA 与正在提供 `/api/status` 的后端 SHA 相同。
 
 入口固定到该 SHA 的 `tree/<SHA>`，不是 `product/v1` 最新分支；所有人可免费浏览/下载
 该提交的源码，包含根模块、relaykit、tokenkit、前端、插件、锁文件、Dockerfile、安装/恢复文档、
