@@ -103,15 +103,20 @@ func (t *TwoFA) IncrementFailedAttempts() error {
 			return nil
 		}
 
-		nextFailedAttempts := current.FailedAttempts + 1
+		storedFailedAttempts := current.FailedAttempts
+		nextFailedAttempts := storedFailedAttempts + 1
 		nextLockedUntil := current.LockedUntil
+		if current.LockedUntil != nil {
+			nextFailedAttempts = 1
+			nextLockedUntil = nil
+		}
 		if nextFailedAttempts >= common.MaxFailAttempts {
 			lockUntil := now.Add(time.Duration(common.LockoutDuration) * time.Second)
 			nextLockedUntil = &lockUntil
 		}
 
 		result := DB.Model(&TwoFA{}).
-			Where("id = ? AND failed_attempts = ? AND (locked_until IS NULL OR locked_until <= ?)", current.Id, current.FailedAttempts, now).
+			Where("id = ? AND failed_attempts = ? AND (locked_until IS NULL OR locked_until <= ?)", current.Id, storedFailedAttempts, now).
 			Updates(map[string]any{
 				"failed_attempts": nextFailedAttempts,
 				"locked_until":    nextLockedUntil,
