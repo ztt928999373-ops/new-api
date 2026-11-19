@@ -13,6 +13,8 @@
 
 `SESSION_SECRET` 用于派生 Access Token、Security Proof、Refresh Token 摘要和 AuthFlow 摘要的不同用途密钥。生产环境及多节点部署必须在所有节点配置相同的高强度随机值；更换该值会使现有登录、临时鉴权流程和 Security Proof 全部失效。
 
+Redis 中的用户身份与登录 Session 快照使用 HMAC 校验。可通过 `AUTH_CACHE_HMAC_KEY` 提供独立的高熵密钥（至少 32 字节），所有共享 Redis 的节点必须配置相同值；密钥只保存在应用配置中，不写入 Redis。未配置时使用 `CRYPTO_SECRET` 派生的用途隔离密钥。更换该密钥会使旧认证缓存回源数据库并重建，不会使其被接受为可信缓存。
+
 ## 多节点 Redis 拓扑
 
 多节点部署必须共用同一主数据库。登录 Session、账户级活跃 Session 上限和签发窗口计数都以数据库为权威，因此这些限制在应用节点间全局生效。Redis 中的 Session Hash（包含 `revoking`/`revoked` tombstone）只是缓存，其 TTL 为 Session 剩余寿命与有效 `SYNC_FREQUENCY` 中的较小值；`SYNC_FREQUENCY` 默认及非法值回退均为 `60` 秒。读取缓存不会续期，过期后会按 SID 回源数据库。延迟完成的 active 缓存回写只能使用其数据库观察窗口尚未消耗的 TTL，不能在撤销 tombstone 到期后重新启动一个完整缓存周期。

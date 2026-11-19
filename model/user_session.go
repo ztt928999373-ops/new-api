@@ -3,12 +3,14 @@ package model
 import (
 	"context"
 	"crypto/hmac"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/mitchellh/mapstructure"
 
 	"gorm.io/gorm"
 )
@@ -18,7 +20,7 @@ const (
 	UserSessionStatusRevoking = "revoking"
 	UserSessionStatusRevoked  = "revoked"
 
-	userSessionCacheSchema      = 1
+	userSessionCacheSchema      = 2
 	userSessionListLimit        = 100
 	userSessionRevokeBatchSize  = 500
 	userSessionCleanupScanLimit = 1000
@@ -33,6 +35,8 @@ var (
 	ErrUserSessionRefreshReuse          = errors.New("user session refresh token was reused")
 	ErrUserSessionLimit                 = errors.New("active user session limit reached")
 	ErrUserSessionIssuanceLimit         = errors.New("user session issuance limit reached")
+	errUserSessionCacheMiss             = errors.New("user session cache miss")
+	errUserSessionCacheUnavailable      = errors.New("user session cache unavailable")
 	errUserSessionCacheObservationStale = errors.New("user session cache observation is stale")
 )
 
@@ -82,6 +86,8 @@ type userSessionCacheEntry struct {
 	RevokedAt       int64
 	RevokedReason   string
 	CacheSchema     int
+	CacheExpiresAt  int64
+	CacheMAC        string
 }
 
 func (session *UserSession) cacheEntry() *userSessionCacheEntry {
@@ -214,8 +220,8 @@ func GetUserSessionBySID(sid string) (*UserSession, error) {
 	return &session, nil
 }
 
-// GetUserSessionCached validates cached state first and falls back to the
-// database on a miss or Redis read failure. A deny tombstone never falls back.
+// GetUserSessionCached falls back to the database on a cache miss or invalid
+// snapshot. Redis read failures and deny tombstones fail closed.
 func GetUserSessionCached(sid string) (*UserSession, error) {
 	if sid == "" {
 		return nil, ErrUserSessionInvalid
@@ -226,6 +232,9 @@ func GetUserSessionCached(sid string) (*UserSession, error) {
 			return entry.session(), nil
 		}
 		if errors.Is(err, ErrUserSessionInactive) {
+			return nil, err
+		}
+		if errors.Is(err, errUserSessionCacheUnavailable) {
 			return nil, err
 		}
 	}
@@ -253,7 +262,7 @@ func GetUserSessionCached(sid string) (*UserSession, error) {
 				return session, nil
 			}
 			if errors.Is(err, ErrUserSessionInactive) {
-				return nil, err
+				return nil, ErrUserSessionInactive
 			}
 			common.SysLog(common.LogText("failed to synchronously populate user session cache: %s", err.Error()))
 		}
@@ -262,11 +271,19 @@ func GetUserSessionCached(sid string) (*UserSession, error) {
 }
 
 func getUserSessionCache(sid string) (*userSessionCacheEntry, error) {
+	fields, err := common.RDB.HGetAll(context.Background(), userSessionCacheKey(sid)).Result()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", errUserSessionCacheUnavailable, err)
+	}
+	if len(fields) == 0 {
+		return nil, errUserSessionCacheMiss
+	}
 	var entry userSessionCacheEntry
-	if err := common.RedisHGetObj(userSessionCacheKey(sid), &entry); err != nil {
+	if err := mapstructure.WeakDecode(fields, &entry); err != nil {
 		return nil, err
 	}
-	if entry.CacheSchema != userSessionCacheSchema || entry.SID != sid || entry.UserID <= 0 || entry.Version <= 0 || entry.UserAuthVersion <= 0 {
+	if entry.CacheSchema != userSessionCacheSchema || entry.SID != sid || entry.UserID <= 0 || entry.Version <= 0 || entry.UserAuthVersion <= 0 ||
+		entry.CacheExpiresAt <= time.Now().UnixMilli() || !validUserSessionCacheMAC(userSessionCacheKey(sid), &entry) {
 		return nil, fmt.Errorf("user session cache schema is stale")
 	}
 	if entry.Status != UserSessionStatusActive || entry.RevokedAt != 0 || entry.ExpiresAt <= time.Now().Unix() {
@@ -280,7 +297,8 @@ func getUserSessionCache(sid string) (*userSessionCacheEntry, error) {
 // database read or mutation. Delayed fills inherit the unspent portion of that
 // window, so a stale active snapshot cannot outlive a short deny tombstone and
 // reactivate a revoked Session after the tombstone expires. Deny states pass a
-// zero deadline because their TTL starts when they are published.
+// zero deadline because their Redis TTL starts at publication; signed expiry
+// metadata remains an absolute Unix-millisecond timestamp for both states.
 func writeUserSessionCache(entry *userSessionCacheEntry, cacheDeadline time.Time) error {
 	if entry == nil || !common.RedisEnabled {
 		return nil
@@ -288,7 +306,8 @@ func writeUserSessionCache(entry *userSessionCacheEntry, cacheDeadline time.Time
 	now := time.Now()
 	sessionExpiresAt := time.Unix(entry.ExpiresAt, 0)
 	sessionTTL := sessionExpiresAt.Sub(now)
-	var redisExpiration int64
+	var cacheExpiresAt int64
+	var redisTTL int64
 	if entry.Status == UserSessionStatusActive {
 		if cacheDeadline.IsZero() {
 			return ErrUserSessionInvalid
@@ -300,25 +319,29 @@ func writeUserSessionCache(entry *userSessionCacheEntry, cacheDeadline time.Time
 		if sessionTTL <= 0 {
 			return ErrUserSessionInactive
 		}
-		cacheExpiresAt := cacheDeadline
-		if sessionExpiresAt.Before(cacheExpiresAt) {
-			cacheExpiresAt = sessionExpiresAt
+		cacheDeadlineAt := cacheDeadline
+		if sessionExpiresAt.Before(cacheDeadlineAt) {
+			cacheDeadlineAt = sessionExpiresAt
 		}
-		if cacheExpiresAt.Sub(now) < time.Millisecond {
+		if cacheDeadlineAt.Sub(now) < time.Millisecond {
 			return errUserSessionCacheObservationStale
 		}
-		redisExpiration = cacheExpiresAt.UnixMilli()
+		cacheExpiresAt = cacheDeadlineAt.UnixMilli()
+		redisTTL = cacheExpiresAt - now.UnixMilli()
 	} else {
 		ttl := min(sessionTTL, time.Duration(userCacheTTLSeconds())*time.Second)
 		if ttl <= 0 {
 			ttl = time.Second
 		}
-		redisExpiration = ttl.Milliseconds()
-		if redisExpiration <= 0 {
-			redisExpiration = 1
+		redisTTL = ttl.Milliseconds()
+		if redisTTL <= 0 {
+			redisTTL = 1
 		}
+		cacheExpiresAt = now.Add(time.Duration(redisTTL) * time.Millisecond).UnixMilli()
 	}
 	entry.CacheSchema = userSessionCacheSchema
+	entry.CacheExpiresAt = cacheExpiresAt
+	entry.CacheMAC = userSessionCacheMAC(userSessionCacheKey(entry.SID), entry)
 	const script = `
 local current_status = redis.call('HGET', KEYS[1], 'Status')
 local current_version = tonumber(redis.call('HGET', KEYS[1], 'Version') or '0')
@@ -333,17 +356,18 @@ redis.call('HSET', KEYS[1],
   'UserAuthVersion', ARGV[4], 'Status', ARGV[5],
   'LoginMethod', ARGV[6], 'IP', ARGV[7], 'UserAgent', ARGV[8],
   'CreatedAt', ARGV[9], 'LastActiveAt', ARGV[10], 'ExpiresAt', ARGV[11],
-  'RevokedAt', ARGV[12], 'RevokedReason', ARGV[13], 'CacheSchema', ARGV[14])
+  'RevokedAt', ARGV[12], 'RevokedReason', ARGV[13], 'CacheSchema', ARGV[14],
+  'CacheExpiresAt', ARGV[15], 'CacheMAC', ARGV[16])
 if ARGV[5] == 'active' then
   redis.call('PEXPIREAT', KEYS[1], ARGV[15])
 else
-  redis.call('PEXPIRE', KEYS[1], ARGV[15])
+  redis.call('PEXPIRE', KEYS[1], ARGV[17])
 end
 return 1`
 	result, err := common.RDB.Eval(context.Background(), script, []string{userSessionCacheKey(entry.SID)},
 		entry.SID, entry.UserID, entry.Version, entry.UserAuthVersion, entry.Status,
 		entry.LoginMethod, entry.IP, entry.UserAgent, entry.CreatedAt, entry.LastActiveAt,
-		entry.ExpiresAt, entry.RevokedAt, entry.RevokedReason, entry.CacheSchema, redisExpiration,
+		entry.ExpiresAt, entry.RevokedAt, entry.RevokedReason, entry.CacheSchema, cacheExpiresAt, entry.CacheMAC, redisTTL,
 	).Int()
 	if err != nil {
 		return err
@@ -361,6 +385,33 @@ return 1`
 		}
 	}
 	return nil
+}
+
+func userSessionCacheMAC(key string, entry *userSessionCacheEntry) string {
+	return authCacheMAC(key, struct {
+		Purpose         string `json:"purpose"`
+		SID             string `json:"sid"`
+		UserID          int    `json:"user_id"`
+		Version         int64  `json:"version"`
+		UserAuthVersion int64  `json:"user_auth_version"`
+		Status          string `json:"status"`
+		LoginMethod     string `json:"login_method"`
+		IP              string `json:"ip"`
+		UserAgent       string `json:"user_agent"`
+		CreatedAt       int64  `json:"created_at"`
+		LastActiveAt    int64  `json:"last_active_at"`
+		ExpiresAt       int64  `json:"expires_at"`
+		RevokedAt       int64  `json:"revoked_at"`
+		RevokedReason   string `json:"revoked_reason"`
+		CacheSchema     int    `json:"cache_schema"`
+		CacheExpiresAt  int64  `json:"cache_expires_at"`
+	}{"session", entry.SID, entry.UserID, entry.Version, entry.UserAuthVersion, entry.Status, entry.LoginMethod,
+		entry.IP, entry.UserAgent, entry.CreatedAt, entry.LastActiveAt, entry.ExpiresAt, entry.RevokedAt,
+		entry.RevokedReason, entry.CacheSchema, entry.CacheExpiresAt})
+}
+
+func validUserSessionCacheMAC(key string, entry *userSessionCacheEntry) bool {
+	return entry.CacheMAC != "" && subtle.ConstantTimeCompare([]byte(entry.CacheMAC), []byte(userSessionCacheMAC(key, entry))) == 1
 }
 
 func confirmUserSessionActiveSnapshot(session *UserSession) error {
