@@ -19,7 +19,17 @@ TOTP, backup-code, and step-up failure paths share `IncrementFailedAttempts`; su
 - `go vet ./middleware`: PASS.
 - `go build ./...`: PASS (sandboxed first attempt could not update Go module metadata; approved rerun succeeded).
 - Targeted `-race`: **NOT_RUN** because this Windows Go environment has `CGO_ENABLED=0` and no C compiler available.
-- Model package tests, three-database auth regression, and complete backend CI remain pending; the model test main is blocked locally by the Windows private-ACL credential-ring initialization noted in the Redis report.
-- Full root-module race, Windows native security run, and D3 Full remain **NOT_RUN**.
+- Local model package test: **NOT_RUN locally**; its test main could not initialize the private credential-ring directory under this Windows environment's ACL behavior. This is a local-environment limitation, not a CI failure.
+
+## Current candidate verification
+
+- Candidate: `e3b8ec6f02a4d92a200b0deeb798aee8c4edf6fc` (PR #62 head); base `product/v1` at `39f35ca1a641d55d1c4ddca4b2b27a15d93d1167`.
+- Backend vet, build, and test: **PASS** on the candidate SHA: [Actions run 44576337260](https://github.com/ztt928999373-ops/new-api/actions/runs/44576337260).
+- Frontend typecheck and test: **PASS** on the candidate SHA: [Actions run 44576337260](https://github.com/ztt928999373-ops/new-api/actions/runs/44576337260).
+- Three-database security regression: **PASS** on the candidate SHA; SQLite, MySQL, and PostgreSQL completed, with 110 reported passing test counts: [Actions run 44576337349](https://github.com/ztt928999373-ops/new-api/actions/runs/44576337349). The `v1-security-regression` artifact was uploaded by this run.
+- Go vulnerability scans (`.`, `relaykit`, and `tokenkit`): **PASS**: [Actions run 44576337481](https://github.com/ztt928999373-ops/new-api/actions/runs/44576337481).
+- The three-database artifact records passing TOTP encrypted-storage coverage for SQLite, MySQL, and PostgreSQL, including cross-user/cross-record isolation and tamper, missing-key, wrong-key, and envelope-version cases. It also records passing concurrent failed-attempt counting, single-use backup-code, step-up, Session revocation fence, rollback, and Redis-unavailable fail-closed cases.
+- **SKIPPED**: 6 budget checks, F1 synthetic security, F1.1 denial-audit, local recovery/race acceptance, and PR #5 credential acceptance. Their workflow conditions target other named branch refs or PR #5, so they are inapplicable to PR #62; the dedicated CI and three-database security regression above ran and passed.
+- **NOT_RUN**: complete root-module race, Windows native security run, and D3 Full. The targeted local `-race` remains **NOT_RUN** for the Windows toolchain limitation recorded above. These results are not represented as passing.
 
 No production user records were changed. This is independent from the Redis cache fix and remains a separate Draft PR candidate.
