@@ -21,6 +21,13 @@ func GenerateHMAC(data string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+func AuthCacheIntegrityKey() []byte {
+	if len(AuthCacheHMACKey) > 0 {
+		return AuthCacheHMACKey
+	}
+	return []byte(GenerateHMACWithKey([]byte(CryptoSecret), "new-api/auth-cache-integrity-key/v1"))
+}
+
 func Password2Hash(password string) (string, error) {
 	passwordBytes := []byte(password)
 	hashedPassword, err := bcrypt.GenerateFromPassword(passwordBytes, bcrypt.DefaultCost)
