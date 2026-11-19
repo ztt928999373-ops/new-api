@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/mitchellh/mapstructure"
 
 	"gorm.io/gorm"
 )
@@ -34,6 +35,8 @@ var (
 	ErrUserSessionRefreshReuse          = errors.New("user session refresh token was reused")
 	ErrUserSessionLimit                 = errors.New("active user session limit reached")
 	ErrUserSessionIssuanceLimit         = errors.New("user session issuance limit reached")
+	errUserSessionCacheMiss             = errors.New("user session cache miss")
+	errUserSessionCacheUnavailable      = errors.New("user session cache unavailable")
 	errUserSessionCacheObservationStale = errors.New("user session cache observation is stale")
 )
 
@@ -217,8 +220,8 @@ func GetUserSessionBySID(sid string) (*UserSession, error) {
 	return &session, nil
 }
 
-// GetUserSessionCached validates cached state first and falls back to the
-// database on a miss or Redis read failure. A deny tombstone never falls back.
+// GetUserSessionCached falls back to the database on a cache miss or invalid
+// snapshot. Redis read failures and deny tombstones fail closed.
 func GetUserSessionCached(sid string) (*UserSession, error) {
 	if sid == "" {
 		return nil, ErrUserSessionInvalid
@@ -229,6 +232,9 @@ func GetUserSessionCached(sid string) (*UserSession, error) {
 			return entry.session(), nil
 		}
 		if errors.Is(err, ErrUserSessionInactive) {
+			return nil, err
+		}
+		if errors.Is(err, errUserSessionCacheUnavailable) {
 			return nil, err
 		}
 	}
@@ -265,8 +271,15 @@ func GetUserSessionCached(sid string) (*UserSession, error) {
 }
 
 func getUserSessionCache(sid string) (*userSessionCacheEntry, error) {
+	fields, err := common.RDB.HGetAll(context.Background(), userSessionCacheKey(sid)).Result()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", errUserSessionCacheUnavailable, err)
+	}
+	if len(fields) == 0 {
+		return nil, errUserSessionCacheMiss
+	}
 	var entry userSessionCacheEntry
-	if err := common.RedisHGetObj(userSessionCacheKey(sid), &entry); err != nil {
+	if err := mapstructure.Decode(fields, &entry); err != nil {
 		return nil, err
 	}
 	if entry.CacheSchema != userSessionCacheSchema || entry.SID != sid || entry.UserID <= 0 || entry.Version <= 0 || entry.UserAuthVersion <= 0 ||
@@ -284,7 +297,8 @@ func getUserSessionCache(sid string) (*userSessionCacheEntry, error) {
 // database read or mutation. Delayed fills inherit the unspent portion of that
 // window, so a stale active snapshot cannot outlive a short deny tombstone and
 // reactivate a revoked Session after the tombstone expires. Deny states pass a
-// zero deadline because their TTL starts when they are published.
+// zero deadline because their Redis TTL starts at publication; signed expiry
+// metadata remains an absolute Unix-millisecond timestamp for both states.
 func writeUserSessionCache(entry *userSessionCacheEntry, cacheDeadline time.Time) error {
 	if entry == nil || !common.RedisEnabled {
 		return nil

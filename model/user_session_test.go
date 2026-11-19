@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -241,6 +242,82 @@ func TestInvalidSessionDenyCacheCannotReauthorizeActiveDatabaseRow(t *testing.T)
 	cached, err := GetUserSessionCached(session.SID)
 	assert.Nil(t, cached)
 	assert.ErrorIs(t, err, ErrUserSessionInactive)
+}
+
+func TestSessionRevocationRollbackKeepsDenyFenceUntilCacheExpiry(t *testing.T) {
+	setupUserSessionTest(t)
+	useUserCacheMiniRedis(t)
+	createUserSessionTestUser(t, 1206, 1)
+	session := newTestUserSession("revocation-rollback-deny", 1206, time.Now().Unix())
+	require.NoError(t, CreateUserSession(session))
+
+	forcedErr := errors.New("synthetic revoke transaction failure")
+	callbackName := "test:fail_session_revoke_transaction"
+	require.NoError(t, DB.Callback().Update().Before("gorm:update").Register(callbackName, func(tx *gorm.DB) {
+		if tx.Statement.Table == "user_sessions" {
+			tx.AddError(forcedErr)
+		}
+	}))
+	_, revokeErr := RevokeUserSession(session.UserID, session.SID, "test-rollback")
+	require.ErrorIs(t, revokeErr, forcedErr)
+	require.NoError(t, DB.Callback().Update().Remove(callbackName))
+
+	var authoritative UserSession
+	require.NoError(t, DB.Where("sid = ?", session.SID).First(&authoritative).Error)
+	assert.Equal(t, UserSessionStatusActive, authoritative.Status, "the failed transaction must roll back")
+	cached, cacheErr := GetUserSessionCached(session.SID)
+	assert.Nil(t, cached)
+	assert.ErrorIs(t, cacheErr, ErrUserSessionInactive, "the published deny fence must win while the failed revoke is retained in cache")
+}
+
+func TestSessionAuthAndRevokeFailClosedWhenRedisUnavailable(t *testing.T) {
+	setupUserSessionTest(t)
+	createUserSessionTestUser(t, 1207, 1)
+	session := newTestUserSession("redis-unavailable-session", 1207, time.Now().Unix())
+	require.NoError(t, DB.Create(session).Error)
+
+	previousRedisEnabled, previousRDB := common.RedisEnabled, common.RDB
+	common.RedisEnabled = true
+	common.RDB = redis.NewClient(&redis.Options{
+		Dialer: func(context.Context, string, string) (net.Conn, error) {
+			return nil, errors.New("synthetic Redis unavailable")
+		},
+		MaxRetries: -1,
+	})
+	t.Cleanup(func() {
+		_ = common.RDB.Close()
+		common.RedisEnabled, common.RDB = previousRedisEnabled, previousRDB
+	})
+
+	cached, cacheErr := GetUserSessionCached(session.SID)
+	assert.Nil(t, cached)
+	assert.ErrorIs(t, cacheErr, errUserSessionCacheUnavailable)
+	_, revokeErr := RevokeUserSession(session.UserID, session.SID, "redis-unavailable")
+	assert.Error(t, revokeErr, "revocation must not proceed when its deny fence cannot be published")
+
+	var authoritative UserSession
+	require.NoError(t, DB.Where("sid = ?", session.SID).First(&authoritative).Error)
+	assert.Equal(t, UserSessionStatusActive, authoritative.Status, "a failed revocation request must not claim success")
+}
+
+func TestSessionCacheMissWithDatabaseReadFailureRejectsAuth(t *testing.T) {
+	setupUserSessionTest(t)
+	useUserCacheMiniRedis(t)
+	createUserSessionTestUser(t, 1208, 1)
+	session := newTestUserSession("session-db-read-failure", 1208, time.Now().Unix())
+	require.NoError(t, DB.Create(session).Error)
+
+	forcedErr := errors.New("synthetic session database unavailable")
+	callbackName := "test:fail_session_cache_miss_db_read"
+	require.NoError(t, DB.Callback().Query().Before("gorm:query").Register(callbackName, func(tx *gorm.DB) {
+		if tx.Statement.Table == "user_sessions" {
+			tx.AddError(forcedErr)
+		}
+	}))
+	cached, err := GetUserSessionCached(session.SID)
+	require.NoError(t, DB.Callback().Query().Remove(callbackName))
+	assert.Nil(t, cached)
+	assert.ErrorIs(t, err, forcedErr)
 }
 
 func TestUserSessionCreateListAndRevokeOne(t *testing.T) {
