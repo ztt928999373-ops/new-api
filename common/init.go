@@ -64,6 +64,14 @@ func InitEnv() {
 	} else {
 		CryptoSecret = SessionSecret
 	}
+	if authCacheKey := os.Getenv("AUTH_CACHE_HMAC_KEY"); authCacheKey != "" {
+		if len([]byte(authCacheKey)) < 32 {
+			log.Fatal("AUTH_CACHE_HMAC_KEY must be at least 32 bytes")
+		}
+		AuthCacheHMACKey = []byte(authCacheKey)
+	} else {
+		AuthCacheHMACKey = nil
+	}
 	if err := InitSessionCookieSettings(); err != nil {
 		log.Fatal(err)
 	}
