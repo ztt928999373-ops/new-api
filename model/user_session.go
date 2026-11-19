@@ -279,7 +279,7 @@ func getUserSessionCache(sid string) (*userSessionCacheEntry, error) {
 		return nil, errUserSessionCacheMiss
 	}
 	var entry userSessionCacheEntry
-	if err := mapstructure.Decode(fields, &entry); err != nil {
+	if err := mapstructure.WeakDecode(fields, &entry); err != nil {
 		return nil, err
 	}
 	if entry.CacheSchema != userSessionCacheSchema || entry.SID != sid || entry.UserID <= 0 || entry.Version <= 0 || entry.UserAuthVersion <= 0 ||
