@@ -157,7 +157,7 @@ func TestRedisAuthCacheTamperingCannotElevateDashboardPAT(t *testing.T) {
 	require.NoError(t, model.CreateUserSession(session))
 	sessionCacheKey := "auth:session:" + common.GenerateHMACWithKey([]byte("user-session-cache-v1:"+common.SessionSecret), session.SID)
 	require.NoError(t, common.RDB.HSet(context.Background(), sessionCacheKey,
-		"UserID", other.Id, "Status", model.UserSessionStatusRevoked,
+		"UserID", other.Id,
 	).Err())
 	cachedSession, err := model.GetUserSessionCached(session.SID)
 	require.NoError(t, err)

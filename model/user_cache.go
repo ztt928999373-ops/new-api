@@ -222,6 +222,9 @@ func RefreshUserGroupCache(userId int) error {
 		if err := updateUserCacheFieldAtVersion(userId, "Group", authoritative.Group, authoritative.AuthVersion); err != nil {
 			return err
 		}
+		if err := PublishUserAuthCache(userId); err != nil {
+			return err
+		}
 
 		var verified User
 		if err := DB.Select("id", "auth_version", commonGroupCol).Where("id = ?", userId).First(&verified).Error; err != nil {
@@ -237,6 +240,9 @@ func RefreshUserGroupCache(userId int) error {
 	// stabilize within the bounded retries. Returning an error lets best-effort
 	// callers emit an operation-specific warning.
 	if err := updateUserCacheFieldAtVersion(userId, "Group", authoritative.Group, authoritative.AuthVersion); err != nil {
+		return err
+	}
+	if err := PublishUserAuthCache(userId); err != nil {
 		return err
 	}
 	return fmt.Errorf("user group changed repeatedly during cache refresh")

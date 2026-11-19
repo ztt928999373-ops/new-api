@@ -256,10 +256,7 @@ func GetUserSessionCached(sid string) (*UserSession, error) {
 				return session, nil
 			}
 			if errors.Is(err, ErrUserSessionInactive) {
-				if confirmErr := confirmUserSessionActiveSnapshot(session); confirmErr != nil {
-					return nil, confirmErr
-				}
-				return session, nil
+				return nil, ErrUserSessionInactive
 			}
 			common.SysLog(common.LogText("failed to synchronously populate user session cache: %s", err.Error()))
 		}
@@ -295,7 +292,8 @@ func writeUserSessionCache(entry *userSessionCacheEntry, cacheDeadline time.Time
 	now := time.Now()
 	sessionExpiresAt := time.Unix(entry.ExpiresAt, 0)
 	sessionTTL := sessionExpiresAt.Sub(now)
-	var redisExpiration int64
+	var cacheExpiresAt int64
+	var redisTTL int64
 	if entry.Status == UserSessionStatusActive {
 		if cacheDeadline.IsZero() {
 			return ErrUserSessionInvalid
@@ -307,26 +305,28 @@ func writeUserSessionCache(entry *userSessionCacheEntry, cacheDeadline time.Time
 		if sessionTTL <= 0 {
 			return ErrUserSessionInactive
 		}
-		cacheExpiresAt := cacheDeadline
-		if sessionExpiresAt.Before(cacheExpiresAt) {
-			cacheExpiresAt = sessionExpiresAt
+		cacheDeadlineAt := cacheDeadline
+		if sessionExpiresAt.Before(cacheDeadlineAt) {
+			cacheDeadlineAt = sessionExpiresAt
 		}
-		if cacheExpiresAt.Sub(now) < time.Millisecond {
+		if cacheDeadlineAt.Sub(now) < time.Millisecond {
 			return errUserSessionCacheObservationStale
 		}
-		redisExpiration = cacheExpiresAt.UnixMilli()
+		cacheExpiresAt = cacheDeadlineAt.UnixMilli()
+		redisTTL = cacheExpiresAt - now.UnixMilli()
 	} else {
 		ttl := min(sessionTTL, time.Duration(userCacheTTLSeconds())*time.Second)
 		if ttl <= 0 {
 			ttl = time.Second
 		}
-		redisExpiration = ttl.Milliseconds()
-		if redisExpiration <= 0 {
-			redisExpiration = 1
+		redisTTL = ttl.Milliseconds()
+		if redisTTL <= 0 {
+			redisTTL = 1
 		}
+		cacheExpiresAt = now.Add(time.Duration(redisTTL) * time.Millisecond).UnixMilli()
 	}
 	entry.CacheSchema = userSessionCacheSchema
-	entry.CacheExpiresAt = redisExpiration
+	entry.CacheExpiresAt = cacheExpiresAt
 	entry.CacheMAC = userSessionCacheMAC(userSessionCacheKey(entry.SID), entry)
 	const script = `
 local current_status = redis.call('HGET', KEYS[1], 'Status')
@@ -347,13 +347,13 @@ redis.call('HSET', KEYS[1],
 if ARGV[5] == 'active' then
   redis.call('PEXPIREAT', KEYS[1], ARGV[15])
 else
-  redis.call('PEXPIRE', KEYS[1], ARGV[15])
+  redis.call('PEXPIRE', KEYS[1], ARGV[17])
 end
 return 1`
 	result, err := common.RDB.Eval(context.Background(), script, []string{userSessionCacheKey(entry.SID)},
 		entry.SID, entry.UserID, entry.Version, entry.UserAuthVersion, entry.Status,
 		entry.LoginMethod, entry.IP, entry.UserAgent, entry.CreatedAt, entry.LastActiveAt,
-		entry.ExpiresAt, entry.RevokedAt, entry.RevokedReason, entry.CacheSchema, redisExpiration, entry.CacheMAC,
+		entry.ExpiresAt, entry.RevokedAt, entry.RevokedReason, entry.CacheSchema, cacheExpiresAt, entry.CacheMAC, redisTTL,
 	).Int()
 	if err != nil {
 		return err

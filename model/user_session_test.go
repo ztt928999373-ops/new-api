@@ -126,6 +126,14 @@ func TestUserSessionCacheTTLUsesShortCacheWindow(t *testing.T) {
 			cacheDeadline = userSessionCacheDeadline()
 		}
 		require.NoError(t, writeUserSessionCache(entry, cacheDeadline), test.name)
+		cachedEntry, cacheErr := getUserSessionCache(sid)
+		if test.status == UserSessionStatusActive {
+			require.NoError(t, cacheErr, test.name)
+			assert.Greater(t, cachedEntry.CacheExpiresAt, time.Now().UnixMilli(), test.name)
+		} else {
+			assert.ErrorIs(t, cacheErr, ErrUserSessionInactive, test.name)
+			assert.Greater(t, entry.CacheExpiresAt, time.Now().UnixMilli(), test.name)
+		}
 		ttl := server.TTL(userSessionCacheKey(sid))
 		assert.Positive(t, ttl, test.name)
 		assert.LessOrEqual(t, ttl, test.wantMaxTTL, test.name)
@@ -211,6 +219,28 @@ func TestSessionCacheLuaUsesAbsoluteActiveAndRelativeDenyExpiry(t *testing.T) {
 	denyTTL := server.TTL(userSessionCacheKey(denied.SID))
 	assert.Positive(t, denyTTL)
 	assert.LessOrEqual(t, denyTTL, 2*time.Second, "a delayed deny publication must receive a full relative short TTL at Redis execution")
+}
+
+func TestInvalidSessionDenyCacheCannotReauthorizeActiveDatabaseRow(t *testing.T) {
+	setupUserSessionTest(t)
+	useUserCacheMiniRedis(t)
+	createUserSessionTestUser(t, 1205, 1)
+	session := newTestUserSession("invalid-deny-cache-active-db", 1205, time.Now().Unix())
+	require.NoError(t, CreateUserSession(session))
+
+	entry := session.cacheEntry()
+	entry.Status = UserSessionStatusRevoking
+	entry.RevokedAt = time.Now().Unix()
+	require.NoError(t, writeUserSessionCache(entry, time.Time{}))
+	require.NoError(t, common.RDB.HSet(context.Background(), userSessionCacheKey(session.SID), "CacheMAC", "invalid").Err())
+
+	var authoritative UserSession
+	require.NoError(t, DB.Where("sid = ?", session.SID).First(&authoritative).Error)
+	assert.Equal(t, UserSessionStatusActive, authoritative.Status)
+
+	cached, err := GetUserSessionCached(session.SID)
+	assert.Nil(t, cached)
+	assert.ErrorIs(t, err, ErrUserSessionInactive)
 }
 
 func TestUserSessionCreateListAndRevokeOne(t *testing.T) {
