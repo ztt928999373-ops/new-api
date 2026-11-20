@@ -4,6 +4,7 @@
 package credentialcrypto
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -197,6 +198,9 @@ func createPrivateFile(path string) (*os.File, error) {
 	sa := windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: sd}
 	h, err := windows.CreateFile(p, windows.GENERIC_WRITE, windows.FILE_SHARE_READ, &sa, windows.CREATE_NEW, windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
 	if err != nil {
+		if errors.Is(err, windows.ERROR_FILE_EXISTS) || errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
+			return nil, &os.PathError{Op: "create", Path: path, Err: err}
+		}
 		return nil, ErrUnavailable
 	}
 	return os.NewFile(uintptr(h), path), nil
