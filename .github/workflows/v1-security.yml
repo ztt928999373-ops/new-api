@@ -56,6 +56,11 @@ jobs:
             TEST_POSTGRES_DSN='postgres://postgres:synthetic-test-only@127.0.0.1:25436/credential_test?sslmode=disable' \
             go test -json -race -count=2 ./model -run '^TestTOTPEncryptedStorageDatabaseMatrix$' > "$RUNNER_TEMP/v1-security/totp-storage-3db.jsonl"
           go test -json -race -count=1 ./controller -run '^(TestTOTP|TestHistoricalTOTP|TestSecurityLogin|TestSecurityEnrollment)' > "$RUNNER_TEMP/v1-security/totp-authentication.jsonl"
+          go test -json -race -count=10 ./middleware -run '^TestExpiredTOTPFailureWindowRestartsAfterLockout$' > "$RUNNER_TEMP/v1-security/totp-lockout-race.jsonl"
+          go test -json -race -count=10 ./middleware -run '^TestTOTPFailureCounterUpdateErrorFailsClosed$' > "$RUNNER_TEMP/v1-security/totp-counter-fail-closed.jsonl"
+          TEST_MYSQL_DSN='root:synthetic-test-only@tcp(127.0.0.1:23316)/credential_test?parseTime=true' \
+            TEST_POSTGRES_DSN='postgres://postgres:synthetic-test-only@127.0.0.1:25436/credential_test?sslmode=disable' \
+            go test -json -race -count=10 ./middleware -run '^TestIncrementFailedAttemptsMultiConnectionDatabaseMatrix$' > "$RUNNER_TEMP/v1-security/totp-lockout-multi-connection.jsonl"
           go test -json -race -count=1 ./internal/localops ./pkg/credentialcrypto -run '^(TestTOTP|TestLocalInstall|TestRecovery|TestEnvelope|TestLocalNonce|TestPrivate)' > "$RUNNER_TEMP/v1-security/totp-recovery.jsonl"
           # Synthetic inherited lowercase proxies reproduce the cloud fixture
           # contamination; this unit test makes no outbound network requests.

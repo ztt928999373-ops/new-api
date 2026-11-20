@@ -1,11 +1,13 @@
 package middleware
 
 import (
+	"errors"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -74,4 +76,23 @@ func TestExpiredTOTPFailureWindowRestartsAfterLockout(t *testing.T) {
 	require.NoError(t, model.DB.First(&relocked, locked.Id).Error)
 	assert.Equal(t, 5, relocked.FailedAttempts, "requests during an active lock must not increase the new window")
 	assert.True(t, lockedUntilAfterThreshold.Equal(*relocked.LockedUntil), "active requests must not extend the lockout")
+}
+
+func TestTOTPFailureCounterUpdateErrorFailsClosed(t *testing.T) {
+	setupDashboardAuthMiddlewareTest(t)
+	require.NoError(t, model.DB.AutoMigrate(&model.TwoFA{}))
+	row := &model.TwoFA{UserId: 7002, Secret: "synthetic-seed", IsEnabled: true}
+	require.NoError(t, model.DB.Session(&gorm.Session{SkipHooks: true}).Create(row).Error)
+
+	writeErr := errors.New("synthetic counter write failure")
+	callback := "test:totp-lockout-write-failure"
+	require.NoError(t, model.DB.Callback().Update().Before("gorm:update").Register(callback, func(tx *gorm.DB) {
+		if tx.Statement.Table == "two_fas" {
+			tx.AddError(writeErr)
+		}
+	}))
+	t.Cleanup(func() { require.NoError(t, model.DB.Callback().Update().Remove(callback)) })
+
+	err := service.VerifyTwoFactorCode(row, "not-a-valid-code")
+	require.ErrorIs(t, err, writeErr, "a failed counter write must not be treated as a completed authentication check")
 }
