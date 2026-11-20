@@ -38,6 +38,7 @@ func TestRegisterDisabledRejectsBeforeParsingAndPreservesLogin(t *testing.T) {
 	var usersAfter int64
 	require.NoError(t, model.DB.Model(&model.User{}).Count(&usersAfter).Error)
 	assert.Equal(t, usersBefore, usersAfter)
+	require.NoError(t, model.DB.AutoMigrate(&model.Token{}))
 	var tokens int64
 	require.NoError(t, model.DB.Model(&model.Token{}).Count(&tokens).Error)
 	assert.Zero(t, tokens)
