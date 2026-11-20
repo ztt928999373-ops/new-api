@@ -137,7 +137,7 @@ export function Hero(props: HeroProps) {
             className='landing-animate-fade-up mt-8 flex flex-wrap items-center gap-3 opacity-0'
             style={{ animationDelay: '180ms' }}
           >
-            {props.isAuthenticated ? (
+            {props.isAuthenticated && (
               <>
                 <Button
                   className='group h-11 rounded-lg px-5 text-sm font-medium'
@@ -148,7 +148,8 @@ export function Hero(props: HeroProps) {
                 </Button>
                 {renderDocsButton()}
               </>
-            ) : (
+            )}
+            {!props.isAuthenticated && status?.register_enabled === true && (
               <>
                 <Button
                   className='group h-11 rounded-lg px-5 text-sm font-medium'
@@ -163,6 +164,17 @@ export function Hero(props: HeroProps) {
                   render={<Link to='/pricing' />}
                 >
                   {t('View Pricing')}
+                </Button>
+                {renderDocsButton()}
+              </>
+            )}
+            {!props.isAuthenticated && status?.register_enabled !== true && (
+              <>
+                <Button
+                  className='group h-11 rounded-lg px-5 text-sm font-medium'
+                  render={<Link to='/sign-in' />}
+                >
+                  {t('Sign In')}
                 </Button>
                 {renderDocsButton()}
               </>
