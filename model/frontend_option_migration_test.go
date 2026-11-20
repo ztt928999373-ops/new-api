@@ -72,6 +72,34 @@ func TestMigrateRetiredFrontendOptionsMigratesValidValuesIdempotently(t *testing
 	assert.ElementsMatch(t, before, after)
 }
 
+func TestRegisterEnabledDefaultsClosedAndPreservesExplicitOption(t *testing.T) {
+	db := useFrontendOptionMigrationDB(t)
+	previousEnabled := common.RegisterEnabled
+	previousMap := common.OptionMap
+	t.Cleanup(func() {
+		common.RegisterEnabled = previousEnabled
+		common.OptionMap = previousMap
+	})
+
+	common.RegisterEnabled = false
+	common.OptionMap = map[string]string{}
+	InitOptionMap()
+	assert.False(t, common.RegisterEnabled)
+	assert.Equal(t, "false", common.OptionMap["RegisterEnabled"])
+
+	require.NoError(t, db.Create(&Option{Key: "RegisterEnabled", Value: "false"}).Error)
+	loadOptionsFromDatabase()
+	assert.False(t, common.RegisterEnabled)
+
+	require.NoError(t, db.Model(&Option{}).Where("key = ?", "RegisterEnabled").Update("value", "true").Error)
+	loadOptionsFromDatabase()
+	assert.True(t, common.RegisterEnabled, "a previously persisted opt-in remains effective")
+
+	require.NoError(t, db.Model(&Option{}).Where("key = ?", "RegisterEnabled").Update("value", "false").Error)
+	loadOptionsFromDatabase()
+	assert.False(t, common.RegisterEnabled)
+}
+
 func TestLegacyConsoleListMigrationCapsAPIInfoAndFAQ(t *testing.T) {
 	apiInfo := make([]map[string]any, 51)
 	faq := make([]map[string]any, 51)
