@@ -220,11 +220,33 @@ function Invoke-G1Acceptance {
     return [ordered]@{schema='g1-acceptance/v1';generated_at_utc=[DateTime]::UtcNow.ToString('o');target=@{origin=$origin.GetLeftPart([UriPartial]::Authority);expected_revision=$ExpectedRevision};status=@{http_status=$status.http_status;success=$status.success;source_revision=$status.data.source_revision;setup=$status.data.setup;register_enabled=$status.data.register_enabled;quota_per_unit=$status.data.quota_per_unit};api_http_statuses=$apiStatuses;checks=$checks;listener=$listeners;snapshot=$snapshot;comparison=$comparison;billing_estimates=$billing;future_assertions=@{sse='NOT_RUN';failure_refund='NOT_RUN';timeout='NOT_RUN';retry='NOT_RUN';ab_authorization_isolation='NOT_RUN'}}
 }
 
+function Get-G1AcceptanceExitCode($Result) {
+    $checkStates=@($Result.checks.Values)
+    if (@($checkStates|Where-Object {$_ -eq 'FAIL'}).Count -or $Result.comparison.status -eq 'FAIL') { return 2 }
+    if (@($checkStates|Where-Object {$_ -ne 'PASS'}).Count -or $Result.comparison.status -ne 'PASS') { return 3 }
+    return 0
+}
+
+function Invoke-G1AcceptanceCli($Result,[string]$ReportPath=$OutputPath) {
+    try {
+        if ($null -eq $Result) { $Result=Invoke-G1Acceptance }
+        $json=$Result|ConvertTo-Json -Depth 12
+        $fileHash=$null
+        if ($ReportPath) {
+            Set-Content -LiteralPath $ReportPath -Value $json -Encoding utf8NoBOM -ErrorAction Stop
+            $fileHash=(Get-FileHash -LiteralPath $ReportPath -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+        }
+        $summary=@('G1 只读验收摘要',"目标：$($Result.target.origin)","源码 SHA：$ExpectedRevision",("检查："+($Result.checks|ConvertTo-Json -Compress)),"用户数：$($Result.snapshot.users.Count)；Key 元数据数：$($Result.snapshot.tokens.Count)；消费日志总数：$($Result.snapshot.consume_log_total)",("Mock："+($Result.snapshot.mock.counts|ConvertTo-Json -Compress)),"账务对账：$($Result.comparison.status)",'SSE、失败退款、超时、重试、A/B 隔离：NOT_RUN') -join [Environment]::NewLine
+        Write-Output $summary
+        if ($fileHash) { Write-Output ("脱敏 JSON SHA-256：" + $fileHash) }
+        $script:G1CliExitCode=Get-G1AcceptanceExitCode $Result
+    } catch {
+        Write-Error 'G1 acceptance failed; no successful report status is available.' -ErrorAction Continue
+        $script:G1CliExitCode=2
+    }
+}
+
 if ($MyInvocation.InvocationName -ne '.') {
-    $result=Invoke-G1Acceptance; $json=$result|ConvertTo-Json -Depth 12
-    if ($OutputPath) { Set-Content -LiteralPath $OutputPath -Value $json -Encoding utf8NoBOM }
-    $summary=@('G1 只读验收摘要',"目标：$($result.target.origin)","源码 SHA：$ExpectedRevision",("检查："+($result.checks|ConvertTo-Json -Compress)),"用户数：$($result.snapshot.users.Count)；Key 元数据数：$($result.snapshot.tokens.Count)；消费日志总数：$($result.snapshot.consume_log_total)",("Mock："+($result.snapshot.mock.counts|ConvertTo-Json -Compress)),'SSE、失败退款、超时、重试、A/B 隔离：NOT_RUN') -join [Environment]::NewLine
-    Write-Output $summary
-    if ($OutputPath) { Write-Output ("脱敏 JSON SHA-256：" + (Get-FileHash -LiteralPath $OutputPath -Algorithm SHA256).Hash.ToLowerInvariant()) }
-    if (@($result.checks.Values|Where-Object {$_ -eq 'FAIL'}).Count) { exit 2 }; if (@($result.checks.Values|Where-Object {$_ -in @('UNKNOWN','BLOCKED')}).Count) { exit 3 }
+    Invoke-G1AcceptanceCli
+    exit $script:G1CliExitCode
 }

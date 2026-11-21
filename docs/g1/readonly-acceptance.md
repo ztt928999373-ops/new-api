@@ -42,3 +42,11 @@ $tokenIds = @{ '2' = @(1); '3' = @(2) }
 ```
 
 首次采集形成脱敏基线；后续添加 `-BaselineJsonPath` 比较。只有从受控管理页面独立核实计价配置后，才传入 `-PricingModel`、`-PricingExpression`、`-QuotaPerUsd`、`-GroupRatio` 和 `-NoAdditionalChargesVerified`。换算率必须与 `/api/status.quota_per_unit` 相同；未验证时不传，结果保持 `UNKNOWN`。工具/API 的只读访问仍可能产生正常管理访问审计日志；监听查询需要系统允许读取本机进程信息。任何动态写入、登录、重启、模型调用均需单独授权。
+
+## 结果与退出码
+
+- `0`：基础检查全部 `PASS`，并且提供基线且账务对账为 `PASS`。
+- `2`：检查或账务对账为 `FAIL`，或脱敏报告写入/哈希失败。
+- `3`：至少一项为 `UNKNOWN` / `BLOCKED`，未提供基线（账务对账为 `NOT_RUN`），或其他必需检查未通过。
+
+首次采集可以生成基线报告，但因账务对账尚未运行会返回 `3`；该状态不代表完整账务验收通过。
