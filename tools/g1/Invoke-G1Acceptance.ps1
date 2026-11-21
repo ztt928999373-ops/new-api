@@ -151,6 +151,7 @@ function Compare-G1Snapshots($Baseline,$Current,[object[]]$BillingEstimates) {
     $priorResponses=@($prior.mock.chat_responses); $currentResponses=@($Current.mock.chat_responses)
     $responseHistoryConsistent=($priorResponses.Count -eq [int]$prior.mock.counts.chat_response -and $currentResponses.Count -eq [int]$Current.mock.counts.chat_response -and $currentResponses.Count-$priorResponses.Count -eq $mockResponseDelta)
     $assertions.Add(@{name='mock_response_history_consistent';status=if($responseHistoryConsistent){'PASS'}else{'UNKNOWN'};new_response_count=$currentResponses.Count-$priorResponses.Count;response_count_delta=$mockResponseDelta})
+    $assertions.Add(@{name='mock_inbound_response_delta';status=if($mockInboundDelta -eq $mockResponseDelta){'PASS'}else{'UNKNOWN'};inbound_delta=$mockInboundDelta;response_delta=$mockResponseDelta})
     $newResponseEvents=if($responseHistoryConsistent){@($currentResponses|Select-Object -Skip $priorResponses.Count)}else{@()}
     $oldLogIds=@{}; foreach($item in $prior.consume_logs){$key=if($item.request_ref){'ref:'+$item.request_ref}else{'id:'+$item.id};$oldLogIds[$key]=$true}
     $newLogs=@($Current.consume_logs|Where-Object {$key=if($_.request_ref){'ref:'+$_.request_ref}else{'id:'+$_.id};-not $oldLogIds.ContainsKey($key)})
@@ -158,7 +159,8 @@ function Compare-G1Snapshots($Baseline,$Current,[object[]]$BillingEstimates) {
     if($null -eq $BillingEstimates -or $newResponseEvents.Count -ne 0 -and $BillingEstimates.Count -eq 0){$assertions.Add(@{name='billing_evidence_present';status='UNKNOWN'})}
     $matchedLogs=[Collections.Generic.List[object]]::new(); $usedLogIds=@{}
     foreach($event in $newResponseEvents){
-        if($event.status -ne 200 -or $null -eq $event.prompt_tokens -or $null -eq $event.completion_tokens){continue}
+        if($event.status -ne 200){$assertions.Add(@{name='failed_mock_settlement';status='UNKNOWN';http_status=$event.status});continue}
+        if($null -eq $event.prompt_tokens -or $null -eq $event.completion_tokens){$assertions.Add(@{name='mock_usage_available';status='UNKNOWN';model=$event.model});continue}
         $totalOk=([int]$event.total_tokens -eq ([int]$event.prompt_tokens+[int]$event.completion_tokens))
         $assertions.Add(@{name='mock_total_usage_consistent';status=if($totalOk){'PASS'}else{'FAIL'};model=$event.model;total_tokens=$event.total_tokens})
         $match=@($newLogs|Where-Object { -not $usedLogIds.ContainsKey([string]$_.id) -and $_.prompt_tokens -eq $event.prompt_tokens -and $_.completion_tokens -eq $event.completion_tokens -and $_.model_name -eq $event.model })|Select-Object -First 1

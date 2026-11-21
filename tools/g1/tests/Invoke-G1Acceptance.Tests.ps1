@@ -96,6 +96,16 @@ Assert-G1Test 'missing user baseline returns UNKNOWN' {
     $after=@{users=@(@{id=3;quota=100;used_quota=0;request_count=0});tokens=@(@{id=1;remain_quota=100;used_quota=0});consume_log_total=0;consume_logs=@();mock=@{counts=@{chat_inbound=0;chat_response=0};chat_responses=@()}}
     if ((Compare-G1Snapshots $before $after @()).status -ne 'UNKNOWN') { throw 'missing user baseline returned a confident result' }
 }
+Assert-G1Test 'inbound request without a recorded Mock response returns UNKNOWN' {
+    $before=@{snapshot=@{users=@(@{id=2;quota=100;used_quota=0;request_count=0});tokens=@(@{id=1;remain_quota=100;used_quota=0});consume_log_total=0;consume_logs=@();mock=@{counts=@{chat_inbound=0;chat_response=0};chat_responses=@()}}}
+    $after=@{users=$before.snapshot.users;tokens=$before.snapshot.tokens;consume_log_total=0;consume_logs=@();mock=@{counts=@{chat_inbound=1;chat_response=0};chat_responses=@()}}
+    if ((Compare-G1Snapshots $before $after @()).status -ne 'UNKNOWN') { throw 'inbound without response returned a confident result' }
+}
+Assert-G1Test 'failed Mock response settlement remains UNKNOWN' {
+    $before=@{snapshot=@{users=@(@{id=2;quota=100;used_quota=0;request_count=0});tokens=@(@{id=1;remain_quota=100;used_quota=0});consume_log_total=0;consume_logs=@();mock=@{counts=@{chat_inbound=0;chat_response=0};chat_responses=@()}}}
+    $after=@{users=$before.snapshot.users;tokens=$before.snapshot.tokens;consume_log_total=0;consume_logs=@();mock=@{counts=@{chat_inbound=1;chat_response=1};chat_responses=@(@{status=500;model='g1-mock-text'})}}
+    if ((Compare-G1Snapshots $before $after @()).status -ne 'UNKNOWN') { throw 'failed response settlement returned a confident result' }
+}
 Assert-G1Test 'future scenario slots remain NOT_RUN' {
     $reserved=@{sse='NOT_RUN';failure_refund='NOT_RUN';timeout='NOT_RUN';retry='NOT_RUN';ab_authorization_isolation='NOT_RUN'}
     if (@($reserved.Values|Where-Object {$_ -ne 'NOT_RUN'}).Count -ne 0) { throw 'future scenario unexpectedly enabled' }
