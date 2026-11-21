@@ -123,21 +123,44 @@ function Get-G1BillingEstimate([int]$Prompt,[int]$Completion,[string]$Model,[str
 
 function Compare-G1Snapshots($Baseline,$Current,[object[]]$BillingEstimates) {
     $assertions=[Collections.Generic.List[object]]::new(); $prior=$Baseline.snapshot
+    $requiredSnapshots=@($prior,$Current)
+    foreach($snapshot in $requiredSnapshots){
+        if($null -eq $snapshot -or $null -eq $snapshot.users -or $null -eq $snapshot.tokens -or $null -eq $snapshot.consume_log_total -or $null -eq $snapshot.consume_logs -or $null -eq $snapshot.mock -or $null -eq $snapshot.mock.counts -or $null -eq $snapshot.mock.chat_responses){
+            return @{status='UNKNOWN';mock_inbound_delta=$null;mock_response_delta=$null;consume_log_delta=$null;assertions=@(@{name='snapshot_required_fields';status='UNKNOWN'})}
+        }
+    }
+    if(@($prior.users).Count -eq 0 -or @($Current.users).Count -eq 0 -or @($prior.tokens).Count -eq 0 -or @($Current.tokens).Count -eq 0){
+        return @{status='UNKNOWN';mock_inbound_delta=$null;mock_response_delta=$null;consume_log_delta=$null;assertions=@(@{name='user_and_token_baselines_present';status='UNKNOWN'})}
+    }
+    foreach($snapshot in $requiredSnapshots){
+        if($null -eq $snapshot.mock.counts.chat_inbound -or $null -eq $snapshot.mock.counts.chat_response){return @{status='UNKNOWN';mock_inbound_delta=$null;mock_response_delta=$null;consume_log_delta=$null;assertions=@(@{name='mock_count_fields';status='UNKNOWN'})}}
+        foreach($user in $snapshot.users){if($null -eq $user.id -or $null -eq $user.quota -or $null -eq $user.used_quota -or $null -eq $user.request_count){return @{status='UNKNOWN';mock_inbound_delta=$null;mock_response_delta=$null;consume_log_delta=$null;assertions=@(@{name='user_baseline_fields';status='UNKNOWN'})}}}
+        foreach($token in $snapshot.tokens){if($null -eq $token.id -or $null -eq $token.remain_quota -or $null -eq $token.used_quota){return @{status='UNKNOWN';mock_inbound_delta=$null;mock_response_delta=$null;consume_log_delta=$null;assertions=@(@{name='token_baseline_fields';status='UNKNOWN'})}}}
+        foreach($log in $snapshot.consume_logs){if($null -eq $log.id -or $null -eq $log.user_id -or $null -eq $log.token_id -or $null -eq $log.model_name -or $null -eq $log.quota){return @{status='UNKNOWN';mock_inbound_delta=$null;mock_response_delta=$null;consume_log_delta=$null;assertions=@(@{name='consume_log_baseline_fields';status='UNKNOWN'})}}}
+        foreach($event in $snapshot.mock.chat_responses){if($null -eq $event.status -or $event.status -eq 200 -and ($null -eq $event.model -or $null -eq $event.prompt_tokens -or $null -eq $event.completion_tokens -or $null -eq $event.total_tokens)){return @{status='UNKNOWN';mock_inbound_delta=$null;mock_response_delta=$null;consume_log_delta=$null;assertions=@(@{name='mock_response_baseline_fields';status='UNKNOWN'})}}}
+    }
     $mockInboundDelta=[int]$Current.mock.counts.chat_inbound-[int]$prior.mock.counts.chat_inbound
     $mockResponseDelta=[int]$Current.mock.counts.chat_response-[int]$prior.mock.counts.chat_response
     $logDelta=[int]$Current.consume_log_total-[int]$prior.consume_log_total
     $assertions.Add(@{name='mock_inbound_delta_nonnegative';status=if($mockInboundDelta -ge 0){'PASS'}else{'FAIL'};actual=$mockInboundDelta})
     $assertions.Add(@{name='mock_response_delta_nonnegative';status=if($mockResponseDelta -ge 0){'PASS'}else{'FAIL'};actual=$mockResponseDelta})
+    if($mockInboundDelta -lt 0 -or $mockResponseDelta -lt 0 -or $logDelta -lt 0 -or @($Current.mock.chat_responses).Count -lt @($prior.mock.chat_responses).Count){
+        $assertions.Add(@{name='snapshot_history_monotonic';status='UNKNOWN'})
+        return @{status='UNKNOWN';mock_inbound_delta=$mockInboundDelta;mock_response_delta=$mockResponseDelta;consume_log_delta=$logDelta;assertions=@($assertions)}
+    }
+    $priorResponses=@($prior.mock.chat_responses); $currentResponses=@($Current.mock.chat_responses)
+    $responseHistoryConsistent=($priorResponses.Count -eq [int]$prior.mock.counts.chat_response -and $currentResponses.Count -eq [int]$Current.mock.counts.chat_response -and $currentResponses.Count-$priorResponses.Count -eq $mockResponseDelta)
+    $assertions.Add(@{name='mock_response_history_consistent';status=if($responseHistoryConsistent){'PASS'}else{'UNKNOWN'};new_response_count=$currentResponses.Count-$priorResponses.Count;response_count_delta=$mockResponseDelta})
+    $newResponseEvents=if($responseHistoryConsistent){@($currentResponses|Select-Object -Skip $priorResponses.Count)}else{@()}
     $oldLogIds=@{}; foreach($item in $prior.consume_logs){$key=if($item.request_ref){'ref:'+$item.request_ref}else{'id:'+$item.id};$oldLogIds[$key]=$true}
     $newLogs=@($Current.consume_logs|Where-Object {$key=if($_.request_ref){'ref:'+$_.request_ref}else{'id:'+$_.id};-not $oldLogIds.ContainsKey($key)})
     $assertions.Add(@{name='consume_log_total_delta';status=if($logDelta -eq $newLogs.Count){'PASS'}else{'UNKNOWN'};actual=$logDelta;visible_new_log_count=$newLogs.Count})
+    if($null -eq $BillingEstimates -or $newResponseEvents.Count -ne 0 -and $BillingEstimates.Count -eq 0){$assertions.Add(@{name='billing_evidence_present';status='UNKNOWN'})}
     $matchedLogs=[Collections.Generic.List[object]]::new(); $usedLogIds=@{}
-    foreach($event in $Current.mock.chat_responses){
+    foreach($event in $newResponseEvents){
         if($event.status -ne 200 -or $null -eq $event.prompt_tokens -or $null -eq $event.completion_tokens){continue}
-        if ($null -ne $event.total_tokens) {
-            $totalOk=([int]$event.total_tokens -eq ([int]$event.prompt_tokens+[int]$event.completion_tokens))
-            $assertions.Add(@{name='mock_total_usage_consistent';status=if($totalOk){'PASS'}else{'FAIL'};model=$event.model;total_tokens=$event.total_tokens})
-        }
+        $totalOk=([int]$event.total_tokens -eq ([int]$event.prompt_tokens+[int]$event.completion_tokens))
+        $assertions.Add(@{name='mock_total_usage_consistent';status=if($totalOk){'PASS'}else{'FAIL'};model=$event.model;total_tokens=$event.total_tokens})
         $match=@($newLogs|Where-Object { -not $usedLogIds.ContainsKey([string]$_.id) -and $_.prompt_tokens -eq $event.prompt_tokens -and $_.completion_tokens -eq $event.completion_tokens -and $_.model_name -eq $event.model })|Select-Object -First 1
         if(-not $match){$assertions.Add(@{name='mock_usage_matches_consume_log';status='FAIL';model=$event.model;prompt_tokens=$event.prompt_tokens;completion_tokens=$event.completion_tokens});continue}
         $log=$match; $usedLogIds[[string]$log.id]=$true; $matchedLogs.Add($log)
@@ -147,9 +170,13 @@ function Compare-G1Snapshots($Baseline,$Current,[object[]]$BillingEstimates) {
             $assertions.Add(@{name='consume_log_quota_matches_price';status=if([long]$log.quota -eq $expected){'PASS'}else{'FAIL'};log_id=$log.id;expected_quota=$expected;actual_quota=$log.quota})
         } else { $assertions.Add(@{name='consume_log_quota_matches_price';status='UNKNOWN';log_id=$log.id}) }
     }
+    if($usedLogIds.Count -ne $newLogs.Count){$assertions.Add(@{name='all_new_consume_logs_matched';status='FAIL';new_log_count=$newLogs.Count;matched_log_count=$usedLogIds.Count})}
+    $priorUserIds=@($prior.users|ForEach-Object {[string]$_.id}); $currentUserIds=@($Current.users|ForEach-Object {[string]$_.id})
+    $priorTokenIds=@($prior.tokens|ForEach-Object {[string]$_.id}); $currentTokenIds=@($Current.tokens|ForEach-Object {[string]$_.id})
+    if(@(Compare-Object $priorUserIds $currentUserIds).Count -or @(Compare-Object $priorTokenIds $currentTokenIds).Count){$assertions.Add(@{name='user_and_token_identity_sets_match';status='UNKNOWN'})}
     foreach($user in $Current.users){
         $before=@($prior.users|Where-Object {[int]$_.id -eq [int]$user.id})|Select-Object -First 1
-        if(-not $before){continue}
+        if(-not $before){$assertions.Add(@{name='user_baseline_match';status='UNKNOWN';user_id=$user.id});continue}
         $userLogs=@($newLogs|Where-Object {[int]$_.user_id -eq [int]$user.id}); $charge=($userLogs|Measure-Object -Property quota -Sum).Sum; if($null -eq $charge){$charge=0}
         $dq=[int]$user.quota-[int]$before.quota; $du=[int]$user.used_quota-[int]$before.used_quota; $dr=[int]$user.request_count-[int]$before.request_count
         $matches=($dq -eq -[int]$charge -and $du -eq [int]$charge -and $dr -eq $userLogs.Count)
@@ -157,7 +184,8 @@ function Compare-G1Snapshots($Baseline,$Current,[object[]]$BillingEstimates) {
     }
     foreach($token in $Current.tokens){
         $before=@($prior.tokens|Where-Object {[int]$_.id -eq [int]$token.id})|Select-Object -First 1
-        if(-not $before -or $token.unlimited_quota){continue}
+        if(-not $before){$assertions.Add(@{name='token_baseline_match';status='UNKNOWN';token_id=$token.id});continue}
+        if($token.unlimited_quota){$assertions.Add(@{name='key_balance_reconciled';status='UNKNOWN';token_id=$token.id;reason='unlimited quota'});continue}
         $tokenLogs=@($newLogs|Where-Object {[int]$_.token_id -eq [int]$token.id}); $charge=($tokenLogs|Measure-Object -Property quota -Sum).Sum; if($null -eq $charge){$charge=0}
         $dq=[int]$token.remain_quota-[int]$before.remain_quota; $du=[int]$token.used_quota-[int]$before.used_quota
         $matches=($dq -eq -[int]$charge -and $du -eq [int]$charge)

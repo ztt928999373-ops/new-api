@@ -58,17 +58,43 @@ Assert-G1Test 'user/token projections exclude unapproved fields' {
     if (($user|ConvertTo-Json) -match 'secret|private' -or ($token|ConvertTo-Json) -match 'secret-key') { throw 'projection leaked data' }
 }
 Assert-G1Test 'snapshot reconciliation matches Mock usage, charge, balances, and request count' {
-    $before=@{snapshot=@{users=@(@{id=2;quota=10000;used_quota=0;request_count=0});tokens=@(@{id=1;remain_quota=10000;used_quota=0});consume_log_total=0;consume_logs=@();mock=@{counts=@{chat_inbound=0;chat_response=0}}}}
-    $after=@{users=@(@{id=2;quota=9910;used_quota=90;request_count=1});tokens=@(@{id=1;remain_quota=9910;used_quota=90});consume_log_total=1;consume_logs=@(@{id=1;user_id=2;token_id=1;model_name='g1-mock-text';quota=90;prompt_tokens=120;completion_tokens=30});mock=@{counts=@{chat_inbound=1;chat_response=1};chat_responses=@(@{status=200;model='g1-mock-text';prompt_tokens=120;completion_tokens=30})}}
+    $before=@{snapshot=@{users=@(@{id=2;quota=10000;used_quota=0;request_count=0});tokens=@(@{id=1;remain_quota=10000;used_quota=0});consume_log_total=0;consume_logs=@();mock=@{counts=@{chat_inbound=0;chat_response=0};chat_responses=@()}}}
+    $after=@{users=@(@{id=2;quota=9910;used_quota=90;request_count=1});tokens=@(@{id=1;remain_quota=9910;used_quota=90});consume_log_total=1;consume_logs=@(@{id=1;user_id=2;token_id=1;model_name='g1-mock-text';quota=90;prompt_tokens=120;completion_tokens=30});mock=@{counts=@{chat_inbound=1;chat_response=1};chat_responses=@(@{status=200;model='g1-mock-text';prompt_tokens=120;completion_tokens=30;total_tokens=150})}}
     $estimate=Get-G1BillingEstimate 120 30 'g1-mock-text' 'g1-mock-text' 'tier("base", p * 1 + c * 2)' 500000 1 $true $true
     $comparison=Compare-G1Snapshots $before $after @($estimate)
     if ($comparison.status -ne 'PASS') { throw ('reconciliation failed: '+($comparison|ConvertTo-Json -Compress -Depth 8)) }
 }
 Assert-G1Test 'snapshot reconciliation detects quota mismatch' {
-    $before=@{snapshot=@{users=@(@{id=2;quota=10000;used_quota=0;request_count=0});tokens=@();consume_log_total=0;consume_logs=@();mock=@{counts=@{chat_inbound=0;chat_response=0}}}}
-    $after=@{users=@(@{id=2;quota=9920;used_quota=80;request_count=1});tokens=@();consume_log_total=1;consume_logs=@(@{id=7;user_id=2;token_id=1;model_name='g1-mock-text';quota=80;prompt_tokens=120;completion_tokens=30});mock=@{counts=@{chat_inbound=1;chat_response=1};chat_responses=@(@{status=200;model='g1-mock-text';prompt_tokens=120;completion_tokens=30;total_tokens=150})}}
+    $before=@{snapshot=@{users=@(@{id=2;quota=10000;used_quota=0;request_count=0});tokens=@(@{id=1;remain_quota=10000;used_quota=0});consume_log_total=0;consume_logs=@();mock=@{counts=@{chat_inbound=0;chat_response=0};chat_responses=@()}}}
+    $after=@{users=@(@{id=2;quota=9920;used_quota=80;request_count=1});tokens=@(@{id=1;remain_quota=9920;used_quota=80});consume_log_total=1;consume_logs=@(@{id=7;user_id=2;token_id=1;model_name='g1-mock-text';quota=80;prompt_tokens=120;completion_tokens=30});mock=@{counts=@{chat_inbound=1;chat_response=1};chat_responses=@(@{status=200;model='g1-mock-text';prompt_tokens=120;completion_tokens=30;total_tokens=150})}}
     $estimate=Get-G1BillingEstimate 120 30 'g1-mock-text' 'g1-mock-text' 'tier("base", p * 1 + c * 2)' 500000 1 $true $true
     if ((Compare-G1Snapshots $before $after @($estimate)).status -ne 'FAIL') { throw 'quota mismatch was not detected' }
+}
+Assert-G1Test 'historical Mock events are ignored when there is no new request' {
+    $history=@{users=@(@{id=2;quota=9910;used_quota=90;request_count=1});tokens=@(@{id=1;remain_quota=9910;used_quota=90});consume_log_total=1;consume_logs=@(@{id=1;user_id=2;token_id=1;model_name='g1-mock-text';quota=90;prompt_tokens=120;completion_tokens=30});mock=@{counts=@{chat_inbound=1;chat_response=1};chat_responses=@(@{status=200;model='g1-mock-text';prompt_tokens=120;completion_tokens=30;total_tokens=150})}}
+    $before=@{snapshot=$history}; $after=@{users=$history.users;tokens=$history.tokens;consume_log_total=$history.consume_log_total;consume_logs=$history.consume_logs;mock=$history.mock}
+    $comparison=Compare-G1Snapshots $before $after @()
+    if ($comparison.status -ne 'PASS' -or $comparison.mock_response_delta -ne 0) { throw ('historical event was reprocessed: '+($comparison|ConvertTo-Json -Compress -Depth 8)) }
+}
+Assert-G1Test 'only the appended Mock event matches a new consume log' {
+    $oldEvent=@{status=200;model='g1-mock-text';prompt_tokens=120;completion_tokens=30;total_tokens=150}
+    $newLog=@{id=2;user_id=2;token_id=1;model_name='g1-mock-text';quota=90;prompt_tokens=120;completion_tokens=30}
+    $before=@{snapshot=@{users=@(@{id=2;quota=9910;used_quota=90;request_count=1});tokens=@(@{id=1;remain_quota=9910;used_quota=90});consume_log_total=1;consume_logs=@(@{id=1;user_id=2;token_id=1;model_name='g1-mock-text';quota=90;prompt_tokens=120;completion_tokens=30});mock=@{counts=@{chat_inbound=1;chat_response=1};chat_responses=@($oldEvent)}}}
+    $newEvent=@{status=200;model='g1-mock-text';prompt_tokens=120;completion_tokens=30;total_tokens=150}
+    $after=@{users=@(@{id=2;quota=9820;used_quota=180;request_count=2});tokens=@(@{id=1;remain_quota=9820;used_quota=180});consume_log_total=2;consume_logs=@(@{id=1;user_id=2;token_id=1;model_name='g1-mock-text';quota=90;prompt_tokens=120;completion_tokens=30},$newLog);mock=@{counts=@{chat_inbound=2;chat_response=2};chat_responses=@($oldEvent,$newEvent)}}
+    $estimate=Get-G1BillingEstimate 120 30 'g1-mock-text' 'g1-mock-text' 'tier("base", p * 1 + c * 2)' 500000 1 $true $true
+    $comparison=Compare-G1Snapshots $before $after @($estimate)
+    if ($comparison.status -ne 'PASS' -or $comparison.mock_response_delta -ne 1) { throw ('new event reconciliation failed: '+($comparison|ConvertTo-Json -Compress -Depth 8)) }
+}
+Assert-G1Test 'missing key baseline fields return UNKNOWN' {
+    $before=@{snapshot=@{users=@(@{id=2;quota=100;used_quota=0;request_count=0});tokens=@(@{id=1;used_quota=0});consume_log_total=0;consume_logs=@();mock=@{counts=@{chat_inbound=0;chat_response=0};chat_responses=@()}}}
+    $after=@{users=@(@{id=2;quota=100;used_quota=0;request_count=0});tokens=@(@{id=1;remain_quota=100;used_quota=0});consume_log_total=0;consume_logs=@();mock=@{counts=@{chat_inbound=0;chat_response=0};chat_responses=@()}}
+    if ((Compare-G1Snapshots $before $after @()).status -ne 'UNKNOWN') { throw 'missing key baseline returned a confident result' }
+}
+Assert-G1Test 'missing user baseline returns UNKNOWN' {
+    $before=@{snapshot=@{users=@(@{id=2;quota=100;used_quota=0;request_count=0});tokens=@(@{id=1;remain_quota=100;used_quota=0});consume_log_total=0;consume_logs=@();mock=@{counts=@{chat_inbound=0;chat_response=0};chat_responses=@()}}}
+    $after=@{users=@(@{id=3;quota=100;used_quota=0;request_count=0});tokens=@(@{id=1;remain_quota=100;used_quota=0});consume_log_total=0;consume_logs=@();mock=@{counts=@{chat_inbound=0;chat_response=0};chat_responses=@()}}
+    if ((Compare-G1Snapshots $before $after @()).status -ne 'UNKNOWN') { throw 'missing user baseline returned a confident result' }
 }
 Assert-G1Test 'future scenario slots remain NOT_RUN' {
     $reserved=@{sse='NOT_RUN';failure_refund='NOT_RUN';timeout='NOT_RUN';retry='NOT_RUN';ab_authorization_isolation='NOT_RUN'}
