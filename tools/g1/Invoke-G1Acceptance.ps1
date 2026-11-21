@@ -223,7 +223,7 @@ function Invoke-G1Acceptance {
 function Get-G1AcceptanceExitCode($Result) {
     $checkStates=@($Result.checks.Values)
     if (@($checkStates|Where-Object {$_ -eq 'FAIL'}).Count -or $Result.comparison.status -eq 'FAIL') { return 2 }
-    if (@($checkStates|Where-Object {$_ -ne 'PASS'}).Count -or $Result.comparison.status -ne 'PASS') { return 3 }
+    if ($checkStates.Count -eq 0 -or @($checkStates|Where-Object {$_ -ne 'PASS'}).Count -or $Result.comparison.status -ne 'PASS') { return 3 }
     return 0
 }
 
