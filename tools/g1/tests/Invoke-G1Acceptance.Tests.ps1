@@ -114,10 +114,12 @@ Assert-G1Test 'CLI process exit codes reflect comparison and report outcome' {
     $temp=[IO.Path]::GetTempPath(); $driverPath=Join-Path $temp (([Guid]::NewGuid().ToString())+'.ps1')
     $sourcePath=(Resolve-Path (Join-Path $PSScriptRoot '..\Invoke-G1Acceptance.ps1')).Path
     $driver=@'
-param([string]$SourcePath,[string]$ComparisonStatus,[string]$ReportPath,[switch]$EmptyChecks)
+param([string]$SourcePath,[string]$ComparisonStatus,[string]$ReportPath,[switch]$EmptyChecks,[switch]$OnlyOneCheck,[switch]$MissingOneCheck)
 . $SourcePath -BaseUri 'http://127.0.0.1:3137' -ExpectedRevision ('0' * 40) -Port 3137
 $checks=[ordered]@{status_http='PASS';source_revision='PASS';setup='PASS';registration_closed='PASS';listener_identity='PASS';user_api='PASS';token_api='PASS';consume_log_api='PASS'}
 if ($EmptyChecks) { $checks.Clear() }
+if ($OnlyOneCheck) { $checks=[ordered]@{status_http='PASS'} }
+if ($MissingOneCheck) { $checks.Remove('consume_log_api') }
 $result=[ordered]@{
     target=@{origin='http://127.0.0.1:3137'}
     checks=$checks
@@ -133,6 +135,8 @@ exit $script:G1CliExitCode
         $unknownOutput=@(& pwsh -NoProfile -File $driverPath -SourcePath $sourcePath -ComparisonStatus 'UNKNOWN' -ReportPath '' 2>&1); $unknownCode=$LASTEXITCODE
         $passOutput=@(& pwsh -NoProfile -File $driverPath -SourcePath $sourcePath -ComparisonStatus 'PASS' -ReportPath '' 2>&1); $passCode=$LASTEXITCODE
         $missingChecksOutput=@(& pwsh -NoProfile -File $driverPath -SourcePath $sourcePath -ComparisonStatus 'PASS' -ReportPath '' -EmptyChecks 2>&1); $missingChecksCode=$LASTEXITCODE
+        $oneCheckOutput=@(& pwsh -NoProfile -File $driverPath -SourcePath $sourcePath -ComparisonStatus 'PASS' -ReportPath '' -OnlyOneCheck 2>&1); $oneCheckCode=$LASTEXITCODE
+        $missingOneOutput=@(& pwsh -NoProfile -File $driverPath -SourcePath $sourcePath -ComparisonStatus 'PASS' -ReportPath '' -MissingOneCheck 2>&1); $missingOneCode=$LASTEXITCODE
         $notRunOutput=@(& pwsh -NoProfile -File $driverPath -SourcePath $sourcePath -ComparisonStatus 'NOT_RUN' -ReportPath '' 2>&1); $notRunCode=$LASTEXITCODE
         $missingParent=Join-Path $temp ([Guid]::NewGuid().ToString()); $badPath=Join-Path $missingParent 'report.json'
         $writeOutput=@(& pwsh -NoProfile -File $driverPath -SourcePath $sourcePath -ComparisonStatus 'PASS' -ReportPath $badPath 2>&1); $writeCode=$LASTEXITCODE
@@ -140,6 +144,8 @@ exit $script:G1CliExitCode
         if ($unknownCode -ne 3) { throw "UNKNOWN comparison process exit was $unknownCode" }
         if ($passCode -ne 0) { throw "PASS comparison process exit was $passCode" }
         if ($missingChecksCode -ne 3) { throw "missing required checks process exit was $missingChecksCode" }
+        if ($oneCheckCode -ne 3) { throw "single PASS check process exit was $oneCheckCode" }
+        if ($missingOneCode -ne 3) { throw "one missing required check process exit was $missingOneCode" }
         if ($notRunCode -ne 3 -or (($notRunOutput -join [Environment]::NewLine) -notmatch '账务对账：NOT_RUN')) { throw 'no-baseline process did not report NOT_RUN with incomplete exit status' }
         if ($writeCode -eq 0) { throw 'report write failure returned a successful process exit' }
     } finally { Remove-Item -LiteralPath $driverPath -Force -ErrorAction SilentlyContinue }

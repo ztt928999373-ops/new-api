@@ -223,7 +223,9 @@ function Invoke-G1Acceptance {
 function Get-G1AcceptanceExitCode($Result) {
     $checkStates=@($Result.checks.Values)
     if (@($checkStates|Where-Object {$_ -eq 'FAIL'}).Count -or $Result.comparison.status -eq 'FAIL') { return 2 }
-    if ($checkStates.Count -eq 0 -or @($checkStates|Where-Object {$_ -ne 'PASS'}).Count -or $Result.comparison.status -ne 'PASS') { return 3 }
+    $requiredChecks=@('status_http','source_revision','setup','registration_closed','listener_identity','user_api','token_api','consume_log_api')
+    $missingChecks=@($requiredChecks|Where-Object { $_ -notin $Result.checks.Keys })
+    if ($missingChecks.Count -or @($checkStates|Where-Object {$_ -ne 'PASS'}).Count -or $Result.comparison.status -ne 'PASS') { return 3 }
     return 0
 }
 
