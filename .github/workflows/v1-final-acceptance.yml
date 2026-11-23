@@ -1,0 +1,60 @@
+name: V1 merged functional acceptance
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [product/v1]
+permissions:
+  contents: read
+jobs:
+  budget:
+    if: github.event.pull_request.head.ref == 'test/v1-final-acceptance' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GOWORK: 'off'
+      CGO_ENABLED: '1'
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: synthetic-test-only
+          MYSQL_ROOT_HOST: '%'
+          MYSQL_DATABASE: credential_test
+        ports: ['23316:3306']
+        options: --health-cmd="mysqladmin ping -h localhost -psynthetic-test-only" --health-interval=10s --health-timeout=5s --health-retries=12
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: synthetic-test-only
+          POSTGRES_DB: credential_test
+        ports: ['25436:5432']
+        options: --health-cmd="pg_isready -U postgres -d credential_test" --health-interval=10s --health-timeout=5s --health-retries=12
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: f74eb795f11ed345283f12c6d0260ea1328f7ccd
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version-file: go.mod
+      - name: Verify actual merged V1 code
+        env:
+          SUANJIE_TEST_MYSQL_CONTAINER: ${{ job.services.mysql.id }}
+          SUANJIE_TEST_POSTGRES_CONTAINER: ${{ job.services.postgres.id }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/v1-acceptance" web/dist
+          touch web/dist/index.html
+          git rev-parse HEAD > "$RUNNER_TEMP/v1-acceptance/sha.txt"
+          go vet ./...
+          go test -json -count=1 ./... > "$RUNNER_TEMP/v1-acceptance/full.jsonl"
+          go test -json -race -count=1 ./service -run '^(TestReadOnlyCostSnapshot|TestMockHTTP)' > "$RUNNER_TEMP/v1-acceptance/http-snapshot.jsonl"
+          SUANJIE_TEST_DATABASES=local-synthetic go test -json -race -count=1 ./router -run '^(TestUpstreamBudget|TestSupplierCost|TestAggregateCostPublication|TestMockCost|TestMergedMockCost)' > "$RUNNER_TEMP/v1-acceptance/costs-routing-three-db.jsonl"
+          SUANJIE_TEST_DATABASES=local-synthetic go test -json -race -count=1 ./middleware ./model ./service/credentials -run '^(TestDashboardDenialAudit.*|TestOverallChannelStatusIndependentOfCredentials|TestStoreDatabaseMatrix|TestResolverOwnerPlatformRevocationAndAuditFailure)$' > "$RUNNER_TEMP/v1-acceptance/security-three-db.jsonl"
+          SUANJIE_TEST_DATABASES=local-synthetic go test -json -race -count=1 ./service/credentials > "$RUNNER_TEMP/v1-acceptance/credentials.jsonl"
+          go test -json -count=1 ./internal/localops > "$RUNNER_TEMP/v1-acceptance/localops.jsonl"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: v1-merged-acceptance
+          path: ${{ runner.temp }}/v1-acceptance/
+          retention-days: 14
