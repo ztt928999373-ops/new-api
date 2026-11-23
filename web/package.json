@@ -121,7 +121,9 @@
     "minimist": "1.2.8",
     "postcss": "8.5.15",
     "qs": "6.15.2",
-    "uuid": "14.0.0"
+    "uuid": "14.0.0",
+    "proxy-addr": "2.0.8",
+    "seroval": "1.6.9"
   },
   "packageManager": "bun@1.4.4"
 }
