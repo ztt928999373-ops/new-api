@@ -84,7 +84,7 @@ smoke_state="$HOME/.local/state/suanjie/smoke-$(date +%s)"
 bash deploy/private/manage.sh smoke "$smoke_state" "$PG_IMAGE"
 ```
 
-仅在 `SMOKE=PASS` 且退出码 0 时继续。使用新项目、新卷以及只有内部网络的 App、PG、固定 Bun 合成上游，无主机映射。脚本在启动前检查实际渲染网络和配置，启动后检查容器绑定；覆盖健康、全新 PostgreSQL、一次性 Root 初始化、加密登录及角色、注册拒绝、支付入口标志关闭、模型 Key 创建与一次 mock 响应（含 usage）。无外部供应商请求，不测试真实资金、SSE 或支付事务。脚本仅清理本次唯一测试项目的容器、网络、卷，保留私有合成状态目录；失败不打印响应正文、Key、token 或完整环境。若失败，先用本轮专属项目定位问题，不进入下一步，也不关闭访问保护求通过。
+仅在 `SMOKE=PASS` 且退出码 0 时继续。使用新项目、新卷以及只有内部网络的 App、PG、固定 Bun 合成上游，无主机映射。脚本在启动前检查实际渲染网络和配置，启动后检查容器绑定；覆盖健康、全新 PostgreSQL、一次性 Root 初始化、加密登录及角色、注册拒绝、支付入口标志关闭、模型 Key 创建与一次 mock 响应（含 usage）。无外部供应商请求，不测试真实资金、SSE 或支付事务。持久化验收会在备份恢复后用合成 Root 凭据再次登录，并核验注册/充值关闭及原卷未变。脚本仅清理本次唯一测试项目的容器、网络、卷，保留私有合成状态目录；失败不打印响应正文、Key、token 或完整环境。若失败，先用本轮专属项目定位问题，不进入下一步，也不关闭访问保护求通过。
 
 ## 3. 私有实例及首次管理员
 
@@ -108,7 +108,7 @@ ssh -N -o StrictHostKeyChecking=yes -o ExitOnForwardFailure=yes \
 
 在该管理机访问 `http://127.0.0.1:13000`，且仅在出现全新设置页时设置唯一 Root 名和密码，关闭演示模式；不要把首次初始化 URL 暴露给其他人。初始化后确认 Root 能登录、公开注册为关、在线充值无支付方式；不确认支付合规、不填收款配置。注册关闭来自基准默认和数据库选项，并非不可修改的门禁；恢复旧数据后尤其要重查。`/api/status` 成功只说明服务健康，不代表登录、支付或对外可用。
 
-当前仅支持可信、单管理员宿主的隧道模式；`SESSION_COOKIE_SECURE=false` **不是公网配置**，SSH 保护远程链路，宿主回环与容器桥仍是本机信任边界。Compose `json-file` 的 `max-size=10m`、`max-file=3` 只约束容器 stdout/stderr；应用写入 `/data/logs` 的持久化文件由 `manage.sh prune-logs` 按30天和200 MiB上限单独清理，不能替代集中式或加密日志导出。若后续批准域名和 HTTPS，先在私网/VPN入口验证 TLS、`SESSION_COOKIE_SECURE=true`、准确 `SESSION_COOKIE_TRUSTED_URL`、明确可信代理地址、阻断公网 setup 和公网管理，并验证 SSE 代理行为；本模板不启用公网反代。适用参考：OWASP ASVS 5.0.0 V6/V7/V12、Authentication/Session Management Cheat Sheets；此合成验收不宣称全面 ASVS 合规。容器环境可由 Docker 管理员读取，禁止发布 `docker inspect` 全文、展开后的 Compose 或私有日志；禁止 `set -x`。密钥不会写入镜像或 Git。
+当前仅支持可信、单管理员宿主的隧道模式；`SESSION_COOKIE_SECURE=false` **不是公网配置**，SSH 保护远程链路，宿主回环与容器桥仍是本机信任边界。Compose `json-file` 的 `max-size=10m`、`max-file=3` 只约束容器 stdout/stderr；应用写入 `/data/logs` 的持久化文件由 `manage.sh prune-logs` 在应用停止后的手动维护窗口按30天/200 MiB策略清理。这不是持续实时容量限制，不能替代集中式或加密日志导出。若后续批准域名和 HTTPS，先在私网/VPN入口验证 TLS、`SESSION_COOKIE_SECURE=true`、准确 `SESSION_COOKIE_TRUSTED_URL`、明确可信代理地址、阻断公网 setup 和公网管理，并验证 SSE 代理行为；本模板不启用公网反代。适用参考：OWASP ASVS 5.0.0 V6/V7/V12、Authentication/Session Management Cheat Sheets；此合成验收不宣称全面 ASVS 合规。容器环境可由 Docker 管理员读取，禁止发布 `docker inspect` 全文、展开后的 Compose 或私有日志；禁止 `set -x`。密钥不会写入镜像或 Git。
 
 本轮不接入真实供应商、开放注册、充值或收费。受管供应商凭据需要另验 Linux 专用私有 keyring 和数据库记录，不能把 Windows DPAPI 材料复制给 Linux，也不能用旧渠道明文方式绕过。当前基准的 TOTP 运维初始化只支持 SQLite；本 PostgreSQL 配置不启用、不声明支持 TOTP，不用 SQL 伪造 READY。若要开放非隧道管理或接入真实供应商，先单独验收相应能力。
 
@@ -118,10 +118,11 @@ ssh -N -o StrictHostKeyChecking=yes -o ExitOnForwardFailure=yes \
 # 在维护窗口停止 app 保证 app 卷和数据库属于同一停止窗口；PG 不停
 bash deploy/private/manage.sh stop-app "$state"
 bash deploy/private/manage.sh backup "$state"
-# 审阅成功输出并保留对应镜像；按需恢复服务
-bash deploy/private/manage.sh restart "$state"
+# 审阅成功输出；应用保持停止以进行一致性维护
 # 按审核后的30天/200 MiB策略清理应用持久化日志文件；仅操作该 state 的 app-data 卷
 bash deploy/private/manage.sh prune-logs "$state"
+# 按需恢复服务
+bash deploy/private/manage.sh restart "$state"
 # 或对两个容器都停机（卷保留）
 # bash deploy/private/manage.sh stop "$state"
 ```

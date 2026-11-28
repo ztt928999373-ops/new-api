@@ -308,6 +308,10 @@ case $action in
         ;;
     prune-logs)
         docker_local image inspect "$pg_image" >/dev/null 2>&1 || die 'Pinned PostgreSQL image is not present locally.'
+        [[ $project =~ ^suanjie-private-[0-9a-f]{16}$ ]] || die 'Log pruning requires a generated private project.'
+        running=$(compose ps --status running -q app)
+        [[ -z $running ]] || die 'Stop app before log maintenance; active log files must not be pruned.'
+        docker_local volume inspect "${project}_app-data" >/dev/null || die 'Existing app-data volume is required; refusing implicit volume creation.'
         docker_local run --rm --pull never --platform linux/amd64 --network none --read-only \
             --cap-drop ALL --security-opt no-new-privileges \
             -v "${project}_app-data:/data" \

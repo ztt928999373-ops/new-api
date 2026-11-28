@@ -15,6 +15,7 @@ readonly repo=$(git -C "$here" rev-parse --show-toplevel)
 readonly temp="$RUNNER_TEMP/deploy-01c"
 readonly report="$temp/report.txt"
 readonly raw="$temp/raw"
+source "$here/runner-acceptance-helpers.sh"
 
 mkdir -m 700 -p -- "$raw"
 touch "$report"
@@ -44,15 +45,6 @@ snapshot_services() {
 
 snapshot_listeners() { ss -H -lntu | sort > "$1"; }
 
-normalize_firewall() {
-  local family=$1 source=$2 destination=$3
-  if [[ $family == nft ]]; then
-    sed -E 's/counter packets [0-9]+ bytes [0-9]+/counter packets COUNTER bytes COUNTER/g; s/ handle [0-9]+//g' "$source" > "$destination"
-  else
-    sed -E 's/\[[0-9]+:[0-9]+\]/[COUNTERS]/g' "$source" > "$destination"
-  fi
-}
-
 [[ ${RUNNER_ENVIRONMENT:-} == github-hosted ]] || fail 'Runner is not GitHub-hosted.'
 [[ $(uname -s):$(uname -m) == Linux:x86_64 ]] || fail 'Expected Linux amd64.'
 [[ $revision =~ ^[0-9a-f]{40}$ ]] || fail 'Invalid acceptance revision.'
@@ -70,6 +62,7 @@ record "CPU=$(nproc) vCPU"
 record "MEMORY=$(awk '/MemTotal/ {printf "%.0f MiB", $2/1024}' /proc/meminfo)"
 record "DISK=$(df -h "$RUNNER_TEMP" | awk 'NR==2 {printf "size=%s available=%s", $2, $4}')"
 record "CHECKOUT_SHA=$revision"
+bash "$here/test-runner-acceptance-helpers.sh"
 
 docker_local version --format 'DOCKER_CLIENT={{.Client.Version}} DOCKER_SERVER={{.Server.Version}}' > "$raw/docker-version.txt"
 cat "$raw/docker-version.txt"
@@ -142,10 +135,11 @@ cleanup() {
       normalize_firewall "$family" "$before" "$raw/$family.before.normalized"
       normalize_firewall "$family" "$after" "$raw/$family.after.normalized"
       before="$raw/$family.before.normalized" after="$raw/$family.after.normalized"
-      if diff -u "$before" "$after" > "$raw/$family.diff"; then
-        record "FIREWALL_${family}_AFTER_TEST_CLEANUP=UNCHANGED"
+      if compare_files "$before" "$after" "$raw/$family.diff"; then
+        record "FIREWALL_${family}_AFTER_TEST_CLEANUP=$diff_result"
+        [[ $diff_result == UNCHANGED ]] || cleanup_rc=1
       else
-        record "FIREWALL_${family}_AFTER_TEST_CLEANUP=CHANGED"
+        record "FIREWALL_${family}_AFTER_TEST_CLEANUP=ERROR"
         cleanup_rc=1
       fi
     done
@@ -170,19 +164,66 @@ cleanup() {
 trap cleanup EXIT
 
 source_matches=$(sudo grep -RIlE 'download\.docker\.com/linux/ubuntu' /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null || true)
+source_reused=0
 if [[ -n $source_matches ]]; then
-  while IFS= read -r path; do
-    [[ -n $path ]] || continue
-    record "DOCKER_APT_EXISTING_SOURCE_PATH=$path"
-    sudo grep -E '^[[:space:]]*(URIs:|Signed-By:|deb[[:space:]])' "$path" | sed -E 's#(https?://)[^/[:space:]]+#\1<repository-host>#g' | while IFS= read -r line; do record "DOCKER_APT_EXISTING_SOURCE_POLICY=$line"; done
-  done <<< "$source_matches"
-  fail 'Existing Docker APT source/Signed-By policy requires owner review; no duplicate source was added.'
+  mapfile -t source_paths <<< "$source_matches"
+  (( ${#source_paths[@]} == 1 )) || fail 'Multiple Docker APT source files found; resolve source conflicts before continuing.'
+  existing_source=${source_paths[0]}
+  [[ -f $existing_source && ! -L $existing_source ]] || fail 'Existing Docker APT source is not a regular file.'
+  if [[ $existing_source == *.sources ]]; then
+    source_fields=$(sudo awk -F: '
+      /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
+      /^[^[:space:]][^:]*:/ { key=$1; value=substr($0, index($0, ":")+1); gsub(/^[[:space:]]+|[[:space:]]+$/, "", value); count[key]++; values[key]=value; next }
+      { bad=1 }
+      END { if (bad) exit 2; for (key in count) { if (count[key] != 1) exit 3; print key "=" values[key] } }
+    ' "$existing_source") || fail 'Existing Docker DEB822 source has unsupported fields or formatting.'
+  elif [[ $existing_source == *.list ]]; then
+    mapfile -t source_lines < <(sudo awk '!/^[[:space:]]*(#|$)/ {print}' "$existing_source")
+    (( ${#source_lines[@]} == 1 )) || fail 'Existing Docker one-line source has multiple active entries.'
+    read -r source_type source_options source_uri source_suite source_component source_extra <<< "${source_lines[0]}"
+    [[ $source_type == deb && $source_options == \[*\] && -z ${source_extra:-} ]] || fail 'Existing Docker one-line source uses unsupported syntax.'
+    source_options=${source_options#[}; source_options=${source_options%]}
+    source_options=${source_options//,/ }
+    source_arch=0; signed_by=
+    for source_option in $source_options; do
+      case $source_option in
+        arch=amd64) (( source_arch == 0 )) || fail 'Duplicate architecture option in Docker source.'; source_arch=1 ;;
+        signed-by=*) [[ -z $signed_by ]] || fail 'Duplicate Signed-By option in Docker source.'; signed_by=${source_option#signed-by=} ;;
+        *) fail 'Existing Docker one-line source has an unapproved option.' ;;
+      esac
+    done
+    (( source_arch == 1 )) || fail 'Existing Docker one-line source must constrain architecture to amd64.'
+    source_fields=$(printf 'Types=deb\nURIs=%s\nSuites=%s\nComponents=%s\nArchitectures=amd64\nSigned-By=%s' "$source_uri" "$source_suite" "$source_component" "$signed_by")
+  else
+    fail 'Existing Docker APT source has an unsupported file format.'
+  fi
+  while IFS='=' read -r field _; do
+    case $field in Types|URIs|Suites|Components|Architectures|Signed-By) ;;
+      *) fail "Existing Docker APT source has an unapproved field: $field" ;;
+    esac
+  done <<< "$source_fields"
+  source_value() { sed -n "s/^$1=//p" <<< "$source_fields"; }
+  [[ $(source_value Types) == deb &&
+     $(source_value URIs) == https://download.docker.com/linux/ubuntu &&
+     $(source_value Suites) == noble &&
+     $(source_value Components) == stable &&
+     $(source_value Architectures) == amd64 ]] || fail 'Existing Docker APT source does not match approved Noble stable amd64 policy.'
+  signed_by=$(source_value Signed-By)
+  [[ -n $signed_by && -f $signed_by && ! -L $signed_by ]] || fail 'Existing Docker APT source has no regular Signed-By keyring.'
+  existing_key_metadata=$(gpg --batch --show-keys --with-colons "$signed_by")
+  existing_key_count=$(awk -F: '$1 == "pub" {count++} END {print count+0}' <<< "$existing_key_metadata")
+  existing_fingerprint=$(awk -F: '$1 == "fpr" {print toupper($10); exit}' <<< "$existing_key_metadata")
+  [[ $existing_key_count == 1 && $existing_fingerprint == 9DC858229FC7DD38854AE2D88D81803C0EBFCD88 ]] || fail 'Existing Docker source keyring must contain only the approved Docker signing key.'
+  source_reused=1
+  record "DOCKER_APT_EXISTING_SOURCE=REUSED PATH=$existing_source KEYRING=$signed_by"
+else
+  record 'DOCKER_APT_EXISTING_SOURCE=NONE'
+  record 'DOCKER_APT_SIGNED_BY_POLICY=Dedicated keyring; no global key added'
+  sudo install -d -m 0755 /etc/apt/keyrings
+  [[ ! -e $docker_source && ! -e $docker_keyring_system ]] || fail 'Temporary Docker APT paths already exist.'
+  curl --fail --silent --show-error --location https://download.docker.com/linux/ubuntu/gpg -o "$docker_key"
 fi
-record 'DOCKER_APT_EXISTING_SOURCE=NONE'
-record 'DOCKER_APT_SIGNED_BY_POLICY=Dedicated keyring; no global key added'
-sudo install -d -m 0755 /etc/apt/keyrings
-[[ ! -e $docker_source && ! -e $docker_keyring_system ]] || fail 'Temporary Docker APT paths already exist.'
-curl --fail --silent --show-error --location https://download.docker.com/linux/ubuntu/gpg -o "$docker_key"
+if (( source_reused == 0 )); then
 key_metadata=$(gpg --batch --show-keys --with-colons "$docker_key")
 primary_key_count=$(printf '%s\n' "$key_metadata" | awk -F: '$1 == "pub" {count++} END {print count+0}')
 fingerprint=$(printf '%s\n' "$key_metadata" | awk -F: '$1 == "fpr" {print toupper($10); exit}')
@@ -194,6 +235,7 @@ created_apt_keyring=1
 sudo install -m 0644 "$docker_keyring" "$docker_keyring_system"
 created_apt_source=1
 printf 'Types: deb\nURIs: https://download.docker.com/linux/ubuntu\nSuites: noble\nComponents: stable\nArchitectures: amd64\nSigned-By: %s\n' "$docker_keyring_system" | sudo tee "$docker_source" >/dev/null
+fi
 sudo apt-get update
 
 packages=(docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin)
@@ -205,15 +247,7 @@ for package in "${packages[@]}"; do
   policy=$(apt-cache policy "$package")
   candidate=$(awk '$1 == "Candidate:" {print $2; exit}' <<< "$policy")
   [[ -n $candidate && $candidate != '(none)' ]] || fail "No signed-repository candidate for $package."
-  candidate_origins=$(awk -v candidate="$candidate" '
-    {
-      line=$0; sub(/^[[:space:]]+/, "", line)
-      if (line ~ /^\*\*\*/) { sub(/^\*\*\*[[:space:]]+/, "", line); split(line, fields, /[[:space:]]+/); in_candidate=(fields[1] == candidate); next }
-      split(line, fields, /[[:space:]]+/)
-      if (fields[1] == candidate && fields[2] ~ /^[0-9]+$/) { in_candidate=1; next }
-      if (in_candidate && line ~ /^[0-9]+[[:space:]]+https?:\/\//) print line
-    }
-  ' <<< "$policy")
+  candidate_origins=$(candidate_origins "$policy" "$candidate")
   [[ $candidate_origins =~ ^[0-9]+[[:space:]]+https://download\.docker\.com/linux/ubuntu[[:space:]]+noble/stable[[:space:]]+amd64[[:space:]]+Packages$ ]] || fail "Candidate $package=$candidate is not uniquely from Docker's approved Noble stable amd64 index."
   candidates[$package]=$candidate
   versions+=("$package=$candidate")
@@ -279,15 +313,35 @@ for snapshot in sysctls services listeners; do
     record "DOCKER_INSTALL_${snapshot^^}=CHANGED"
   fi
 done
-changed_package_count=$(diff -U0 "$raw/packages.before" "$raw/packages.postinstall" | awk '/^[+-][^+-]/ {count++} END {print count+0}')
+if compare_files "$raw/packages.before" "$raw/packages.postinstall" "$raw/packages.diff"; then
+  if [[ $diff_result == UNCHANGED ]]; then
+    changed_package_count=0
+  else
+    changed_package_count=$(awk '/^[+-][^+-]/ {count++} END {print count+0}' "$raw/packages.diff")
+  fi
+else
+  fail 'Package manifest diff failed.'
+fi
 record "DOCKER_INSTALL_PACKAGE_MANIFEST_DIFF_LINES=$changed_package_count"
 record 'DOCKER_EXACT_PACKAGE_INSTALL=PASS (disposable hosted runner; runner destruction is rollback boundary)'
 
 docker_local info > "$raw/docker-info.txt"
 grep -E '^[[:space:]]*(Docker Root Dir|Storage Driver|IPv4 Forwarding|IPv6|Firewall Backend|Experimental):' "$raw/docker-info.txt" | sed -E 's/^[[:space:]]*//' | while IFS= read -r line; do record "DOCKER_INFO=$line"; done
+daemon_pid=$(systemctl show --property=MainPID --value docker)
+[[ $daemon_pid =~ ^[1-9][0-9]*$ ]] || fail 'Could not identify the active Docker daemon process.'
+tr '\0' ' ' < "/proc/$daemon_pid/cmdline" > "$raw/docker-daemon-argv.txt"
+daemon_network_args=$(grep -oE -- '--(iptables|ip6tables)(=[^ ]+)?|--allow-direct-routing(=[^ ]+)?' "$raw/docker-daemon-argv.txt" || true)
+record "DOCKER_DAEMON_NETWORK_ARGUMENTS=${daemon_network_args:-DEFAULTS}"
+if [[ $daemon_network_args == *'--iptables=false'* || $daemon_network_args == *'--ip6tables=false'* || $daemon_network_args =~ (^|[[:space:]])--allow-direct-routing(=true)?($|[[:space:]]) ]]; then
+  fail 'Docker daemon startup arguments weaken network filtering or enable direct routing.'
+fi
+docker_local network inspect bridge > "$raw/docker-default-bridge.json"
+jq -ce '.[0] | {Name, Driver, EnableIPv6, Internal, Options, IPAM: .IPAM.Config}' "$raw/docker-default-bridge.json" > "$raw/docker-default-bridge-summary.json" || fail 'Docker default bridge configuration is unavailable.'
+jq -e '.[0] as $net | $net.Driver == "bridge" and (($net.Options["com.docker.network.bridge.gateway_mode_ipv4"] // "nat") | IN("routed", "nat-unprotected") | not) and (($net.Options["com.docker.network.bridge.gateway_mode_ipv6"] // "nat") | IN("routed", "nat-unprotected") | not)' "$raw/docker-default-bridge.json" >/dev/null || fail 'Docker default bridge uses an unsupported or unprotected gateway mode.'
+cat "$raw/docker-default-bridge-summary.json" | tee "$raw/docker-network-mode.txt"
 if sudo test -f /etc/docker/daemon.json; then
-  sudo jq '{"iptables": .iptables, "ip6tables": .ip6tables, "allow-direct-routing": .["allow-direct-routing"], "ipv6": .ipv6, "fixed-cidr-v6": .["fixed-cidr-v6"], "firewall-backend": .["firewall-backend"]}' /etc/docker/daemon.json > "$raw/docker-daemon-network-settings.json" || fail 'Docker daemon JSON settings are invalid.'
-  jq -e '(.iptables // true) != false and (.ip6tables // true) != false and (.["allow-direct-routing"] // false) == false' "$raw/docker-daemon-network-settings.json" >/dev/null || fail 'Docker daemon disables firewall rules or enables direct routing.'
+  sudo jq 'if type == "object" then to_entries | map(select(.key as $key | ["iptables", "ip6tables", "allow-direct-routing", "ipv6", "fixed-cidr-v6", "firewall-backend"] | index($key))) | from_entries else error("daemon config must be an object") end' /etc/docker/daemon.json > "$raw/docker-daemon-network-settings.json" || fail 'Docker daemon JSON settings are invalid.'
+  validate_daemon_network_settings "$raw/docker-daemon-network-settings.json" || fail 'Docker daemon disables firewall rules, enables direct routing, or has invalid network settings.'
   record 'DOCKER_DAEMON_NETWORK_SETTINGS=RECORDED_AND_SAFE'
 else
   printf '{}\n' > "$raw/docker-daemon-network-settings.json"
@@ -347,17 +401,18 @@ docker_local inspect --format '{{json .HostConfig.PortBindings}}' "$mock_contain
 non_loopback_v4=0
 while IFS= read -r host_ip; do
   [[ -n $host_ip ]] || continue
-  if curl --fail --silent --show-error --connect-timeout 2 --max-time 3 "http://$host_ip:$mock_port/health" >/dev/null 2>&1; then fail 'Loopback service is reachable on a non-loopback host address.'; fi
+  if curl --silent --show-error --noproxy '*' --connect-timeout 2 --max-time 3 "http://$host_ip:$mock_port/health" -o /dev/null 2>/dev/null; then fail 'Loopback service is reachable on a non-loopback host address.'; fi
   non_loopback_v4=$((non_loopback_v4 + 1))
 done < <(ip -o -4 addr show scope global | awk '{split($4,address,"/");print address[1]}')
 (( non_loopback_v4 > 0 )) || fail 'No non-loopback IPv4 address was available for the exposure test.'
 non_loopback_v6=0
 while IFS= read -r host_ip; do
   [[ -n $host_ip ]] || continue
-  if curl --fail --silent --show-error --connect-timeout 2 --max-time 3 "http://[$host_ip]:$mock_port/health" >/dev/null 2>&1; then fail 'Loopback service is reachable on a non-loopback IPv6 host address.'; fi
+  if curl --silent --show-error --noproxy '*' --connect-timeout 2 --max-time 3 "http://[$host_ip]:$mock_port/health" -o /dev/null 2>/dev/null; then fail 'Loopback service is reachable on a non-loopback IPv6 host address.'; fi
   non_loopback_v6=$((non_loopback_v6 + 1))
 done < <(ip -o -6 addr show scope global | awk '{split($4,address,"/");print address[1]}')
-record "LOOPBACK_PUBLISH_NON_LOOPBACK_DENIED=PASS IPV4_PROBES=$non_loopback_v4 IPV6_PROBES=$non_loopback_v6 (runner-local probes; not an Internet scan)"
+(( non_loopback_v4 > 0 )) && record "LOOPBACK_PUBLISH_IPV4_NON_LOOPBACK=NOT_REACHABLE PROBES=$non_loopback_v4" || fail 'No non-loopback IPv4 address was available for the exposure test.'
+if (( non_loopback_v6 > 0 )); then record "LOOPBACK_PUBLISH_IPV6_NON_LOOPBACK=NOT_REACHABLE PROBES=$non_loopback_v6"; else record 'LOOPBACK_PUBLISH_IPV6_NON_LOOPBACK=NOT_OBSERVED PROBES=0'; fi
 docker_local rm -f "$mock_container" >/dev/null
 mock_container=
 docker_local network rm "$mock_network" >/dev/null
@@ -403,7 +458,7 @@ rmdir -- "$state"
 record 'COMPOSE_POSTGRES_INTERNAL_NO_HOST_PORT_AND_API_MOCK_SMOKE=PASS'
 
 bash "$here/persistence-acceptance.sh" "$pg_image" "$RUNNER_TEMP/deploy-01c/lifecycle"
-record 'PERSISTENCE_BACKUP_RESTORE_AND_LOG_RETENTION=PASS'
+record 'PERSISTENCE_BACKUP_RESTORE_AND_LOG_MAINTENANCE=PASS'
 
 tests_complete=1
 record 'ALL_REQUIRED_TESTS=PASS'

@@ -14,6 +14,7 @@ readonly restored="$root/restored"
 readonly app_port=39129
 readonly restore_port=39130
 readonly expected_revision=6132c5d8cb5d95e28a6444af4def7da780c2776f
+readonly bun_image=oven/bun:1.4.4@sha256:1d22548f177f4ff38e0c15baa3c2c46c6c2060ba2d1bc573bb4720b407548f1d
 
 record() { printf '%s\n' "$*"; }
 fail() { record "FAIL: $*"; exit 1; }
@@ -48,6 +49,8 @@ finish() {
   set +e
   cleanup_state "$original" || cleanup_rc=1
   cleanup_state "$restored" || cleanup_rc=1
+  rm -f -- "$root/root-credentials.json" || cleanup_rc=1
+  [[ ! -e $root/root-credentials.json ]] || cleanup_rc=1
   rmdir -- "$root" 2>/dev/null || cleanup_rc=1
   if (( cleanup_rc == 0 )); then record 'LIFECYCLE_RESOURCE_CLEANUP=PASS'; else record 'LIFECYCLE_RESOURCE_CLEANUP=FAIL'; fi
   if (( rc == 0 && cleanup_rc == 0 )); then record 'PERSISTENCE_ACCEPTANCE=PASS'; else record "PERSISTENCE_ACCEPTANCE=FAIL EXIT=$rc CLEANUP_EXIT=$cleanup_rc"; (( rc != 0 )) || rc=1; fi
@@ -63,6 +66,21 @@ compose_state() {
   docker_local compose --env-file "$state/.env" -p "$project" -f "$here/compose.yml" "$@"
 }
 
+run_root_acceptance() {
+  local state=$1 mode=$2 project output
+  project=$(state_project "$state")
+  output="$root/root-credentials.json"
+  if [[ $mode == initialize ]]; then
+    docker_local run --rm --network "${project}_edge" --read-only --cap-drop ALL --security-opt no-new-privileges \
+      -v "$here/smoke.mjs:/fixture/smoke.mjs:ro" "$bun_image" bun /fixture/smoke.mjs initialize-root > "$output"
+    chmod 600 "$output"
+  else
+    docker_local run --rm --network "${project}_edge" --read-only --cap-drop ALL --security-opt no-new-privileges \
+      -v "$here/smoke.mjs:/fixture/smoke.mjs:ro" -v "$output:/credentials/root.json:ro" \
+      "$bun_image" bun /fixture/smoke.mjs login-existing /credentials/root.json >/dev/null
+  fi
+}
+
 bash "$manager" init "$original" "$pg_image" "$app_port"
 bash "$manager" start "$original"
 for attempt in {1..60}; do
@@ -71,6 +89,8 @@ for attempt in {1..60}; do
   sleep 2
 done
 jq -e '.success == true and .data.register_enabled == false' "$root/status.json" >/dev/null || fail 'Original app registration is not closed.'
+run_root_acceptance "$original" initialize
+record 'SYNTHETIC_ROOT_INITIALIZATION_AND_LOGIN=PASS'
 
 marker=$(openssl rand -hex 16)
 marker_sql="CREATE TABLE IF NOT EXISTS deploy_acceptance_marker (value text PRIMARY KEY); INSERT INTO deploy_acceptance_marker(value) VALUES ('$marker') ON CONFLICT DO NOTHING;"
@@ -98,6 +118,15 @@ file_marker=$(docker_local run --rm --network none --read-only --cap-drop ALL --
 record 'PERSISTENT_DATA_AFTER_APP_CONTAINER_RECREATION=PASS'
 
 bash "$manager" stop-app "$original"
+compose_state "$original" stop db >/dev/null
+compose_state "$original" rm -f db >/dev/null
+compose_state "$original" up -d --no-deps --wait --wait-timeout 120 db
+bash "$manager" start "$original"
+recreated_db_marker=$(compose_state "$original" exec -T db sh -eu -c 'export PGPASSWORD="$SUANJIE_DB_PASSWORD"; exec psql -X -w -h 127.0.0.1 -U suanjie -d suanjie -Atqc "SELECT value FROM deploy_acceptance_marker"')
+[[ $recreated_db_marker == "$marker" ]] || fail 'Database marker did not survive PostgreSQL container recreation.'
+record 'POSTGRES_DATA_AFTER_CONTAINER_RECREATION=PASS'
+
+bash "$manager" stop-app "$original"
 backup_output=$(bash "$manager" backup "$original")
 backup_path=$(sed -n 's/^Backup complete: \(.*\) (contains secrets; encrypt before transfer)$/\1/p' <<< "$backup_output")
 [[ -n $backup_path && -d $backup_path && ! -L $backup_path ]] || fail 'Backup directory was not created.'
@@ -119,9 +148,12 @@ for attempt in {1..60}; do
   sleep 2
 done
 jq -e '.success == true and .data.register_enabled == false' "$root/restored-status.json" >/dev/null || fail 'Restored app registration is not closed.'
+run_root_acceptance "$restored" login
+record 'RESTORED_ROOT_LOGIN_AND_PRIVATE_ACCESS_FLAGS=PASS'
 [[ $(docker_local volume inspect --format '{{.Name}} {{.Mountpoint}}' "$app_volume" "$db_volume" | sort) == "$original_volume_snapshot" ]] || fail 'Restore modified original volumes.'
 record 'MANAGE_BACKUP_RESTORE_NEW_PROJECT_NEW_VOLUMES_AND_SYNTHETIC_DATA=PASS'
 
+bash "$manager" stop-app "$restored"
 docker_local run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
   -v "$restored_app_volume:/data" --entrypoint /bin/bash "$pg_image" -eu -c '
     mkdir -p /data/logs
@@ -129,6 +161,7 @@ docker_local run --rm --network none --read-only --cap-drop ALL --security-opt n
     touch -d "31 days ago" /data/logs/expired.log
     printf recent > /data/logs/recent.log
     truncate -s 220200960 /data/logs/oversized.log
+    touch -d "2 days ago" /data/logs/oversized.log
   '
 bash "$manager" prune-logs "$restored"
 docker_local run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
@@ -137,4 +170,4 @@ docker_local run --rm --network none --read-only --cap-drop ALL --security-opt n
     bytes=$(du -sb /data/logs | cut -f1)
     (( bytes <= 209715200 ))
   '
-record 'PERSISTENT_LOG_RETENTION_30D_AND_200MIB_CAP=PASS'
+record 'PERSISTENT_LOG_MAINTENANCE_30D_AND_200MIB=PASS (manual; not a continuous quota)'

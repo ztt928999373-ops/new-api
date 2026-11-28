@@ -8,7 +8,6 @@ readonly max_bytes=209715200
 
 [[ -d $log_dir && ! -L $log_dir ]] || { echo 'Expected a real /data/logs directory.' >&2; exit 1; }
 [[ $(realpath -e -- "$log_dir") == "$log_dir" ]] || { echo 'Refusing unexpected log path.' >&2; exit 1; }
-
 expired_count=$(find "$log_dir" -xdev -type f -mmin "+$max_age_minutes" -printf x | wc -c)
 find "$log_dir" -xdev -type f -mmin "+$max_age_minutes" -delete
 
@@ -26,5 +25,5 @@ if (( bytes > max_bytes )); then
 fi
 
 (( bytes <= max_bytes )) || { echo 'Log directory exceeds the 200 MiB cap after pruning.' >&2; exit 1; }
-printf 'LOG_RETENTION=PASS expired_files=%s size_pruned_files=%s bytes=%s max_age_days=30 max_bytes=%s\n' \
+printf 'LOG_MAINTENANCE=PASS expired_files=%s size_pruned_files=%s bytes=%s max_age_days=30 max_bytes=%s (manual; not a continuous quota)\n' \
   "$expired_count" "$removed_for_size" "$bytes" "$max_bytes"

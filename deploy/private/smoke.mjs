@@ -1,5 +1,6 @@
 // Disposable fixture only, reachable solely on the internal Compose smoke network.
 import { constants, publicEncrypt, randomBytes } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 
 const model = 'gpt-4o-mini'; // Existing gateway price; no pricing mutation.
 const upstreamKey = 'suanjie-synthetic-only-not-a-provider-key';
@@ -22,6 +23,22 @@ if (process.argv[2] === 'mock') {
     return Response.json({ id: 'chatcmpl-suanjie-smoke', object: 'chat.completion', created: 1700000000, model, usage,
       choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: answer } }] });
   } });
+} else if (process.argv[2] === 'initialize-root') {
+  try {
+    console.log(JSON.stringify(await initializeRoot()));
+  } catch {
+    console.error('FAIL: synthetic Root initialization; response bodies and raw errors are omitted.');
+    process.exitCode = 1;
+  }
+} else if (process.argv[2] === 'login-existing') {
+  try {
+    const credentials = JSON.parse(await readFile(process.argv[3], 'utf8'));
+    await verifyExistingRoot(credentials);
+    console.log('PASS: restored Root login; registration and top-up remain closed');
+  } catch {
+    console.error('FAIL: restored Root login or private access flags; credentials and response bodies are omitted.');
+    process.exitCode = 1;
+  }
 } else if (process.argv[2] === 'verify') {
   let stage = 'status';
   try {
@@ -48,6 +65,44 @@ async function request(path, { body, bearer, accepted = [200] } = {}) {
   });
   requireCondition(accepted.includes(res.status));
   return res.json();
+}
+
+async function loginRoot(username, password) {
+  const { data: key, success } = await request('/api/user/login/encryption-key');
+  requireCondition(success === true && key?.enabled === true && typeof key.kid === 'string');
+  const encrypted = publicEncrypt({ key: key.public_key, oaepHash: 'sha256', padding: constants.RSA_PKCS1_OAEP_PADDING }, Buffer.from(password));
+  const login = await request('/api/user/login', { body: { username, password_encrypted: encrypted.toString('base64'), encryption_key_id: key.kid } });
+  requireCondition(login.success === true && typeof login.data?.access_token === 'string' && login.data.access_token.length > 0);
+  const bearer = login.data.access_token;
+  const who = await request('/api/user/self', { bearer });
+  requireCondition(who.success === true && who.data?.username === username && who.data?.role === 100);
+  return bearer;
+}
+
+async function initializeRoot() {
+  const health = await request('/api/status');
+  const initial = await request('/api/setup');
+  requireCondition(health.success === true && health.data.register_enabled === false &&
+    initial.success === true && initial.data.status === false && initial.data.root_init === false && initial.data.database_type === 'postgres');
+  const username = 'persist-root';
+  const password = randomBytes(18).toString('hex');
+  const setup = { username, password, confirmPassword: password, SelfUseModeEnabled: false, DemoSiteEnabled: false };
+  requireCondition((await request('/api/setup', { body: setup })).success === true);
+  requireCondition((await request('/api/setup', { body: setup })).success === false);
+  await loginRoot(username, password);
+  return { username, password };
+}
+
+async function verifyExistingRoot(credentials) {
+  requireCondition(typeof credentials?.username === 'string' && typeof credentials?.password === 'string');
+  const bearer = await loginRoot(credentials.username, credentials.password);
+  const health = await request('/api/status');
+  requireCondition(health.success === true && health.data.register_enabled === false);
+  const registration = await request('/api/user/register', { body: { username: 'restore-denied', password: 'synthetic-invalid-registration-password', email: 'restore-denied@example.invalid' } });
+  requireCondition(registration.success === false);
+  const topup = await request('/api/user/self/topup/info', { bearer });
+  requireCondition(topup.success === true && topup.data?.payment_compliance_confirmed === false &&
+    ['online', 'stripe', 'creem', 'waffo', 'waffo_pancake'].every(name => topup.data[`enable_${name}_topup`] === false));
 }
 
 async function mockCount() {
