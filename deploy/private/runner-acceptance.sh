@@ -344,14 +344,20 @@ for attempt in {1..30}; do
   sleep 1
 done
 docker_local inspect --format '{{json .HostConfig.PortBindings}}' "$mock_container" | jq -e '.["8080/tcp"][0].HostIp == "127.0.0.1"' >/dev/null || fail 'Mock port is not bound exclusively to host loopback.'
-non_loopback_tested=0
+non_loopback_v4=0
 while IFS= read -r host_ip; do
   [[ -n $host_ip ]] || continue
   if curl --fail --silent --show-error --connect-timeout 2 --max-time 3 "http://$host_ip:$mock_port/health" >/dev/null 2>&1; then fail 'Loopback service is reachable on a non-loopback host address.'; fi
-  non_loopback_tested=1
+  non_loopback_v4=$((non_loopback_v4 + 1))
 done < <(ip -o -4 addr show scope global | awk '{split($4,address,"/");print address[1]}')
-(( non_loopback_tested == 1 )) || fail 'No non-loopback IPv4 address was available for the exposure test.'
-record 'LOOPBACK_PUBLISH_REACHABLE_AND_NON_LOOPBACK_DENIED=PASS (runner-local probes; not an Internet scan)'
+(( non_loopback_v4 > 0 )) || fail 'No non-loopback IPv4 address was available for the exposure test.'
+non_loopback_v6=0
+while IFS= read -r host_ip; do
+  [[ -n $host_ip ]] || continue
+  if curl --fail --silent --show-error --connect-timeout 2 --max-time 3 "http://[$host_ip]:$mock_port/health" >/dev/null 2>&1; then fail 'Loopback service is reachable on a non-loopback IPv6 host address.'; fi
+  non_loopback_v6=$((non_loopback_v6 + 1))
+done < <(ip -o -6 addr show scope global | awk '{split($4,address,"/");print address[1]}')
+record "LOOPBACK_PUBLISH_NON_LOOPBACK_DENIED=PASS IPV4_PROBES=$non_loopback_v4 IPV6_PROBES=$non_loopback_v6 (runner-local probes; not an Internet scan)"
 docker_local rm -f "$mock_container" >/dev/null
 mock_container=
 docker_local network rm "$mock_network" >/dev/null
