@@ -1,0 +1,70 @@
+name: DEPLOY-01C hosted Linux acceptance
+
+on:
+  pull_request:
+    branches: [product/v1]
+    types: [labeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-01c-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  hosted-ubuntu-acceptance:
+    if: >-
+      github.repository == 'ztt928999373-ops/new-api' &&
+      github.event.pull_request.base.ref == 'product/v1' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.head_ref == 'codex/deploy-01c-actions' &&
+      github.actor == 'ztt928999373-ops' &&
+      github.event.action == 'labeled' &&
+      github.event.label.name == 'deploy-01c-run-approved' &&
+      !github.event.pull_request.draft &&
+      contains(github.event.pull_request.labels.*.name, 'deploy-01c-run-approved')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout this reviewed PR commit
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Run hosted-runner and deployment acceptance
+        id: acceptance
+        shell: bash
+        env:
+          ACCEPTANCE_REVISION: ${{ github.event.pull_request.head.sha }}
+        run: bash deploy/private/runner-acceptance.sh
+
+      - name: Verify final report and checksum
+        if: always()
+        shell: bash
+        run: |
+          report="$RUNNER_TEMP/deploy-01c/report.txt"
+          checksum="$RUNNER_TEMP/deploy-01c/report.sha256"
+          [[ -s $report && -s $checksum ]] || { echo 'Final report or checksum is missing.' >&2; exit 1; }
+          (cd "$(dirname "$report")" && sha256sum --check "$(basename "$checksum")")
+          if [[ '${{ steps.acceptance.outcome }}' == success ]]; then
+            grep -qx 'ACCEPTANCE=PASS' "$report"
+          else
+            ! grep -qx 'ACCEPTANCE=PASS' "$report"
+          fi
+
+      - name: Upload sanitized acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: deploy-01c-${{ github.event.pull_request.head.sha }}
+          path: |
+            ${{ runner.temp }}/deploy-01c/report.txt
+            ${{ runner.temp }}/deploy-01c/report.sha256
+          if-no-files-found: error
+          retention-days: 1

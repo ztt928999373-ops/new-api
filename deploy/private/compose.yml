@@ -1,0 +1,89 @@
+# Only use with manage.sh; never use the repository's example Compose on this host.
+services:
+  app:
+    image: suanjie-api:sha-6132c5d8cb5d95e28a6444af4def7da780c2776f
+    platform: linux/amd64
+    pull_policy: never
+    restart: unless-stopped
+    command: ['--log-dir', '/data/logs']
+    ports: ['127.0.0.1:${PRIVATE_PORT:?Set PRIVATE_PORT}:3000']
+    environment:
+      SQL_DSN: postgresql://suanjie:${PRIVATE_DB_PASSWORD:?Missing app database password}@db:5432/suanjie?sslmode=disable
+      SESSION_SECRET: ${PRIVATE_SESSION_SECRET:?Missing session secret}
+      CRYPTO_SECRET: ${PRIVATE_CRYPTO_SECRET:?Missing crypto secret}
+      LOG_SQL_DSN: ''
+      REDIS_CONN_STRING: ''
+      BATCH_UPDATE_ENABLED: 'false'
+      MEMORY_CACHE_ENABLED: 'false'
+      BIND_ADDRESS: 0.0.0.0
+      PORT: '3000'
+      TRUSTED_PROXIES: none
+      SESSION_COOKIE_SECURE: 'false' # HTTP only inside SSH; do not expose via a proxy.
+      SESSION_COOKIE_TRUSTED_URL: ''
+      PASSWORD_LOGIN_ENCRYPTION_ENABLED: 'true'
+      SUPPLIER_CREDENTIAL_KEYRING_PATH: ''
+      TOTP_KEY_DIRECTORY: ''
+      DEBUG: 'false'
+      ENABLE_PPROF: 'false'
+      TLS_INSECURE_SKIP_VERIFY: 'false'
+      TZ: Asia/Shanghai
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    tmpfs: ['/tmp:rw,noexec,nosuid,nodev,mode=1777,size=128m']
+    volumes: [app-data:/data]
+    networks: [database, edge]
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -q -T 4 -O - http://127.0.0.1:3000/api/status | grep -q ''"success":true''']
+      start_period: 60s
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    logging: &bounded-logs
+      driver: json-file
+      options: {max-size: '10m', max-file: '3'}
+  db:
+    image: ${PRIVATE_POSTGRES_IMAGE:?Pin an official PostgreSQL 17 digest}
+    command: ['postgres', '-c', 'log_min_error_statement=panic']
+    platform: linux/amd64
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: suanjie
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${PRIVATE_DB_ADMIN_PASSWORD:?Missing database bootstrap password}
+      POSTGRES_INITDB_ARGS: '--auth-host=scram-sha-256 --auth-local=scram-sha-256'
+      SUANJIE_DB_PASSWORD: ${PRIVATE_DB_PASSWORD:?Missing app database password}
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      - type: bind
+        source: ./init-db.sql
+        target: /docker-entrypoint-initdb.d/10-suanjie.sql
+        read_only: true
+        bind:
+          create_host_path: false
+    networks: [database]
+    security_opt: ['no-new-privileges:true']
+    healthcheck:
+      # TCP targets the final server (not the entrypoint's temporary socket-only server).
+      test: ['CMD-SHELL', 'PGPASSWORD="$$SUANJIE_DB_PASSWORD" psql -X -w -h 127.0.0.1 -U suanjie -d suanjie -Atqc "SELECT 1" | grep -qx 1']
+      start_period: 30s
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    logging: *bounded-logs
+volumes:
+  pg-data:
+  app-data:
+networks:
+  database:
+    internal: true
+    enable_ipv6: false
+    driver_opts:
+      com.docker.network.bridge.gateway_mode_ipv4: isolated
+  edge:
+    enable_ipv6: false
+    driver_opts:
+      com.docker.network.bridge.gateway_mode_ipv4: nat

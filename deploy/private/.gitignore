@@ -1,0 +1,5 @@
+# Persistent state belongs in an owner-only directory outside this checkout.
+.private/
+.env
+.env.*
+backups/

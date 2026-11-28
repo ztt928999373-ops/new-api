@@ -1,0 +1,24 @@
+# Synthetic acceptance only: no host port, no external route, no shared state.
+services:
+  app:
+    ports: !reset []
+    networks: !override [database]
+    restart: 'no'
+  db:
+    restart: 'no'
+  mock:
+    image: oven/bun:1.4.4@sha256:1d22548f177f4ff38e0c15baa3c2c46c6c2060ba2d1bc573bb4720b407548f1d
+    platform: linux/amd64
+    user: '65534:65534'
+    entrypoint: ['bun']
+    command: ['/fixture/smoke.mjs', 'mock']
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    volumes: [./smoke.mjs:/fixture/smoke.mjs:ro]
+    networks: [database]
+    healthcheck:
+      test: ['CMD', 'bun', '-e', 'if (!(await fetch("http://127.0.0.1:8080/health")).ok) process.exit(1)']
+      interval: 3s
+      timeout: 4s
+      retries: 10
