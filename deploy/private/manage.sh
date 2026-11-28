@@ -175,8 +175,8 @@ case $action in
         verify_image "$image"
         docker_local image inspect --format 'APP_IMAGE_ID={{.Id}}' "$image"
         exit 0 ;;
-    init|smoke|start|status|stop|stop-app|restart|backup|restore) ;;
-    *) die 'Usage: manage.sh build | import GHCR_DIGEST | init STATE PG_DIGEST [PORT] | smoke NEW_STATE PG_DIGEST | start/status/stop/stop-app/restart STATE | backup STATE | restore NEW_STATE TRUSTED_BACKUP [PORT]' ;;
+    init|smoke|start|status|stop|stop-app|restart|backup|restore|prune-logs) ;;
+    *) die 'Usage: manage.sh build | import GHCR_DIGEST | init STATE PG_DIGEST [PORT] | smoke NEW_STATE PG_DIGEST | start/status/stop/stop-app/restart/prune-logs STATE | backup STATE | restore NEW_STATE TRUSTED_BACKUP [PORT]' ;;
 esac
 
 [[ ${2:-} == /* ]] || die 'An absolute private state path is required.'
@@ -305,5 +305,13 @@ case $action in
         compose exec -T db sh -eu -c 'export PGPASSWORD="$SUANJIE_DB_PASSWORD"; exec pg_restore -w -h 127.0.0.1 -U suanjie -d suanjie --single-transaction --exit-on-error --no-owner --no-acl' < "$backup/database.dump"
         compose run --no-deps --rm -T --entrypoint tar app -C /data --no-same-owner --no-same-permissions -xf - < "$backup/app-data.tar"
         echo 'Restore loaded into new volumes; app was not started. Verify before switching traffic.'
+        ;;
+    prune-logs)
+        docker_local image inspect "$pg_image" >/dev/null 2>&1 || die 'Pinned PostgreSQL image is not present locally.'
+        docker_local run --rm --pull never --platform linux/amd64 --network none --read-only \
+            --cap-drop ALL --security-opt no-new-privileges \
+            -v "${project}_app-data:/data" \
+            -v "$here/log-retention.sh:/usr/local/bin/log-retention.sh:ro" \
+            --entrypoint /bin/bash "$pg_image" /usr/local/bin/log-retention.sh
         ;;
 esac

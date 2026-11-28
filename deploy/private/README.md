@@ -1,6 +1,6 @@
 # 算介 API：Ubuntu 24.04 单节点私有部署（DEPLOY-02）
 
-**先跑合成验收，再决定是否启动私有实例。** 当前只交付资产，不代表真实镜像构建、容器启动或恢复已通过。应用源码固定为已合并的 `product/v1` 提交 `6132c5d8cb5d95e28a6444af4def7da780c2776f`。本分支只包含部署资产；不使用根目录 Compose、官方应用 `latest`、旧 D3 SQLite 镜像或资金候选版本。
+**先跑合成验收，再决定是否启动私有实例。** 当前只交付资产，不代表真实镜像构建、容器启动或恢复已通过。应用源码固定为已合并的 `product/v1` 提交 `6132c5d8cb5d95e28a6444af4def7da780c2776f`。本部署候选工作在 `codex/deploy-01c-actions` 分支、基于该提交开发；本分支只包含部署资产，不使用根目录 Compose、官方应用 `latest`、旧 D3 SQLite 镜像或资金候选版本。
 
 ## 1. 私有隧道测试与公网生产门禁
 
@@ -55,7 +55,7 @@ sudo docker compose version
 
 ```bash
 # 分支已由所有者发布时：
-git clone --branch codex/deploy-01 https://github.com/ztt928999373-ops/new-api.git ~/suanjie-deploy
+git clone --branch codex/deploy-01c-actions https://github.com/ztt928999373-ops/new-api.git ~/suanjie-deploy
 cd ~/suanjie-deploy
 base=6132c5d8cb5d95e28a6444af4def7da780c2776f
 test "$(git rev-parse "$base^{commit}")" = "$base"
@@ -108,7 +108,7 @@ ssh -N -o StrictHostKeyChecking=yes -o ExitOnForwardFailure=yes \
 
 在该管理机访问 `http://127.0.0.1:13000`，且仅在出现全新设置页时设置唯一 Root 名和密码，关闭演示模式；不要把首次初始化 URL 暴露给其他人。初始化后确认 Root 能登录、公开注册为关、在线充值无支付方式；不确认支付合规、不填收款配置。注册关闭来自基准默认和数据库选项，并非不可修改的门禁；恢复旧数据后尤其要重查。`/api/status` 成功只说明服务健康，不代表登录、支付或对外可用。
 
-当前仅支持可信、单管理员宿主的隧道模式；`SESSION_COOKIE_SECURE=false` **不是公网配置**，SSH 保护远程链路，宿主回环与容器桥仍是本机信任边界。若后续批准域名和 HTTPS，先在私网/VPN入口验证 TLS、`SESSION_COOKIE_SECURE=true`、准确 `SESSION_COOKIE_TRUSTED_URL`、明确可信代理地址、阻断公网 setup 和公网管理，并验证 SSE 代理行为；本模板不启用公网反代。适用参考：OWASP ASVS 5.0.0 V6/V7/V12、Authentication/Session Management Cheat Sheets；此合成验收不宣称全面 ASVS 合规。容器环境可由 Docker 管理员读取，禁止发布 `docker inspect` 全文、展开后的 Compose 或私有日志；禁止 `set -x`。密钥不会写入镜像或 Git。
+当前仅支持可信、单管理员宿主的隧道模式；`SESSION_COOKIE_SECURE=false` **不是公网配置**，SSH 保护远程链路，宿主回环与容器桥仍是本机信任边界。Compose `json-file` 的 `max-size=10m`、`max-file=3` 只约束容器 stdout/stderr；应用写入 `/data/logs` 的持久化文件由 `manage.sh prune-logs` 按30天和200 MiB上限单独清理，不能替代集中式或加密日志导出。若后续批准域名和 HTTPS，先在私网/VPN入口验证 TLS、`SESSION_COOKIE_SECURE=true`、准确 `SESSION_COOKIE_TRUSTED_URL`、明确可信代理地址、阻断公网 setup 和公网管理，并验证 SSE 代理行为；本模板不启用公网反代。适用参考：OWASP ASVS 5.0.0 V6/V7/V12、Authentication/Session Management Cheat Sheets；此合成验收不宣称全面 ASVS 合规。容器环境可由 Docker 管理员读取，禁止发布 `docker inspect` 全文、展开后的 Compose 或私有日志；禁止 `set -x`。密钥不会写入镜像或 Git。
 
 本轮不接入真实供应商、开放注册、充值或收费。受管供应商凭据需要另验 Linux 专用私有 keyring 和数据库记录，不能把 Windows DPAPI 材料复制给 Linux，也不能用旧渠道明文方式绕过。当前基准的 TOTP 运维初始化只支持 SQLite；本 PostgreSQL 配置不启用、不声明支持 TOTP，不用 SQL 伪造 READY。若要开放非隧道管理或接入真实供应商，先单独验收相应能力。
 
@@ -120,6 +120,8 @@ bash deploy/private/manage.sh stop-app "$state"
 bash deploy/private/manage.sh backup "$state"
 # 审阅成功输出并保留对应镜像；按需恢复服务
 bash deploy/private/manage.sh restart "$state"
+# 按审核后的30天/200 MiB策略清理应用持久化日志文件；仅操作该 state 的 app-data 卷
+bash deploy/private/manage.sh prune-logs "$state"
 # 或对两个容器都停机（卷保留）
 # bash deploy/private/manage.sh stop "$state"
 ```

@@ -12,10 +12,6 @@ The job has `contents: read`, no secrets, no package-write permission, no deploy
 
 The repository is public. GitHub documents standard hosted runners as free for public repositories; its current public-repository `ubuntu-24.04` x64 VM specification is 4 vCPU, 16 GB RAM, and 14 GB SSD. The job is capped at 60 minutes and the report artifact is retained for one day. The repository owner's account-level usage and organization-specific policies remain an owner-side check. Runner image and hardware are recorded at runtime because hosted image contents can change.
 
-## Cost and runner baseline
-
-The repository is public. GitHub's standard hosted runners are free for public repositories; this uses only the standard x64 `ubuntu-24.04` runner, not a larger runner. The job is capped at 60 minutes and the report artifact is retained for one day. The repository owner's account-level usage and any organization-specific policy cannot be read by this workflow, so those remain an owner-side billing check. Runner image and hardware are recorded at runtime because hosted image contents can change.
-
 Opening a Draft PR can still start unrelated repository workflows. In particular, the existing `pull_request_target` AI manager may send its configured Telegram PR notification. The new acceptance job itself remains skipped until the owner explicitly adds the approval label to a ready PR.
 
 ## Runtime coverage
@@ -24,7 +20,7 @@ The runner script records the hosted-runner environment, image metadata when exp
 
 It adds Docker's signed Noble APT source in the disposable runner, verifies the currently expected signing-key fingerprint, resolves exact versions of Engine, CLI, containerd, Buildx, and Compose, verifies their candidate source, simulates the exact install, and installs only if APT proposes no package removals. It records firewall rules before and after installation. Docker/network test resources are removed and the final firewall rules are compared with the post-install baseline. The runner is disposable, so destruction (not host package downgrade) is the package and firewall rollback boundary. This distinguishes stock-runner package installation from a clean Ubuntu image install; no claim of a clean-system install is made.
 
-The existing `manage.sh build` builds only source commit `6132c5d8cb5d95e28a6444af4def7da780c2776f`, verifies OCI identity and LICENSE/NOTICE/third-party license file hashes, and does not push an image. The existing `manage.sh smoke` reuses the isolated synthetic PostgreSQL/API-key/mock-model workflow, with a resolved PostgreSQL 17.12 Bookworm digest. It does not call a real model supplier. A separate pinned Bun container verifies loopback-only host publication; an ephemeral unprivileged account checks Docker socket denial.
+The existing `manage.sh build` builds only source commit `6132c5d8cb5d95e28a6444af4def7da780c2776f`, verifies OCI identity and LICENSE/NOTICE/third-party license file hashes, and does not push an image. The existing `manage.sh smoke` reuses the isolated synthetic PostgreSQL/API-key/mock-model workflow, with a resolved PostgreSQL 17.12 Bookworm digest. The lifecycle acceptance also recreates the app container, verifies synthetic PostgreSQL and app-volume markers, runs `manage.sh backup` and `restore` into a new project, and exercises the bounded `/data/logs` retention helper. It does not call a real model supplier. A separate pinned Bun container verifies loopback-only host publication; an ephemeral unprivileged account checks Docker socket denial.
 
 The runner is destroyed after completion. That is the rollback boundary for runner-local package and firewall state; this workflow installs exact reviewed candidates only on that one-use hosted VM, never on the Alibaba server. The app smoke's Compose cleanup removes only its uniquely named synthetic project, network, and volumes. Full firewall snapshots remain private to the runner; the artifact reports only whether rules changed and were stable after cleanup.
 
@@ -32,9 +28,10 @@ The runner is destroyed after completion. That is the rollback boundary for runn
 
 - A clean Ubuntu 24.04 VM with no preinstalled Docker: package installation is not performed on the GitHub runner.
 - Actual rollback of an Engine package upgrade on a clean host.
-- Persistent-volume data survival across recreation, backup/restore, or disaster recovery exercise. The workflow only checks the Compose volume declarations and bounded container log configuration.
+- Production backup encryption, off-host transfer, and disaster recovery remain outside this disposable synthetic check. The workflow verifies only runner-local synthetic volume survival, `manage.sh backup`/`restore` into a new project, and bounded application-file retention.
 - Alibaba Cloud kernel, VirtIO, cloud-agent, IPv6, firewall, and resource behavior.
 - GHCR publication, production deployment, registration/payment readiness, real funds, or real supplier calls.
 - UFW acceptance, which remains DEPLOY-UFW-01; kernel/Retbleed acceptance remains DEPLOY-KERNEL-01.
+- The Compose `json-file` limit bounds stdout/stderr only. Application files under `/data/logs` are persistent volume data and are bounded separately by `manage.sh prune-logs`; this does not provide centralized or encrypted log export.
 
 The result can support a later, separately authorized server Docker installation review only after the workflow passes on the exact reviewed SHA. It cannot substitute for post-install verification on the Alibaba instance.
