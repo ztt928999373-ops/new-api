@@ -235,15 +235,15 @@ while IFS= read -r line; do
   old_version=$(sed -nE 's/^Inst [^ ]+ \[([^]]+)\].*/\1/p' <<< "$line")
   new_version=$(sed -nE 's/^Inst [^ ]+ (\[[^]]+\] )?\(([^ ]+).*/\2/p' <<< "$line")
   [[ -n $new_version ]] || fail "Could not parse simulated version for $package."
+  [[ -v candidates[$package] ]] || fail "Install simulation changes an unapproved package $package; review dependencies before retrying."
   if [[ -n $old_version ]]; then
     dpkg --compare-versions "$new_version" ge "$old_version" || fail "Install simulation downgrades $package."
-    [[ -v candidates[$package] ]] || fail "Install simulation changes installed non-Docker package $package."
   fi
-  if [[ -v candidates[$package] && ${candidates[$package]} != "$new_version" ]]; then fail "Simulated Docker package version differs from its approved candidate: $package."; fi
+  [[ ${candidates[$package]} == "$new_version" ]] || fail "Simulated Docker package version differs from its approved candidate: $package."
   plan_versions[$package]=$new_version
   record "APT_SIMULATED_CHANGE=$package OLD=${old_version:-ABSENT} NEW=$new_version"
 done < "$raw/apt-install-simulation.txt"
-record 'APT_EXACT_VERSION_INSTALL_SIMULATION=PASS (removals, downgrades, and non-target upgrades rejected)'
+record 'APT_EXACT_VERSION_INSTALL_SIMULATION=PASS (removals, downgrades, and all non-target changes rejected)'
 sudo apt-get install -y "${versions[@]}"
 systemctl is-active --quiet docker || fail 'Docker daemon is not active after the exact-version install.'
 systemctl is-active --quiet containerd || fail 'containerd is not active after the exact-version install.'
